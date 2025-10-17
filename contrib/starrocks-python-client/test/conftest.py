@@ -1,4 +1,3 @@
-#! /usr/bin/python3
 # Copyright 2021-present StarRocks, Inc. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,7 +20,7 @@ registry.register("starrocks+pymysql", "starrocks.dialect", "StarRocksDialect")
 registry.register("starrocks", "starrocks.dialect", "StarRocksDialect")
 pytest.register_assert_rewrite("sqlalchemy.testing.assertions")
 
-# from sqlalchemy.testing.plugin.pytestplugin import *
+from sqlalchemy.testing.plugin.pytestplugin import *
 
 # Load StarRocks-specific test helpers and fixtures
-pytest_plugins = ("test.conftest_sr",)
+#pytest_plugins = ("test.conftest_sr",)
