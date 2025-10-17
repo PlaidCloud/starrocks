@@ -120,14 +120,14 @@ class StarRocksTableDefinitionParser(object):
     """
     This parser is responsible for interpreting the raw data returned from
     StarRocks' `information_schema` and `SHOW` commands.
-    
+
     For columns, the base attributes (name, type, nullable, default) are
     parsed here, leveraging the underlying MySQL dialect where possible.
     This dialect-specific implementation adds logic to parse StarRocks-specific
     attributes that are not present in standard MySQL, such as the aggregation
     type on a column (e.g., 'SUM', 'REPLACE', 'KEY'). This is achieved by
     querying `SHOW FULL COLUMNS` and processing the 'Extra' field.
-    
+
     Other standard column attributes are assumed to be handled correctly by
     the base MySQL dialect's reflection mechanisms.
 
@@ -158,6 +158,7 @@ class StarRocksTableDefinitionParser(object):
         table_config: Dict[str, Any],
         columns: List[_DecodingRow],
         column_2_agg_type: Dict[str, str],
+        column_autoinc: dict[str, bool],
         charset: str,
     ) -> ReflectedState:
         """
@@ -174,8 +175,11 @@ class StarRocksTableDefinitionParser(object):
         reflected_table_info = ReflectedState(
             table_name=table.TABLE_NAME,
             columns=[
-                self._parse_column(column=column,
-                    **{ColumnAggInfoKeyWithPrefix.AGG_TYPE: column_2_agg_type.get(column.COLUMN_NAME)})
+                self._parse_column(
+                    column=column,
+                    col_autoinc=column_autoinc,
+                    **{ColumnAggInfoKeyWithPrefix.AGG_TYPE: column_2_agg_type.get(column.COLUMN_NAME)},
+                )
                 for column in columns
             ],
             table_options=self._parse_table_options(
@@ -191,7 +195,7 @@ class StarRocksTableDefinitionParser(object):
         logger.debug(f"reflected table info for table: {table.TABLE_NAME}, info: {reflected_table_info}")
         return reflected_table_info
 
-    def _parse_column(self, column: _DecodingRow, **kwargs: Any) -> dict:
+    def _parse_column(self, column: _DecodingRow, col_autoinc: dict, **kwargs: Any) -> dict:
         """
         Parse column from information_schema.columns table.
         It returns dictionary with column informations expected by sqlalchemy.
@@ -207,20 +211,19 @@ class StarRocksTableDefinitionParser(object):
             A dictionary with column information expected by sqlalchemy.
             It's the same as the `ReflectedColumn` object.
         """
-        computed = {"sqltext": column.GENERATION_EXPRESSION} if column.GENERATION_EXPRESSION else None
         col_info = {
             "name": column.COLUMN_NAME,
             "type": self._parse_column_type(column=column),
             "nullable": column.IS_NULLABLE == "YES",
             "default": column.COLUMN_DEFAULT or None,
-            "autoincrement": None,  # TODO: This is not specified
+            "autoincrement": col_autoinc.get(column.COLUMN_NAME, False),
             "comment": column.COLUMN_COMMENT or None,
             "dialect_options": {
                 k: v for k, v in kwargs.items() if v is not None
             }
         }
-        if computed:
-            col_info["computed"] = computed
+        if column.GENERATION_EXPRESSION is not None:
+            col_info["computed"] = {"sqltext": column.GENERATION_EXPRESSION}
         return col_info
 
     def _parse_column_type(self, column: _DecodingRow) -> Any:
@@ -415,7 +418,7 @@ class StarRocksTableDefinitionParser(object):
             #     raise NotImplementedError(f"Table engine {table_engine} is not supported now.")
             opts[TableInfoKeyWithPrefix.ENGINE] = table_engine.upper()
 
-        if table.TABLE_COMMENT:
+        if table.TABLE_COMMENT and table.TABLE_COMMENT != 'OLAP':
             logger.debug(f"table.TABLE_COMMENT: {table.TABLE_COMMENT}")
             opts[TableInfoKeyWithPrefix.COMMENT] = table.TABLE_COMMENT
 
@@ -457,7 +460,7 @@ class StarRocksTableDefinitionParser(object):
     def parse_view(self, view_row: _DecodingRow, table_row: Optional[_DecodingRow]) -> ReflectedViewState:
         """
         Parses raw reflection data into a structured ReflectedViewState object.
-        
+
         `comment`: The comment is in information_schema.tables, but it's better to fetch it from
         information_schema.views, if it's supported in the future.
 
