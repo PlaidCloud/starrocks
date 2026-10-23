@@ -49,11 +49,14 @@ def _wait_for_mv_creation(inspector: Inspector, mv_name: str, max_retries: int =
 
 
 class ReflectionMaterializedViewsTest(fixtures.TestBase):
-    """Integration tests for StarRocks materialized view reflection from information_schema."""
+    """Integration tests for StarRocks materialized view reflection from information_schema.
+
+    Most tests use SQLAlchemy 2.0's Inspector.clear_cache or a MaterializedView, so they are gated on
+    sqlalchemy_2 one by one; the rest also run on SQLAlchemy 1.4.
+    """
 
     __backend__ = True
     __only_on__ = "starrocks"
-    __requires__ = ("sqlalchemy_2",)
 
     SOURCE_TABLES = ("users", "orders", "orders_part_expr", "products", "`user-table`")
 
@@ -122,6 +125,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
             for table_name in cls.SOURCE_TABLES:
                 connection.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_simple_mv(self, connection):
         """Test reflection of a simple materialized view with basic SELECT statement."""
         mv_name = "test_reflect_simple_mv"
@@ -156,6 +160,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_mv_with_properties(self, connection):
         """Test reflection of a materialized view with properties.
 
@@ -213,6 +218,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_mv_with_colocate_with(self, connection):
         """Reflection must report colocate_with for a colocated materialized view.
 
@@ -267,6 +273,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
             connection.execute(text(f"DROP TABLE IF EXISTS {base_table}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_mv_without_colocate_with(self, connection):
         """An MV with no colocation must not gain a colocate_with property from reflection."""
         mv_name = "test_reflect_mv_no_colocate"
@@ -294,6 +301,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_mv_with_comment(self, connection):
         """Test reflection of a materialized view with comment."""
         mv_name = "test_reflect_mv_with_comment"
@@ -323,6 +331,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_mv_with_aggregation(self, connection):
         """Test reflection of a materialized view with aggregation functions."""
         mv_name = "test_reflect_mv_with_aggregation"
@@ -368,6 +377,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_mv_with_window_functions(self, connection):
         """Test reflection of a materialized view with window functions."""
         mv_name = "test_reflect_mv_with_window"
@@ -409,6 +419,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_mv_with_cte(self, connection):
         """Test reflection of a materialized view with Common Table Expressions (CTEs)."""
         mv_name = "test_reflect_mv_with_cte"
@@ -451,6 +462,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_mv_with_special_chars(self, connection):
         """Test reflection of a materialized view with special characters in identifiers."""
         mv_name = "test_reflect_mv_special_chars"
@@ -491,6 +503,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_multiple_mvs(self, connection):
         """Test reflection of multiple materialized views and get_materialized_view_names functionality."""
         mv_names = ["test_reflect_mv_1", "test_reflect_mv_2", "test_reflect_mv_3"]
@@ -535,6 +548,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
             for mv_name in mv_names:
                 connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_nonexistent_mv(self, connection):
         """Test reflection of a non-existent materialized view returns None."""
 
@@ -549,6 +563,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         with expect_raises(NoSuchTableError):
             Table("nonexistent_mv_12345", MetaData(), autoload_with=connection)
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_mv_case_normalization(self, connection):
         """Test reflection of materialized view properties normalizes case."""
         mv_name = "test_reflect_mv_case_normalization"
@@ -580,6 +595,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_mv_with_complex_join(self, connection):
         """Test reflection of a materialized view with complex joins."""
         mv_name = "test_reflect_mv_complex_join"
@@ -661,6 +677,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     @testing.combinations(
         # It's for CREATE TABLE, not for CREATE MATERIALIZED VIEW. keep it for reference.
         # (
@@ -714,6 +731,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     @testing.combinations(
         ('REFRESH ASYNC START("2025-01-01 00:00:00") EVERY(INTERVAL 1 DAY)', None, 'ASYNC START("2025-01-01 00:00:00") EVERY(INTERVAL 1 DAY)'),
         ("REFRESH ASYNC EVERY(INTERVAL 2 HOUR)", None, "ASYNC EVERY(INTERVAL 2 HOUR)"),
@@ -804,6 +822,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.requires.sqlalchemy_2
     def test_reflect_mv_from_schema_object(self, connection):
         """Tests that a MaterializedView schema object and a reflected MV are equivalent."""
         mv_name = "test_reflect_from_object"
