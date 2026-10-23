@@ -80,6 +80,26 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
         return exclusions.closed()
 
     @property
+    def fk_onupdate(self) -> exclusions.compound:
+        """Alembic: ON UPDATE round-trips through autogenerate; StarRocks has no foreign keys"""
+        return exclusions.closed()
+
+    @property
+    def fk_ondelete_restrict(self) -> exclusions.compound:
+        """Alembic: ON DELETE RESTRICT round-trips through autogenerate; StarRocks has no foreign keys"""
+        return exclusions.closed()
+
+    @property
+    def fk_onupdate_restrict(self) -> exclusions.compound:
+        """Alembic: ON UPDATE RESTRICT round-trips through autogenerate; StarRocks has no foreign keys"""
+        return exclusions.closed()
+
+    @property
+    def fk_ondelete_noaction(self) -> exclusions.compound:
+        """Alembic: ON DELETE NO ACTION round-trips through autogenerate; StarRocks has no foreign keys"""
+        return exclusions.closed()
+
+    @property
     def unique_constraint_reflection(self):
         """target dialect supports reflection of unique constraints"""
         return exclusions.closed()

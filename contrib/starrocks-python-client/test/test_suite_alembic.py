@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https:#www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,33 +21,62 @@ from alembic.testing import suite as alembic_suite
 from alembic.testing.suite import *  # noqa: F403
 from alembic.testing.suite import (
     AutogenerateCommentsTest as _AutogenerateCommentsTest,
-    AutogenerateFKOptionsTest,
+    AutogenerateFKOptionsTest as _AutogenerateFKOptionsTest,
     AutoincrementTest as _AutoincrementTest,
     BackendAlterColumnTest as _BackendAlterColumnTest,
 )
 from sqlalchemy import testing
 from sqlalchemy.testing.fixtures import TestBase
 
+from starrocks.common.defaults import ReflectionTableDefaults
+from starrocks.common.types import SystemRunMode
 
-PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS = testing.fails_on(
-    "starrocks",
+
+def _server_replication_default_differs_from_dialect_default(config: object) -> bool:
+    """Whether the FE's ``default_replication_num`` differs from the default the dialect assumes for its run mode.
+
+    Autogenerate compares a table's reflected ``replication_num`` against the dialect's hard-coded default, so
+    it emits a spurious ``alter_table_properties`` only when the two differ, as on a single-replica cluster.
+    Shared-data clusters are treated as matching: the dialect assumes 1 there, and this has not been checked.
+    """
+    with config.db.connect() as connection:
+        run_mode = connection.dialect.run_mode
+        if run_mode == SystemRunMode.SHARED_DATA:
+            return False
+        configured = connection.exec_driver_sql("ADMIN SHOW FRONTEND CONFIG LIKE 'default_replication_num'").first()
+    return configured[2] != ReflectionTableDefaults.properties(run_mode)["replication_num"]
+
+
+PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS = testing.fails_if(
+    _server_replication_default_differs_from_dialect_default,
     "autogenerate emits alter_table_properties for default.replication_num, comparing against a hard-coded "
     "default instead of the server's (https://github.com/StarRocks/starrocks/pull/80738)",
-)
-MODIFY_DEFAULT_DROPS_TYPE = testing.fails_on(
-    "starrocks", "the dialect renders MODIFY COLUMN ... DEFAULT without the column type, which StarRocks requires"
 )
 RENAME_COMBINED_WITH_MODIFY = testing.fails_on(
     "starrocks", "the dialect combines MODIFY COLUMN with RENAME COLUMN, which StarRocks rejects as conflicting"
 )
-FLOAT_FIRST_COLUMN = testing.skip("starrocks", "StarRocks cannot use FLOAT as a table's first (key) column")
-ONLY_COLUMN_IS_KEY = testing.skip(
-    "starrocks", "the fixture table's only column is its key, which StarRocks cannot make nullable or retype"
+MODIFY_KEY_COLUMN_WITHOUT_KEY = testing.fails_on(
+    "starrocks", "the dialect leaves KEY out of MODIFY COLUMN for a key column, so StarRocks finds no key column left"
 )
-UNQUOTED_DEFAULT = testing.skip("starrocks", "StarRocks accepts only quoted string literals as DEFAULT values")
+FLOAT_FIRST_COLUMN = testing.skip("starrocks", "StarRocks cannot use FLOAT as a table's first (key) column")
+DEFAULT_CANNOT_CHANGE = testing.skip("starrocks", "StarRocks cannot change a column's default value")
+UNQUOTED_DEFAULT = testing.skip(
+    "starrocks",
+    "StarRocks accepts only quoted string literals as DEFAULT values, and cannot change a column's default value",
+)
+NULLABLE_TO_NOT_NULL = testing.skip("starrocks", "StarRocks cannot change a column from nullable to NOT NULL")
 
 
-AutogenerateFKOptionsTest.__requires__ = ("foreign_key_constraint_reflection",)  # upstream gates only some of its tests
+class AutogenerateFKOptionsTest(_AutogenerateFKOptionsTest):
+    """Upstream gates every test but ``test_nochange_ondelete`` on FK reflection, which StarRocks lacks.
+
+    The gate goes on that one test rather than the class: SQLAlchemy 2.0 drops a ``__backend__`` class whose
+    requirements fail without reporting its tests as skipped.
+    """
+
+    test_nochange_ondelete = testing.requires.foreign_key_constraint_reflection(
+        _AutogenerateFKOptionsTest.test_nochange_ondelete
+    )
 
 
 class AutogenerateCommentsTest(_AutogenerateCommentsTest):
@@ -56,7 +85,9 @@ class AutogenerateCommentsTest(_AutogenerateCommentsTest):
     test_alter_column_comment = PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS(
         _AutogenerateCommentsTest.test_alter_column_comment
     )
-    test_alter_table_comment = PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS(_AutogenerateCommentsTest.test_alter_table_comment)
+    test_alter_table_comment = PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS(
+        _AutogenerateCommentsTest.test_alter_table_comment
+    )
     test_existing_column_comment_no_change = PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS(
         _AutogenerateCommentsTest.test_existing_column_comment_no_change
     )
@@ -101,13 +132,13 @@ class AutoincrementTest(_AutoincrementTest):
 
 
 class BackendAlterColumnTest(_BackendAlterColumnTest):
-    test_add_server_default_int = MODIFY_DEFAULT_DROPS_TYPE(_BackendAlterColumnTest.test_add_server_default_int)
+    test_add_server_default_int = DEFAULT_CANNOT_CHANGE(_BackendAlterColumnTest.test_add_server_default_int)
     test_modify_server_default_int = UNQUOTED_DEFAULT(_BackendAlterColumnTest.test_modify_server_default_int)
-    test_modify_non_nullable_to_nullable = ONLY_COLUMN_IS_KEY(
+    test_modify_non_nullable_to_nullable = MODIFY_KEY_COLUMN_WITHOUT_KEY(
         _BackendAlterColumnTest.test_modify_non_nullable_to_nullable
     )
-    test_modify_nullable_to_non = ONLY_COLUMN_IS_KEY(_BackendAlterColumnTest.test_modify_nullable_to_non)
-    test_modify_type_int_str = ONLY_COLUMN_IS_KEY(_BackendAlterColumnTest.test_modify_type_int_str)
+    test_modify_nullable_to_non = NULLABLE_TO_NOT_NULL(_BackendAlterColumnTest.test_modify_nullable_to_non)
+    test_modify_type_int_str = MODIFY_KEY_COLUMN_WITHOUT_KEY(_BackendAlterColumnTest.test_modify_type_int_str)
     test_rename_column = RENAME_COMBINED_WITH_MODIFY(_BackendAlterColumnTest.test_rename_column)
 
 

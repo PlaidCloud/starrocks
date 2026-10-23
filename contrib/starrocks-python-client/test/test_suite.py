@@ -64,7 +64,7 @@ if IS_SQLALCHEMY_2:
 else:
     from sqlalchemy.testing.suite import (
         HasIndexTest,
-        LikeFunctionsTest,
+        LikeFunctionsTest as _LikeFunctionsTest,
         QuotedNameArgumentTest as _QuotedNameArgumentTest,
     )
 
@@ -164,6 +164,8 @@ class StarrocksMogrifyTest(fixtures.TablesTest, AssertsCompiledSQL):
     #     eq_(result.fetchall(), [("d4",)])
 
 class ComponentReflectionTest(_ComponentReflectionTest):
+    """On SQLAlchemy 1.4 ``test_get_indexes`` is gated on ``index_reflection``, as 2.0 already does."""
+
     # Updated to allow tests to run when Starrocks does not support default autoincrement on single primary key columns
     @classmethod
     def define_tables(cls, metadata):
@@ -271,14 +273,14 @@ class ComponentReflectionTest(_ComponentReflectionTest):
             res = self._resolve_names(schema, scope, filter_names, res)
             return res
     else:
-        # SQLAlchemy 2.0 gates these on the requirement, 1.4 does not
         test_get_indexes = testing.requires.index_reflection(_ComponentReflectionTest.test_get_indexes)
 
 
 if not IS_SQLALCHEMY_2:
 
     class QuotedNameArgumentTest(_QuotedNameArgumentTest):
-        # SQLAlchemy 2.0 gates these on the requirements, 1.4 does not
+        """SQLAlchemy 2.0 gates the foreign key and index tests on requirements; 1.4 does not."""
+
         test_get_foreign_keys = testing.requires.foreign_key_constraint_reflection(
             _QuotedNameArgumentTest.test_get_foreign_keys
         )
@@ -472,10 +474,10 @@ class NumericTest(_NumericTest,):
 FLOAT_CAST_SKIPPED = testing.fails_on(
     "starrocks", "the dialect inherits MySQL's version check and skips CAST to FLOAT, which StarRocks supports"
 )
-DECIMAL_SCALE_ABOVE_38 = testing.fails_on(
+DECIMAL_SCALE_ABOVE_38 = testing.skip(
     "starrocks", "the quotient of two DECIMAL(38, 20) needs scale 40; StarRocks allows 38"
 )
-NULLIF_DECIMAL_OVERFLOW = testing.fails_on(
+NULLIF_DECIMAL_OVERFLOW = testing.skip(
     "starrocks", "StarRocks overflows the DECIMAL(38, 0) quotient to NULL once the divisor is wrapped in nullif()"
 )
 MANY_SIGNIFICANT_DIGITS = testing.requires.precision_numerics_many_significant_digits.as_skips()
@@ -487,7 +489,8 @@ MANY_DIGITS_DIVIDEND, MANY_DIGITS_DIVISOR = "5.02797279921331664759", "0.7182818
 if IS_SQLALCHEMY_2:
 
     class TrueDivTest(_TrueDivTest):
-        # Flattened from the upstream pair of combinations so StarRocks' DECIMAL limits can be marked per case
+        """Upstream's pair of combinations, flattened so StarRocks' DECIMAL limits can be marked per case."""
+
         @testing.combinations(
             ("float-typed", "7.0", "3.5", Float(), "2", False, FLOAT_CAST_SKIPPED),
             ("float-untyped_function", "7.0", "3.5", Float(), "2", True, FLOAT_CAST_SKIPPED),
@@ -497,7 +500,8 @@ if IS_SQLALCHEMY_2:
              MANY_SIGNIFICANT_DIGITS),
             ("numeric_many_decimals-untyped_function", MANY_DIGITS_DIVIDEND, MANY_DIGITS_DIVISOR, Numeric(22, 20), "7",
              True, MANY_SIGNIFICANT_DIGITS),
-            ("numeric_tiny_divisor-typed", TINY_DIVIDEND, TINY_DIVISOR, Numeric(38, 20), "4", False, DECIMAL_SCALE_ABOVE_38),
+            ("numeric_tiny_divisor-typed", TINY_DIVIDEND, TINY_DIVISOR, Numeric(38, 20), "4", False,
+             DECIMAL_SCALE_ABOVE_38),
             ("numeric_tiny_divisor-untyped_function", TINY_DIVIDEND, TINY_DIVISOR, Numeric(38, 20), "4", True,
              DECIMAL_SCALE_ABOVE_38),
             ("numeric_38_digit_divisor-typed", BIG_DIVIDEND, BIG_DIVISOR, Numeric(38, 0), "3", False),
@@ -547,6 +551,8 @@ class CTETest(_CTETest):
         pass
 
 class JSONTest(_JSONTest):
+    """On SQLAlchemy 1.4 the typed-access tests are gated on ``legacy_unconditional_json_extract``, as 2.0 does."""
+
     # Override define_tables to specify autoincrement=True explicitly for test on Starrocks
     @classmethod
     def define_tables(cls, metadata):
@@ -591,7 +597,6 @@ class JSONTest(_JSONTest):
         pass
 
     if not IS_SQLALCHEMY_2:
-        # SQLAlchemy 2.0 gates these on the requirement, 1.4 does not
         test_index_typed_access = testing.requires.legacy_unconditional_json_extract(_JSONTest.test_index_typed_access)
         test_index_typed_comparison = testing.requires.legacy_unconditional_json_extract(
             _JSONTest.test_index_typed_comparison
@@ -600,73 +605,42 @@ class JSONTest(_JSONTest):
             _JSONTest.test_path_typed_comparison
         )
 
+FOR_UPDATE = testing.skip("starrocks", "StarRocks does not support SELECT ... FOR UPDATE")
+
+
 class ServerSideCursorsTest(_ServerSideCursorsTest):
+    """Upstream's cursor status test, with its FOR UPDATE combinations skipped.
+
+    The body is copied rather than delegated: the upstream combinations carry an exclusion, which adds an
+    ``_exclusions_0`` parameter to the upstream function.
+    """
 
     if IS_SQLALCHEMY_2:
+
         @testing.combinations(
             ("global_string", True, lambda stringify: stringify("select 1"), True),
-            (
-                    "global_text",
-                    True,
-                    lambda stringify: text(stringify("select 1")),
-                    True,
-            ),
+            ("global_text", True, lambda stringify: text(stringify("select 1")), True),
             ("global_expr", True, select(1), True),
+            ("global_off_explicit", False, lambda stringify: text(stringify("select 1")), False),
+            ("stmt_option", False, select(1).execution_options(stream_results=True), True),
+            ("stmt_option_disabled", True, select(1).execution_options(stream_results=False), False),
+            ("for_update_expr", True, select(1).with_for_update(), True, FOR_UPDATE),
+            ("for_update_string", True, lambda stringify: stringify("SELECT 1 FOR UPDATE"), True, FOR_UPDATE),
+            ("text_no_ss", False, lambda stringify: text(stringify("select 42")), False),
             (
-                    "global_off_explicit",
-                    False,
-                    lambda stringify: text(stringify("select 1")),
-                    False,
-            ),
-            (
-                    "stmt_option",
-                    False,
-                    select(1).execution_options(stream_results=True),
-                    True,
-            ),
-            (
-                    "stmt_option_disabled",
-                    True,
-                    select(1).execution_options(stream_results=False),
-                    False,
-            ),
-            # Omit unsupported FOR UPDATE
-            # ("for_update_expr", True, select(1).with_for_update(), True),
-            # # TODO: need a real requirement for this, or dont use this test
-            # (
-            #     "for_update_string",
-            #     True,
-            #     lambda stringify: stringify("SELECT 1 FOR UPDATE"),
-            #     True,
-            #     testing.skip_if(["sqlite", "mssql"]),
-            # ),
-            (
-                    "text_no_ss",
-                    False,
-                    lambda stringify: text(stringify("select 42")),
-                    False,
-            ),
-            (
-                    "text_ss_option",
-                    False,
-                    lambda stringify: text(stringify("select 42")).execution_options(
-                        stream_results=True
-                    ),
-                    True,
+                "text_ss_option",
+                False,
+                lambda stringify: text(stringify("select 42")).execution_options(stream_results=True),
+                True,
             ),
             id_="iaaa",
             argnames="engine_ss_arg, statement, cursor_ss_status",
         )
-        def test_ss_cursor_status(
-                self, engine_ss_arg, statement, cursor_ss_status
-        ):
+        def test_ss_cursor_status(self, engine_ss_arg, statement, cursor_ss_status):
             engine = self._fixture(engine_ss_arg)
             with engine.begin() as conn:
                 if callable(statement):
-                    statement = testing.resolve_lambda(
-                        statement, stringify=self.stringify
-                    )
-
+                    statement = testing.resolve_lambda(statement, stringify=self.stringify)
                 if isinstance(statement, str):
                     result = conn.exec_driver_sql(statement)
                 else:
@@ -674,11 +648,36 @@ class ServerSideCursorsTest(_ServerSideCursorsTest):
                 eq_(self._is_server_side(result.cursor), cursor_ss_status)
                 result.close()
     else:
-        @testing.skip("starrocks", "the SQLAlchemy 1.4 combinations include unsupported FOR UPDATE")
-        def test_ss_cursor_status(self):
-            pass
 
-        @testing.skip("starrocks", "the SQLAlchemy 1.4 fixture's id lacks test_needs_autoincrement, which StarRocks needs")
+        @testing.combinations(
+            ("global_string", True, "select 1", True),
+            ("global_text", True, text("select 1"), True),
+            ("global_expr", True, select(1), True),
+            ("global_off_explicit", False, text("select 1"), False),
+            ("stmt_option", False, select(1).execution_options(stream_results=True), True),
+            ("stmt_option_disabled", True, select(1).execution_options(stream_results=False), False),
+            ("for_update_expr", True, select(1).with_for_update(), True, FOR_UPDATE),
+            ("for_update_string", True, "SELECT 1 FOR UPDATE", True, FOR_UPDATE),
+            ("text_no_ss", False, text("select 42"), False),
+            ("text_ss_option", False, text("select 42").execution_options(stream_results=True), True),
+            id_="iaaa",
+            argnames="engine_ss_arg, statement, cursor_ss_status",
+        )
+        def test_ss_cursor_status(self, engine_ss_arg, statement, cursor_ss_status):
+            engine = self._fixture(engine_ss_arg)
+            with engine.begin() as conn:
+                if isinstance(statement, str):
+                    result = conn.exec_driver_sql(statement)
+                else:
+                    result = conn.execute(statement)
+                eq_(self._is_server_side(result.cursor), cursor_ss_status)
+                result.close()
+
+        @testing.skip(
+            "starrocks",
+            "SQLAlchemy 1.4's fixture leaves out test_needs_autoincrement (2.0 adds it), and the dialect renders "
+            "AUTO_INCREMENT only when it is asked for, so the inserted rows get no id",
+        )
         def test_roundtrip_fetchmany(self, metadata):
             pass
 
@@ -692,4 +691,22 @@ if IS_SQLALCHEMY_2:
     EnumTest.__requires__ = ("enums",)  # Fix Enum handling. Mysql has native ENUM type, but Starrocks has not
 else:
     HasIndexTest.__requires__ = ('index_reflection',)
-    LikeFunctionsTest.__requires__ = ('like_escapes',)
+
+    class LikeFunctionsTest(_LikeFunctionsTest):
+        """SQLAlchemy 2.0 gates the escape tests on ``like_escapes``; 1.4 does not."""
+
+        test_startswith_autoescape = testing.requires.like_escapes(_LikeFunctionsTest.test_startswith_autoescape)
+        test_startswith_escape = testing.requires.like_escapes(_LikeFunctionsTest.test_startswith_escape)
+        test_startswith_autoescape_escape = testing.requires.like_escapes(
+            _LikeFunctionsTest.test_startswith_autoescape_escape
+        )
+        test_endswith_autoescape = testing.requires.like_escapes(_LikeFunctionsTest.test_endswith_autoescape)
+        test_endswith_escape = testing.requires.like_escapes(_LikeFunctionsTest.test_endswith_escape)
+        test_endswith_autoescape_escape = testing.requires.like_escapes(
+            _LikeFunctionsTest.test_endswith_autoescape_escape
+        )
+        test_contains_autoescape = testing.requires.like_escapes(_LikeFunctionsTest.test_contains_autoescape)
+        test_contains_escape = testing.requires.like_escapes(_LikeFunctionsTest.test_contains_escape)
+        test_contains_autoescape_escape = testing.requires.like_escapes(
+            _LikeFunctionsTest.test_contains_autoescape_escape
+        )
