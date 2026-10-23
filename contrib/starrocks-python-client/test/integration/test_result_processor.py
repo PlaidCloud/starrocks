@@ -28,6 +28,7 @@ from test.util import STRUCT_FIELDS_BACKTICKED
 
 logger = logging.getLogger(__name__)
 
+
 class ArrayResultProcessorTest(fixtures.TestBase):
     """ARRAY columns must be deserialized to Python lists, not strings."""
 

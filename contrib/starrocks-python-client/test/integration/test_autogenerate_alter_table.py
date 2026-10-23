@@ -33,7 +33,7 @@ These tests run against the plugin's StarRocks database.
 
 import logging
 import textwrap
-from typing import Optional
+from typing import Callable, Optional
 from unittest.mock import Mock, patch
 
 from alembic.autogenerate import comparators
@@ -84,7 +84,9 @@ class AlterTableIntegrationTest(fixtures.TestBase):
     def _get_full_table_name(self, table_name: str) -> str:
         return f"{self.test_schema}.{table_name}" if self.test_schema else table_name
 
-    def _table_comparators(self, connection: Connection, target_metadata: MetaData) -> tuple:
+    def _table_comparators(
+        self, connection: Connection, target_metadata: MetaData
+    ) -> tuple[AutogenContext, Callable[..., object]]:
         """A real AutogenContext and the table comparators autogenerate would run, Alembic's own included.
 
         Alembic 1.20 registers its built-in comparators, the table comment one among them, on each

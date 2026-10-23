@@ -19,7 +19,7 @@ line breaks, so each expected string literal below is one line of the generated 
 """
 
 from sqlalchemy import Column, MetaData, Table, select, testing
-from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import eq_, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
 from starrocks.datatype import INTEGER, VARCHAR
@@ -254,5 +254,8 @@ class AlterViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         id_="ia",
     )
     def test_alter_view_keeps_definition_verbatim(self, definition_lines):
-        view = View("v", MetaData(), definition="\n".join(definition_lines))
+        """assert_compile ignores line breaks, so the exact text, line breaks included, is compared as well."""
+        definition = "\n".join(definition_lines)
+        view = View("v", MetaData(), definition=definition)
         self.assert_compile(AlterView(view), "ALTER VIEW v" "AS" + "".join(definition_lines))
+        eq_(str(AlterView(view).compile(dialect=self.__dialect__)), "ALTER VIEW v\nAS\n" + definition)

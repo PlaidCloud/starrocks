@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 import re
 import time
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Callable, Iterator, NamedTuple
 import uuid
 
 from alembic import command
@@ -146,7 +146,7 @@ script_location = {script_location}
 sqlalchemy.url = {url}
 
 [loggers]
-keys = root,sqlalchemy,alembic,starrocks
+keys = root,sqlalchemy,alembic,starrocks,test
 
 [handlers]
 keys = console
@@ -174,6 +174,11 @@ level = DEBUG
 handlers =
 qualname = starrocks
 
+[logger_test]
+level = DEBUG
+handlers =
+qualname = test
+
 [handler_console]
 class = StreamHandler
 args = (sys.stderr,)
@@ -189,7 +194,7 @@ datefmt = %%H:%%M:%%S
 class AlembicTestHarness:
     """A wrapper around Alembic commands for testing."""
 
-    def __init__(self, alembic_cfg: Config):
+    def __init__(self, alembic_cfg: Config) -> None:
         self.alembic_cfg = alembic_cfg
 
     def ensure_version_table(self) -> None:
@@ -199,7 +204,9 @@ class AlembicTestHarness:
         """
         command.stamp(self.alembic_cfg, "head")
 
-    def generate_autogen_revision(self, metadata: MetaData, message: str, include_object=None) -> None:
+    def generate_autogen_revision(
+        self, metadata: MetaData, message: str, include_object: Callable[..., bool] | None = None
+    ) -> None:
         """Autogenerate a revision against ``metadata``, optionally filtered by ``include_object``."""
         self.ensure_version_table()
         self.alembic_cfg.attributes["target_metadata"] = metadata
@@ -236,7 +243,7 @@ class _AlembicLifecycleBase(fixtures.TestBase):
     __requires__ = ("sqlalchemy_2",)
 
     @testing.fixture
-    def database(self):
+    def database(self) -> Iterator[str]:
         """A database of its own for the test, dropped afterwards."""
         name = f"{config.db.url.database}_lc_{uuid.uuid4().hex[:12]}"
         with config.db.begin() as conn:
@@ -246,12 +253,12 @@ class _AlembicLifecycleBase(fixtures.TestBase):
             conn.exec_driver_sql(f"DROP DATABASE IF EXISTS `{name}` FORCE")
 
     @testing.fixture
-    def sr_engine(self, database):
+    def sr_engine(self, database: str) -> Engine:
         """An engine on the test's own database."""
         return engines.testing_engine(url=config.db.url.set(database=database))
 
     @testing.fixture
-    def alembic_env(self, sr_engine):
+    def alembic_env(self, sr_engine: Engine) -> Iterator[AlembicTestEnv]:
         """An Alembic environment in the staging directory, pointing at the test's database."""
         env.clear_staging_env()
         env.staging_env()
@@ -288,7 +295,7 @@ class ScriptContentParser:
         return script_content
 
     @classmethod
-    def _extract_upgrade_or_downgrade_content(cls, header: re.Pattern, script: str) -> Optional[str]:
+    def _extract_upgrade_or_downgrade_content(cls, header: re.Pattern, script: str) -> str | None:
         match = header.search(script)
         if not match:
             return None
@@ -298,17 +305,17 @@ class ScriptContentParser:
         return content
 
     @classmethod
-    def extract_upgrade_content(cls, script: str) -> Optional[str]:
+    def extract_upgrade_content(cls, script: str) -> str | None:
         """Extract the body of the upgrade() function from an Alembic migration script."""
         return cls._extract_upgrade_or_downgrade_content(cls.UPGRADE_EXTRACTION_REGEX, script)
 
     @classmethod
-    def extract_downgrade_content(cls, script: str) -> Optional[str]:
+    def extract_downgrade_content(cls, script: str) -> str | None:
         """Extract the body of the downgrade() function from an Alembic migration script."""
         return cls._extract_upgrade_or_downgrade_content(cls.DOWNGRADE_EXTRACTION_REGEX, script)
 
     @classmethod
-    def extract_non_comment_lines(cls, content: str) -> List[str]:
+    def extract_non_comment_lines(cls, content: str) -> list[str]:
         """Extract the non-comment lines from an Alembic migration script."""
         non_comment_lines = [
             line for line in content.split("\n") if line.strip() and not line.strip().startswith("#")
@@ -325,7 +332,7 @@ def wait_for_alter_table_attributes(
     expected_value: str,
     max_round: int = 20,
     sleep_time: int = 3,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Poll the table's options until ``attribute_name`` has ``expected_value``, then return the options."""
     options = None
     value = None
@@ -347,7 +354,7 @@ def wait_for_alter_table_column_or_optimization(
     engine: Engine,
     table_name: str,
     alter_type: str,
-    schema: Optional[str] = None,
+    schema: str | None = None,
     max_round: int = 20,
     sleep_time: int = 3,
 ) -> bool:
@@ -371,7 +378,7 @@ def _wait_for_alter_table_state(
     engine: Engine,
     table_name: str,
     alter_type: str,
-    schema: Optional[str] = None,
+    schema: str | None = None,
     max_round: int = 20,
     sleep_time: int = 3,
     state: str = "RUNNING",
