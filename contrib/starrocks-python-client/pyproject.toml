@@ -74,6 +74,10 @@ alembic = [
     # autogenerate (starrocks.common.sql_canonical). Falls back to regex if absent.
     "sqlglot>=25",
 ]
+dev = [
+    "pytest>=8.0",
+    "sqlacodegen>=3.0",
+]
 
 [project.urls]
 Homepage = "https://starrocks.io"
