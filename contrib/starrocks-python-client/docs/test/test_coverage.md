@@ -22,6 +22,7 @@ These integration tests ensure that the dialect can accurately inspect a live St
 - **`test_reflection_data_types.py`**: Verifies reflection of various data types.
 - **`test_reflection_view.py`**: Verifies reflection of views.
 - **`test_reflection_mv.py`**: Verifies reflection of materialized views.
+Other integration tests (`test/integration/`) cover binding and reading ARRAY, MAP and STRUCT values (`test_bind_processor.py`, `test_result_processor.py`), `create_all` and `drop_all` with views (`test_metadata_create_drop.py`), the run mode (`test_run_mode.py`), the wait for schema changes (`test_schema_change_wait.py`), column-change coalescing (`test_combine_column_alters*.py`), transactions (`test_transactions.py`), `op.alter_column` on key and aggregate columns (`test_alter_column_key_and_aggregate.py`), the error of every statement a DDL construct compiles to (`test_ddl_results.py`), DDL text holding a `%` (`test_ddl_percent_signs.py`), names StarRocks reserves (`test_reserved_words.py`), Alembic's offline literals of ARRAY, MAP and STRUCT values (`test_alembic_offline_literals.py`), binary values bound through asyncmy (`test_asyncmy_binary.py`), and the testing plugin's hooks that create and drop each worker's databases (`test_provision.py`).
 
 ## 3. Alembic `autogenerate` Comparison (`test/integration/test_autogenerate_*.py`)
 
