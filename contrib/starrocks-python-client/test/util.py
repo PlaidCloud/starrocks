@@ -14,6 +14,15 @@
 
 import re
 
+from sqlalchemy import testing
+
+
+STRUCT_FIELDS_BACKTICKED = testing.fails_on(
+    "starrocks>=4.1",
+    "StarRocks 4.1 reports STRUCT fields with backticked names, which the type parser rejects, so reflecting "
+    "the column warns and leaves it NullType, with no result processor",
+)
+
 
 def normalize_sql(sql: str) -> str:
     """Normalizes a SQL string for comparison."""

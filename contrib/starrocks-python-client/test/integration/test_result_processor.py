@@ -23,15 +23,10 @@ import logging
 from sqlalchemy import MetaData, Table, testing
 from sqlalchemy.testing import config, fixtures
 
+from test.util import STRUCT_FIELDS_BACKTICKED
+
 
 logger = logging.getLogger(__name__)
-
-STRUCT_FIELDS_BACKTICKED = testing.fails_on(
-    "starrocks>=4.1",
-    "StarRocks 4.1 reports STRUCT fields with backticked names, which the type parser rejects, so reflecting "
-    "the column warns and leaves it NullType, with no result processor",
-)
-
 
 class ArrayResultProcessorTest(fixtures.TestBase):
     """ARRAY columns must be deserialized to Python lists, not strings."""
