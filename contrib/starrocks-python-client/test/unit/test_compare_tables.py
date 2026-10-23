@@ -18,7 +18,7 @@ from unittest.mock import Mock, PropertyMock, patch
 from alembic.autogenerate.api import AutogenContext
 from alembic.operations.ops import UpgradeOps
 from sqlalchemy import testing
-from sqlalchemy.testing import expect_raises, fixtures
+from sqlalchemy.testing import expect_raises, expect_raises_message, fixtures
 
 from starrocks.alembic.compare import compare_starrocks_table, extract_starrocks_dialect_attributes
 from starrocks.common.defaults import ReflectionTableDefaults
@@ -26,6 +26,7 @@ from starrocks.common.params import (
     AlterTableEnablement,
     DialectName,
     SRKwargsPrefix,
+    TableInfoKey,
     TableInfoKeyWithPrefix,
     TablePropertyForFuturePartitions,
 )
@@ -1050,6 +1051,97 @@ class DistributionChangesTest(fixtures.TestBase):
         )
         result = upgrade_ops.ops
         assert len(result) == 0
+
+
+class RangeDistributionTest(fixtures.TestBase):
+    """DISTRIBUTED_BY comparisons where either side is RANGE distribution.
+
+    Range distribution (StarRocks 4.1+, opt-in on 4.1) has no DISTRIBUTED BY
+    syntax, so no ALTER is ever generated for it.
+    """
+
+    @staticmethod
+    def _compare(conn_distribution, meta_distribution):
+        autogen_context = _starrocks_autogen_context()
+
+        conn_table = Mock()
+        type(conn_table).name = PropertyMock(return_value="test_table")
+        type(conn_table).schema = PropertyMock(return_value="test_db")
+        conn_table.kwargs = (
+            {TableInfoKeyWithPrefix.DISTRIBUTED_BY: conn_distribution} if conn_distribution else {}
+        )
+        conn_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(conn_table.kwargs)}
+
+        meta_table = Mock(
+            kwargs={TableInfoKeyWithPrefix.DISTRIBUTED_BY: meta_distribution} if meta_distribution else {}
+        )
+        meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
+
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        return upgrade_ops.ops
+
+    @testing.combinations(
+        # Range distribution is obtained by omitting DISTRIBUTED BY, so unset metadata matches.
+        ("range_unset", "RANGE", None),
+        # As reflected before bucket counts were dropped for RANGE.
+        ("range_buckets_unset", "RANGE BUCKETS 1", None),
+        ("range_range", "RANGE", "RANGE"),
+        ("range_lowercase", "RANGE", "range"),
+        # Range distribution has no bucket count; StarRocks reports a placeholder 1.
+        ("placeholder_vs_buckets", "RANGE BUCKETS 1", "RANGE BUCKETS 4"),
+        ("buckets_vs_range", "RANGE BUCKETS 3", "RANGE"),
+        argnames="conn_distribution, meta_distribution",
+        id_="iaa",
+    )
+    def test_range_no_change(self, conn_distribution, meta_distribution):
+        assert self._compare(conn_distribution, meta_distribution) == []
+
+    @testing.combinations(
+        ("hash_buckets", "HASH(id) BUCKETS 8"), ("random", "RANDOM"), ("hash", "HASH(id)"),
+        argnames="meta_distribution",
+        id_="ia",
+    )
+    def test_range_to_other_raises(self, meta_distribution):
+        with expect_raises_message(
+            NotImplementedError, "cannot change the distribution of a RANGE-distributed table"
+        ):
+            self._compare("RANGE", meta_distribution)
+
+    @testing.combinations(
+        ("random", "RANDOM"), ("hash_buckets", "HASH(id) BUCKETS 8"), argnames="conn_distribution", id_="ia"
+    )
+    def test_other_to_range_raises(self, conn_distribution):
+        with expect_raises_message(NotImplementedError, "no DISTRIBUTED BY RANGE syntax"):
+            self._compare(conn_distribution, "RANGE")
+
+    def test_other_to_range_error_points_to_cluster_config(self):
+        """Metadata RANGE vs a non-RANGE table usually means the cluster didn't apply RANGE."""
+        with expect_raises(NotImplementedError) as raised:
+            self._compare("RANDOM", "RANGE")
+        message = str(raised.error)
+        assert "did not apply range distribution" in message
+        assert "'enable_range_distribution' defaults to false" in message
+        assert "shared-nothing clusters do not use it by default" in message
+        assert "leave DISTRIBUTED BY unset" in message
+        assert "enable_mv_range_distribution" not in message
+
+    def test_mv_other_to_range_error_mentions_mv_config(self):
+        from starrocks.alembic.compare import _compare_table_distribution
+        with expect_raises(NotImplementedError) as raised:
+            _compare_table_distribution(
+                [], "test_db", "test_mv",
+                {TableInfoKey.DISTRIBUTED_BY: "HASH(id) BUCKETS 4"},
+                {TableInfoKey.DISTRIBUTED_BY: "RANGE"},
+                ddl_object="MATERIALIZED VIEW",
+                object_label="Materialized view",
+            )
+        message = str(raised.error)
+        assert message.startswith("Materialized view 'test_db.test_mv'")
+        assert "'enable_mv_range_distribution' (default false)" in message
+        assert "leave DISTRIBUTED BY unset" in message
 
 
 class OrderByChangesTest(fixtures.TestBase):

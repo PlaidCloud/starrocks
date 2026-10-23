@@ -19,8 +19,8 @@ The Alembic operations that emit these statements are checked against the SQL th
 
 from alembic import op
 from alembic.testing.fixtures import op_fixture
-from sqlalchemy import testing
-from sqlalchemy.testing import fixtures
+from sqlalchemy import exc, testing
+from sqlalchemy.testing import expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
 import starrocks.alembic  # noqa: F401
@@ -194,6 +194,12 @@ class AlterTableDistributionCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             AlterTableDistribution("events", "HASH(user_id)", buckets=16, schema="analytics"),
             "ALTER TABLE analytics.events DISTRIBUTED BY HASH(user_id) BUCKETS 16",
         )
+
+    @testing.combinations(("upper", "RANGE"), ("lower", "range"), argnames="distribution_method", id_="ia")
+    def test_alter_table_distribution_to_range_raises(self, distribution_method):
+        """StarRocks has no DISTRIBUTED BY RANGE syntax, so ALTER to RANGE cannot be compiled."""
+        with expect_raises_message(exc.CompileError, "no DISTRIBUTED BY RANGE syntax"):
+            AlterTableDistribution("users", distribution_method, None).compile(dialect=self.__dialect__)
 
 
 class AlterTableOrderCompileTest(fixtures.TestBase, AssertsCompiledSQL):
