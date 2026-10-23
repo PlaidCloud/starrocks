@@ -303,7 +303,7 @@ class StarRocksSQLCompiler(MySQLCompiler):
         if type_ is None:
             type_ = typeclause.type.dialect_impl(self.dialect)
         if isinstance(type_, (sqltypes.Boolean, StructuredType)):
-            return self.dialect.type_compiler_instance.process(type_)
+            return self.dialect.type_compiler.process(type_)
         return super().visit_typeclause(typeclause, type_, **kw)
 
     def visit_insert_into_files(self, insert_into, **kw):

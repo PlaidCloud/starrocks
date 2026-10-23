@@ -13,22 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 from datetime import date, datetime
 from decimal import Decimal
+import json
+import warnings
 
-import pytest
 from sqlalchemy import Column, MetaData, Table, insert, testing
-from sqlalchemy.dialects import registry
-from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import AssertsCompiledSQL, fixtures
 
 from starrocks import datatype
 from starrocks.dialect import StarRocksDialect
 
 
 _DIALECT = StarRocksDialect()
-
-registry.register("starrocks", "starrocks.dialect", "StarRocksDialect")
 
 
 def _sub_type_reprs(structured_type):
@@ -335,7 +332,7 @@ def _bind(type_obj, value):
     return proc(value)
 
 
-class TestStructuredTypeBindProcessor:
+class StructuredTypeBindProcessorTest(fixtures.TestBase):
     """bind_processor must JSON-encode Python values for parameter binding.
 
     Without this, the DBAPI driver falls back to escaping lists/dicts as SQL
@@ -373,12 +370,7 @@ class TestStructuredTypeBindProcessor:
         assert json.loads(result) == ["1.500"]
 
 
-def _compile_insert(table):
-    """Compile an INSERT statement for `table` against the StarRocks dialect."""
-    return str(insert(table).compile(dialect=_DIALECT))
-
-
-class TestStructuredTypeBindExpression:
+class StructuredTypeBindExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
     """bind_expression must wrap bind params in a CAST the compiler can render.
 
     The MySQL/MariaDB SQL compiler that StarRocksSQLCompiler inherits from
@@ -387,44 +379,34 @@ class TestStructuredTypeBindExpression:
     recognize StructuredType so this doesn't happen for ARRAY/MAP/STRUCT.
     """
 
+    __dialect__ = _DIALECT
+
     def test_array_casts_bind_param_directly(self):
+        """ARRAY supports casting a JSON-encoded VARCHAR directly; no parse_json needed."""
         table = Table("t", MetaData(), Column("fruits", datatype.ARRAY(datatype.VARCHAR(50))))
-
-        sql = _compile_insert(table)
-
-        assert "CAST(" in sql
-        assert "AS ARRAY<VARCHAR(50)>)" in sql
-        # ARRAY supports casting a JSON-encoded VARCHAR directly; no parse_json needed.
-        assert "parse_json" not in sql
+        self.assert_compile(insert(table), "INSERT INTO t (fruits) VALUES (CAST(%s AS ARRAY<VARCHAR(50)>))")
 
     def test_map_casts_via_parse_json(self):
-        table = Table(
-            "t",
-            MetaData(),
-            Column("kv", datatype.MAP(datatype.VARCHAR(10), datatype.INTEGER)),
+        table = Table("t", MetaData(), Column("kv", datatype.MAP(datatype.VARCHAR(10), datatype.INTEGER)))
+        self.assert_compile(
+            insert(table), "INSERT INTO t (kv) VALUES (CAST(parse_json(%s) AS MAP<VARCHAR(10), INTEGER>))"
         )
-
-        sql = _compile_insert(table)
-
-        assert "CAST(parse_json(" in sql
-        assert "AS MAP<VARCHAR(10), INTEGER>)" in sql
 
     def test_struct_casts_via_parse_json(self):
         table = Table(
-            "t",
-            MetaData(),
-            Column("info", datatype.STRUCT(name=datatype.VARCHAR(10), age=datatype.INTEGER)),
+            "t", MetaData(), Column("info", datatype.STRUCT(name=datatype.VARCHAR(10), age=datatype.INTEGER))
+        )
+        self.assert_compile(
+            insert(table),
+            "INSERT INTO t (info) VALUES (CAST(parse_json(%s) AS STRUCT<name VARCHAR(10), age INTEGER>))",
         )
 
-        sql = _compile_insert(table)
-
-        assert "CAST(parse_json(" in sql
-        assert "AS STRUCT<name VARCHAR(10), age INTEGER>)" in sql
-
-    def test_no_cast_is_skipped_warning(self, recwarn):
+    def test_no_cast_is_skipped_warning(self):
         """Regression guard: casting a structured type must not warn/skip."""
         table = Table("t", MetaData(), Column("fruits", datatype.ARRAY(datatype.INTEGER)))
 
-        _compile_insert(table)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            str(insert(table).compile(dialect=_DIALECT))
 
-        assert not any("does not support CAST" in str(w.message) for w in recwarn.list)
+        assert not any("does not support CAST" in str(w.message) for w in caught)

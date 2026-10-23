@@ -21,37 +21,33 @@ These are the write-side counterpart to test_result_processor.py: without
 ``bind_processor``/``bind_expression`` support, the DBAPI driver falls back
 to escaping lists/dicts as SQL tuples (e.g. ``('a', 'b')``), which StarRocks
 rejects as invalid syntax for a structured-type literal.
-"""
-import logging
-import uuid
 
-import pytest
-from sqlalchemy import Column, Integer, MetaData, Table, insert, select
-from sqlalchemy.engine import Engine
+Each class inserts its rows once, through ``insert_data``, and its tests read them back.
+"""
+from sqlalchemy import Column, Integer, Table, select
+from sqlalchemy.testing import fixtures
 
 from starrocks.datatype import ARRAY, INTEGER, MAP, STRUCT, VARCHAR
 
 
-logger = logging.getLogger(__name__)
+class _InsertedRowsTest(fixtures.TablesTest):
+    __backend__ = True
+    __only_on__ = "starrocks"
 
-# One suffix per worker process — computed once at import time.
-_SUFFIX = uuid.uuid4().hex[:8]
+    run_inserts = "once"
+    run_deletes = None
+
+    def _rows(self, connection, table: Table):
+        return {row.id: row for row in connection.execute(select(table).order_by(table.c.id))}
 
 
-def _rows(engine: Engine, table: Table):
-    with engine.connect() as conn:
-        return {row.id: row for row in conn.execute(select(table).order_by(table.c.id))}
-
-
-class TestArrayBindExpression:
+class ArrayBindExpressionTest(_InsertedRowsTest):
     """ARRAY columns must accept Python lists as bind parameters."""
 
-    @pytest.fixture(scope="class")
-    def table(self, sr_root_engine: Engine):
-        name = f"test_bind_array_{_SUFFIX}"
-        metadata = MetaData()
-        t = Table(
-            name,
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "test_bind_array",
             metadata,
             Column("id", Integer, primary_key=True),
             Column("int_arr", ARRAY(INTEGER)),
@@ -60,60 +56,49 @@ class TestArrayBindExpression:
             starrocks_distributed_by="HASH(id) BUCKETS 1",
             starrocks_properties={"replication_num": "1"},
         )
-        with sr_root_engine.begin() as conn:
-            metadata.drop_all(conn)
-            metadata.create_all(conn)
 
-        yield t
+    @classmethod
+    def insert_data(cls, connection):
+        connection.execute(
+            cls.tables.test_bind_array.insert(),
+            [
+                {"id": 1, "int_arr": [1, 2, 3], "str_arr": ["a", "b"], "nested": [[1, 2], [3]]},
+                {"id": 2, "int_arr": [9], "str_arr": ["x"], "nested": [[5]]},
+                {"id": 3, "int_arr": None, "str_arr": None, "nested": None},
+            ],
+        )
 
-        with sr_root_engine.begin() as conn:
-            metadata.drop_all(conn)
-
-    @pytest.fixture(scope="class", autouse=True)
-    def seed(self, sr_root_engine: Engine, table: Table):
-        with sr_root_engine.begin() as conn:
-            conn.execute(
-                insert(table),
-                [
-                    {"id": 1, "int_arr": [1, 2, 3], "str_arr": ["a", "b"], "nested": [[1, 2], [3]]},
-                    {"id": 2, "int_arr": [9], "str_arr": ["x"], "nested": [[5]]},
-                    {"id": 3, "int_arr": None, "str_arr": None, "nested": None},
-                ],
-            )
-
-    def test_array_of_ints_round_trips(self, sr_root_engine: Engine, table: Table):
-        rows = _rows(sr_root_engine, table)
+    def test_array_of_ints_round_trips(self, connection):
+        rows = self._rows(connection, self.tables.test_bind_array)
         assert rows[1].int_arr == [1, 2, 3]
 
-    def test_array_of_strings_round_trips(self, sr_root_engine: Engine, table: Table):
-        rows = _rows(sr_root_engine, table)
+    def test_array_of_strings_round_trips(self, connection):
+        rows = self._rows(connection, self.tables.test_bind_array)
         assert rows[1].str_arr == ["a", "b"]
 
-    def test_nested_array_round_trips(self, sr_root_engine: Engine, table: Table):
-        rows = _rows(sr_root_engine, table)
+    def test_nested_array_round_trips(self, connection):
+        rows = self._rows(connection, self.tables.test_bind_array)
         assert rows[1].nested == [[1, 2], [3]]
 
-    def test_null_array_round_trips(self, sr_root_engine: Engine, table: Table):
-        rows = _rows(sr_root_engine, table)
+    def test_null_array_round_trips(self, connection):
+        rows = self._rows(connection, self.tables.test_bind_array)
         assert rows[3].int_arr is None
         assert rows[3].str_arr is None
         assert rows[3].nested is None
 
-    def test_single_element_array_round_trips(self, sr_root_engine: Engine, table: Table):
-        rows = _rows(sr_root_engine, table)
+    def test_single_element_array_round_trips(self, connection):
+        rows = self._rows(connection, self.tables.test_bind_array)
         assert rows[2].int_arr == [9]
         assert rows[2].str_arr == ["x"]
 
 
-class TestMapBindExpression:
+class MapBindExpressionTest(_InsertedRowsTest):
     """MAP columns must accept Python dicts as bind parameters."""
 
-    @pytest.fixture(scope="class")
-    def table(self, sr_root_engine: Engine):
-        name = f"test_bind_map_{_SUFFIX}"
-        metadata = MetaData()
-        t = Table(
-            name,
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "test_bind_map",
             metadata,
             Column("id", Integer, primary_key=True),
             Column("kv", MAP(VARCHAR(20), INTEGER)),
@@ -121,50 +106,39 @@ class TestMapBindExpression:
             starrocks_distributed_by="HASH(id) BUCKETS 1",
             starrocks_properties={"replication_num": "1"},
         )
-        with sr_root_engine.begin() as conn:
-            metadata.drop_all(conn)
-            metadata.create_all(conn)
 
-        yield t
+    @classmethod
+    def insert_data(cls, connection):
+        connection.execute(
+            cls.tables.test_bind_map.insert(),
+            [
+                {"id": 1, "kv": {"a": 1, "b": 2}, "nested": {"x": [1, 2], "y": [3]}},
+                {"id": 2, "kv": {"z": 99}, "nested": {"m": []}},
+                {"id": 3, "kv": None, "nested": None},
+            ],
+        )
 
-        with sr_root_engine.begin() as conn:
-            metadata.drop_all(conn)
-
-    @pytest.fixture(scope="class", autouse=True)
-    def seed(self, sr_root_engine: Engine, table: Table):
-        with sr_root_engine.begin() as conn:
-            conn.execute(
-                insert(table),
-                [
-                    {"id": 1, "kv": {"a": 1, "b": 2}, "nested": {"x": [1, 2], "y": [3]}},
-                    {"id": 2, "kv": {"z": 99}, "nested": {"m": []}},
-                    {"id": 3, "kv": None, "nested": None},
-                ],
-            )
-
-    def test_map_round_trips(self, sr_root_engine: Engine, table: Table):
-        rows = _rows(sr_root_engine, table)
+    def test_map_round_trips(self, connection):
+        rows = self._rows(connection, self.tables.test_bind_map)
         assert rows[1].kv == {"a": 1, "b": 2}
 
-    def test_map_with_array_values_round_trips(self, sr_root_engine: Engine, table: Table):
-        rows = _rows(sr_root_engine, table)
+    def test_map_with_array_values_round_trips(self, connection):
+        rows = self._rows(connection, self.tables.test_bind_map)
         assert rows[1].nested == {"x": [1, 2], "y": [3]}
 
-    def test_null_map_round_trips(self, sr_root_engine: Engine, table: Table):
-        rows = _rows(sr_root_engine, table)
+    def test_null_map_round_trips(self, connection):
+        rows = self._rows(connection, self.tables.test_bind_map)
         assert rows[3].kv is None
         assert rows[3].nested is None
 
 
-class TestStructBindExpression:
+class StructBindExpressionTest(_InsertedRowsTest):
     """STRUCT columns must accept Python dicts as bind parameters."""
 
-    @pytest.fixture(scope="class")
-    def table(self, sr_root_engine: Engine):
-        name = f"test_bind_struct_{_SUFFIX}"
-        metadata = MetaData()
-        t = Table(
-            name,
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "test_bind_struct",
             metadata,
             Column("id", Integer, primary_key=True),
             Column("info", STRUCT(name=VARCHAR(50), age=INTEGER)),
@@ -172,39 +146,30 @@ class TestStructBindExpression:
             starrocks_distributed_by="HASH(id) BUCKETS 1",
             starrocks_properties={"replication_num": "1"},
         )
-        with sr_root_engine.begin() as conn:
-            metadata.drop_all(conn)
-            metadata.create_all(conn)
 
-        yield t
+    @classmethod
+    def insert_data(cls, connection):
+        connection.execute(
+            cls.tables.test_bind_struct.insert(),
+            [
+                {
+                    "id": 1,
+                    "info": {"name": "Alice", "age": 30},
+                    "nested": {"tags": ["go", "python"], "score": 9},
+                },
+                {"id": 2, "info": None, "nested": None},
+            ],
+        )
 
-        with sr_root_engine.begin() as conn:
-            metadata.drop_all(conn)
-
-    @pytest.fixture(scope="class", autouse=True)
-    def seed(self, sr_root_engine: Engine, table: Table):
-        with sr_root_engine.begin() as conn:
-            conn.execute(
-                insert(table),
-                [
-                    {
-                        "id": 1,
-                        "info": {"name": "Alice", "age": 30},
-                        "nested": {"tags": ["go", "python"], "score": 9},
-                    },
-                    {"id": 2, "info": None, "nested": None},
-                ],
-            )
-
-    def test_struct_round_trips(self, sr_root_engine: Engine, table: Table):
-        rows = _rows(sr_root_engine, table)
+    def test_struct_round_trips(self, connection):
+        rows = self._rows(connection, self.tables.test_bind_struct)
         assert rows[1].info == {"name": "Alice", "age": 30}
 
-    def test_struct_with_array_field_round_trips(self, sr_root_engine: Engine, table: Table):
-        rows = _rows(sr_root_engine, table)
+    def test_struct_with_array_field_round_trips(self, connection):
+        rows = self._rows(connection, self.tables.test_bind_struct)
         assert rows[1].nested == {"tags": ["go", "python"], "score": 9}
 
-    def test_null_struct_round_trips(self, sr_root_engine: Engine, table: Table):
-        rows = _rows(sr_root_engine, table)
+    def test_null_struct_round_trips(self, connection):
+        rows = self._rows(connection, self.tables.test_bind_struct)
         assert rows[2].info is None
         assert rows[2].nested is None
