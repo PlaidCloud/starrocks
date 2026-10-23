@@ -318,11 +318,11 @@ Run `pytest` from this directory:
 pytest
 ```
 
-`pyproject.toml` runs the tests on four `pytest-xdist` workers. Each worker gets its own databases, created from the configured one and dropped at the end, so the workers do not interfere; pass `-n0` to run serially against the configured database. A subset runs the same way, for example `pytest test/sql` or `pytest test/test_suite.py`.
+`pyproject.toml` runs the tests on four `pytest-xdist` workers. Each worker gets its own databases, created from the configured one and dropped at the end, so the workers do not interfere; pass `-n0` to run serially against the configured database. A subset runs the same way, for example `pytest test/sql` or `pytest test/test_suite.py`. The system tests keep Alembic's scripts in a `scratch` directory here (`scratch_<worker>` under `pytest-xdist`), so do not run two serial runs from this directory at once.
 
-Tests that StarRocks itself cannot support are skipped. Tests that fail because of a known dialect bug are marked `fails_on` with the reason, so a fix shows up as an unexpected pass.
+Tests that StarRocks itself cannot support are skipped. Tests that fail because of a known dialect bug are marked `fails_on`, or `fails_if` with a condition, and the reason, so a fix shows up as an unexpected pass. Such a test is reported as passed when it fails as expected; run with `-s` to see each "failed as expected" line and its reason.
 
-The tests run on SQLAlchemy 2.0 and 1.4. On 1.4 only the compliance suite and the core compile and reflection tests run; the view, materialized view and Alembic tests need SQLAlchemy 2.0 and are skipped.
+The tests run on SQLAlchemy 2.0 and 1.4. On 1.4, SQLAlchemy's compliance suite and the compile, reflection, comparison and rendering tests run; Alembic's suite, the system tests, and the tests that build `View` or `MaterializedView` objects or need SQLAlchemy 2.0's inspector need SQLAlchemy 2.0 and are skipped.
 
 #### Writing Tests
 
