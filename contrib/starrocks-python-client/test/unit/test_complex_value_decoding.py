@@ -21,11 +21,12 @@ The raw strings are what StarRocks 4.1.4 returns over the MySQL protocol.
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-import pytest
+from sqlalchemy.testing import expect_raises_message, fixtures
 
 from starrocks import datatype
 from starrocks.dialect import StarRocksDialect
 from starrocks.drivers.parsers import parse_data_type
+
 
 _DIALECT = StarRocksDialect()
 
@@ -34,7 +35,7 @@ def _process(type_, raw):
     return type_._cached_result_processor(_DIALECT, None)(raw)
 
 
-class TestComplexValueDecoding:
+class ComplexValueDecodingTest(fixtures.TestBase):
     def test_map_with_unquoted_integer_keys(self):
         assert _process(datatype.MAP(datatype.INTEGER, datatype.VARCHAR(20)),
                         '{1:"a\\"b",2:null}') == {1: 'a"b', 2: None}
@@ -69,21 +70,21 @@ class TestComplexValueDecoding:
         assert _process(datatype.ARRAY(datatype.VARBINARY), '["616263"]') == [b"abc"]
 
     def test_malformed_value_raises(self):
-        with pytest.raises(ValueError, match="could not parse complex value"):
+        with expect_raises_message(ValueError, "could not parse complex value"):
             _process(datatype.ARRAY(datatype.INTEGER), "[1,2")
 
     def test_single_quote_escapes(self):
         assert datatype.parse_complex_value(r"['it\'s \\ é']") == ["it's \\ é"]
 
 
-class TestScalarProcessors:
+class ScalarProcessorsTest(fixtures.TestBase):
     def test_datetime_fraction_is_scaled_to_microseconds(self):
         proc = datatype.DATETIME().result_processor(_DIALECT, None)
         assert proc("2026-01-02 03:04:05.5") == datetime(2026, 1, 2, 3, 4, 5, 500000)
 
     def test_datetime_rejects_aware_bind(self):
         bind = datatype.DATETIME().bind_processor(_DIALECT)
-        with pytest.raises(ValueError, match="no time zone"):
+        with expect_raises_message(ValueError, "no time zone"):
             bind(datetime(2026, 1, 1, tzinfo=timezone.utc))
 
     def test_largeint_text_becomes_int(self):
@@ -91,7 +92,7 @@ class TestScalarProcessors:
         assert proc("-170141183460469231731687303715884105728") == -(2 ** 127)
 
 
-class TestReflection:
+class ComplexTypeReflectionTest(fixtures.TestBase):
     def test_struct_with_backquoted_field_names(self):
         t = parse_data_type("struct<`k` map<boolean,double>, `a b` varchar(50), `c``d` int(11)>")
         assert [n for n, _ in t.field_tuples] == ["k", "a b", "c`d"]
