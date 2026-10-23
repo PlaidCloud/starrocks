@@ -63,12 +63,6 @@ if IS_SQLALCHEMY_2:
 
 logger = logging.getLogger(__name__)
 
-BUCKET_SIZE_NEEDS_RANDOM_DISTRIBUTION = testing.skip(
-    "starrocks>=4.1",
-    "StarRocks 4.1 allows bucket_size only on RANDOM-distributed tables, and a PRIMARY KEY table must be "
-    "distributed by HASH",
-)
-
 
 def print_sql_before_execute(conn, cursor, statement, parameters, context, executemany):
     logger.debug("SQL ready to be executed: %s", statement)
@@ -745,60 +739,42 @@ class TableLifecycleTest(_AlembicLifecycleBase):
         options = wait_for_alter_table_attributes(inspector, "t_alter_order", TableInfoKeyWithPrefix.ORDER_BY, "`id`")
         assert options.get(TableInfoKeyWithPrefix.ORDER_BY) == "`id`"
 
-    @BUCKET_SIZE_NEEDS_RANDOM_DISTRIBUTION
-    def test_alter_table_properties_and_comment(self, database, alembic_env, sr_engine):
-        """
-        Tests altering table properties and comment.
-        All the properties and comment won't cost a lot of time. (replication_num?)
+    def _alter_table_properties_and_comment(
+        self, alembic_env, sr_engine, initial_table_args: dict, altered_table_args: dict
+    ) -> str:
+        """Alter a table's comment and properties through a migration, then downgrade it step by step.
 
         - Adds a new table comment.
-
         - Adds a new property 'replicated_storage'.
         - Changes an existing property 'storage_medium'.
+
+        Returns the generated ALTER script for the caller's own checks.
         """
         # 1. Initial state
         Base = declarative_base()
+
         class User(Base):
             __tablename__ = "t_alter_props"
             id = Column(INTEGER, primary_key=True)
-            __table_args__ = {
-                "starrocks_primary_key": "id",
-                "starrocks_distributed_by": "HASH(id)",
-                "starrocks_properties": {
-                    "replication_num": "1",
-                    "storage_medium": "HDD",
-                    "bucket_size": "4294967296",
-                },
-            }
+            __table_args__ = initial_table_args
+
         alembic_env.harness.generate_autogen_revision(metadata=Base.metadata, message="Initial")
-        logger.debug("Init state.")
         alembic_env.harness.upgrade("head")
-        logger.debug("Upgrade to head.")
 
         # 2. Alter properties in metadata
         AlteredBase = declarative_base()
+
         class AlteredUser(AlteredBase):
             __tablename__ = "t_alter_props"
             id = Column(INTEGER, primary_key=True)
-            __table_args__ = {
-                "starrocks_primary_key": "id",
-                "starrocks_distributed_by": "HASH(id)",
-                "comment": "A new table comment",
-                "starrocks_properties": {
-                    "replication_num": "1",
-                    "replicated_storage": "false",
-                    "storage_medium": "SSD",
-                    "bucket_size": "1000000000",
-                },
-            }
+            __table_args__ = altered_table_args
+
         alembic_env.harness.generate_autogen_revision(metadata=AlteredBase.metadata, message="Alter props")
 
         # 3. Verify and apply the ALTER script
         script_content = ScriptContentParser.check_script_content(alembic_env, 1, "alter_props")
         assert "op.alter_table" in script_content
-        assert "bucket_size" in script_content
         sr_engine.dialect._init_run_mode(sr_engine.connect())  # make sure the run_mode is set
-        # logger.debug(f"system run mode: {sr_engine.dialect.run_mode} with dialect: {sr_engine.dialect}")
         if sr_engine.dialect.run_mode == SystemRunMode.SHARED_DATA:
             assert 'default.storage_medium' not in script_content
         else:
@@ -806,9 +782,7 @@ class TableLifecycleTest(_AlembicLifecycleBase):
             assert "'default.storage_medium': 'SSD'" in script_content
         assert "comment='A new table comment'" in script_content
 
-        logger.debug("Start to do upgrade for schema diff.")
         alembic_env.harness.upgrade("head")
-        logger.debug("Upgrade to head.")
 
         # 4. Verify in DB
         inspector = inspect(sr_engine)
@@ -820,9 +794,7 @@ class TableLifecycleTest(_AlembicLifecycleBase):
         assert options.get(TableInfoKeyWithPrefix.COMMENT) == "A new table comment"
 
         # 5. Downgrade one revision, not to the base
-        logger.debug("Start to do downgrade.")
         alembic_env.harness.downgrade("-1")
-        logger.debug("Downgraded one revision.")
 
         inspector.clear_cache()
         options = inspector.get_table_options("t_alter_props")
@@ -834,9 +806,55 @@ class TableLifecycleTest(_AlembicLifecycleBase):
 
         # 6. Downgrade to base
         alembic_env.harness.downgrade("base")
-        logger.debug("Downgraded to base.")
         inspector.clear_cache()
         is_true(not inspector.has_table("t_alter_props"))
+        return script_content
+
+    def test_alter_table_properties_and_comment(self, database, alembic_env, sr_engine):
+        """Alter the comment and properties of a PRIMARY KEY table, which StarRocks distributes by HASH."""
+        self._alter_table_properties_and_comment(
+            alembic_env,
+            sr_engine,
+            {
+                "starrocks_primary_key": "id",
+                "starrocks_distributed_by": "HASH(id)",
+                "starrocks_properties": {"replication_num": "1", "storage_medium": "HDD"},
+            },
+            {
+                "starrocks_primary_key": "id",
+                "starrocks_distributed_by": "HASH(id)",
+                "comment": "A new table comment",
+                "starrocks_properties": {"replication_num": "1", "replicated_storage": "false", "storage_medium": "SSD"},
+            },
+        )
+
+    def test_alter_table_bucket_size_with_properties_and_comment(self, database, alembic_env, sr_engine):
+        """Alter bucket_size with the comment and other properties, on a RANDOM-distributed DUPLICATE KEY table.
+
+        StarRocks 4.1 allows bucket_size only on RANDOM-distributed tables with automatic bucketing, so this
+        case cannot use the PRIMARY KEY table above.
+        """
+        script_content = self._alter_table_properties_and_comment(
+            alembic_env,
+            sr_engine,
+            {
+                "starrocks_duplicate_key": "id",
+                "starrocks_distributed_by": "RANDOM",
+                "starrocks_properties": {"replication_num": "1", "storage_medium": "HDD", "bucket_size": "4294967296"},
+            },
+            {
+                "starrocks_duplicate_key": "id",
+                "starrocks_distributed_by": "RANDOM",
+                "comment": "A new table comment",
+                "starrocks_properties": {
+                    "replication_num": "1",
+                    "replicated_storage": "false",
+                    "storage_medium": "SSD",
+                    "bucket_size": "1000000000",
+                },
+            },
+        )
+        assert "bucket_size" in script_content
 
     def test_drop_table(self, database, alembic_env, sr_engine):
         """Tests dropping a table."""
