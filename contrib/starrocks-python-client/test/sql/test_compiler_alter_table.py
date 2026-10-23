@@ -34,6 +34,13 @@ from starrocks.sql.ddl import (
 )
 
 
+BACKSLASH_VALUES = (
+    ("file_path", r"C:\temp\data\file.txt"),
+    ("regex_pattern", r"\d+\.\d+"),
+    ("json_config", r'{"key": "value\nwith\nnewlines"}'),
+)
+
+
 class AlterTablePropertiesCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     """StarRocks accepts one property per ``ALTER TABLE ... SET``, so each property becomes its own statement."""
 
@@ -96,13 +103,26 @@ class AlterTablePropertiesCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             f'ALTER TABLE test_table SET ("comment" = {rendered_value})',
         )
 
+    def test_property_values_with_backslashes_compile(self):
+        """The backslash cases below fail as expected; this keeps a compile error from hiding among them."""
+        compiled = str(AlterTableProperties("test_table", dict(BACKSLASH_VALUES)).compile(dialect=self.__dialect__))
+        assert compiled.count("ALTER TABLE test_table SET (") == len(BACKSLASH_VALUES)
+
     @testing.fails_on(
         "starrocks", "property values are not backslash-escaped, so StarRocks stores \\d+\\.\\d+ as d+.d+"
     )
-    def test_property_value_backslashes(self):
+    @testing.combinations(
+        ("file_path", r'"C:\\temp\\data\\file.txt"'),
+        ("regex_pattern", r'"\\d+\\.\\d+"'),
+        ("json_config", r'"{\"key\": \"value\\nwith\\nnewlines\"}"'),
+        argnames="name, rendered_value",
+        id_="sa",
+    )
+    def test_property_value_backslashes(self, name, rendered_value):
+        """A backslash is doubled before double quotes are escaped, so an escaped quote keeps its one backslash."""
         self.assert_compile(
-            AlterTableProperties("test_table", {"regex_pattern": r"\d+\.\d+"}),
-            r'ALTER TABLE test_table SET ("regex_pattern" = "\\d+\\.\\d+")',
+            AlterTableProperties("test_table", {name: dict(BACKSLASH_VALUES)[name]}),
+            f'ALTER TABLE test_table SET ("{name}" = {rendered_value})',
         )
 
     @testing.combinations(
