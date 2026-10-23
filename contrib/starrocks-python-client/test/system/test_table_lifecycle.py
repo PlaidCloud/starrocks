@@ -54,7 +54,7 @@ from test.system.lifecycle import (
     wait_for_alter_table_attributes,
     wait_for_alter_table_column_or_optimization,
 )
-from test.util import STRUCT_FIELDS_BACKTICKED
+from test.util import TOLERATE_UNPARSED_STRUCT_REFLECTION
 
 
 if IS_SQLALCHEMY_2:
@@ -132,7 +132,7 @@ class TableLifecycleTest(_AlembicLifecycleBase):
             eq_(table_opts[TableInfoKeyWithPrefix.PRIMARY_KEY], "id")
             eq_(table_opts[TableInfoKeyWithPrefix.DISTRIBUTED_BY], "HASH(`id`)")
 
-    @STRUCT_FIELDS_BACKTICKED
+    @TOLERATE_UNPARSED_STRUCT_REFLECTION
     def test_idempotency_comprehensive(self, database, alembic_env, sr_engine):
         """
         Tests that a second autogenerate run produces no new scripts for a complex table.

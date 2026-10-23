@@ -437,9 +437,8 @@ class DataTypeReflectionTest(fixtures.TestBase):
         assert 'metadata' in nested_field_dict
         assert isinstance(nested_field_dict['metadata'], MAP)
 
-    @STRUCT_FIELDS_BACKTICKED
     def test_reflect_complex_nested_types(self, connection):
-        """Test reflection of complex nested data types"""
+        """Test reflection of nested ARRAY and MAP types; the STRUCT case is test_reflect_complex_nested_struct."""
         table_name = "test_reflect_complex_types"
         metadata = MetaData()
 
@@ -449,15 +448,6 @@ class DataTypeReflectionTest(fixtures.TestBase):
             Column("id_col", INTEGER()),
             Column("array_of_maps", ARRAY(MAP(STRING, INTEGER))),
             Column("map_of_arrays", MAP(VARCHAR(50), ARRAY(DECIMAL(8, 2)))),
-            Column("complex_struct_col", STRUCT(
-                id=INTEGER,
-                tags=ARRAY(VARCHAR(20)),
-                metadata=MAP(STRING, STRUCT(value=STRING, count=INTEGER)),
-                nested_data=ARRAY(MAP(INTEGER, STRUCT(
-                    item_id=BIGINT,
-                    properties=MAP(VARCHAR(30), DOUBLE)
-                )))
-            )),
             starrocks_distributed_by='HASH(id_col)',
             starrocks_properties={"replication_num": "1"},
         )
@@ -475,6 +465,31 @@ class DataTypeReflectionTest(fixtures.TestBase):
         assert isinstance(map_of_arrays.key_type, VARCHAR)
         assert isinstance(map_of_arrays.value_type, ARRAY)
         assert isinstance(map_of_arrays.value_type.item_type, DECIMAL)
+
+    @STRUCT_FIELDS_BACKTICKED
+    def test_reflect_complex_nested_struct(self, connection):
+        """Test reflection of a STRUCT nesting ARRAY, MAP and STRUCT types"""
+        table_name = "test_reflect_complex_struct"
+        metadata = MetaData()
+
+        table = Table(
+            table_name,
+            metadata,
+            Column("id_col", INTEGER()),
+            Column("complex_struct_col", STRUCT(
+                id=INTEGER,
+                tags=ARRAY(VARCHAR(20)),
+                metadata=MAP(STRING, STRUCT(value=STRING, count=INTEGER)),
+                nested_data=ARRAY(MAP(INTEGER, STRUCT(
+                    item_id=BIGINT,
+                    properties=MAP(VARCHAR(30), DOUBLE)
+                )))
+            )),
+            starrocks_distributed_by='HASH(id_col)',
+            starrocks_properties={"replication_num": "1"},
+        )
+
+        reflected_table = self._create_and_reflect_table(connection, table_name, table)
 
         # Check complex struct
         complex_struct = reflected_table.c.complex_struct_col.type
@@ -498,40 +513,15 @@ class DataTypeReflectionTest(fixtures.TestBase):
         assert isinstance(field_dict['nested_data'].item_type, MAP)
         assert isinstance(field_dict['nested_data'].item_type.value_type, STRUCT)
 
-    @STRUCT_FIELDS_BACKTICKED
-    def test_round_trip_type_consistency(self, connection):
-        """Test that types maintain consistency through create -> reflect -> compare cycle"""
-        table_name = "test_round_trip_consistency"
-        metadata = MetaData()
+    def _assert_reflected_types_compare_equal(self, connection, original_table: Table) -> None:
+        """Create the table, reflect it, and check compare_type finds every reflected column type unchanged."""
+        reflected_table = self._create_and_reflect_table(connection, original_table.name, original_table)
 
-        # Create a comprehensive table with various types
-        original_table = Table(
-            table_name,
-            metadata,
-            Column("simple_int", INTEGER()),
-            Column("varchar_col", VARCHAR(100)),
-            Column("decimal_col", DECIMAL(10, 3)),
-            Column("bool_col", BOOLEAN()),
-            Column("array_col", ARRAY(VARCHAR(50))),
-            Column("map_col", MAP(STRING, INTEGER)),
-            Column("struct_col", STRUCT(
-                name=VARCHAR(80),
-                active=BOOLEAN,
-                score=DECIMAL(6, 2)
-            )),
-            starrocks_distributed_by='HASH(simple_int)',
-            starrocks_properties={"replication_num": "1"},
-        )
-
-        reflected_table = self._create_and_reflect_table(connection, table_name, original_table)
-
-        # Use the type comparison logic to check consistency
         from starrocks.alembic.starrocks import StarRocksImpl
         from starrocks.dialect import StarRocksDialect
 
-        dialect = StarRocksDialect()
         impl = StarRocksImpl(
-            dialect=dialect,
+            dialect=StarRocksDialect(),
             connection=None,
             as_sql=False,
             transactional_ddl=False,
@@ -539,7 +529,6 @@ class DataTypeReflectionTest(fixtures.TestBase):
             context_opts={},
         )
 
-        # Compare each column type
         for col_name in original_table.columns.keys():
             original_col = original_table.columns[col_name]
             reflected_col = reflected_table.columns[col_name]
@@ -549,9 +538,51 @@ class DataTypeReflectionTest(fixtures.TestBase):
             assert is_different is False, \
                 f"Column {col_name}: Original type {original_col.type} != Reflected type {reflected_col.type}"
 
+    def test_round_trip_type_consistency(self, connection):
+        """Test that types maintain consistency through create -> reflect -> compare cycle.
+
+        The STRUCT case is test_round_trip_struct_type_consistency.
+        """
+        self._assert_reflected_types_compare_equal(
+            connection,
+            Table(
+                "test_round_trip_consistency",
+                MetaData(),
+                Column("simple_int", INTEGER()),
+                Column("varchar_col", VARCHAR(100)),
+                Column("decimal_col", DECIMAL(10, 3)),
+                Column("bool_col", BOOLEAN()),
+                Column("array_col", ARRAY(VARCHAR(50))),
+                Column("map_col", MAP(STRING, INTEGER)),
+                starrocks_distributed_by='HASH(simple_int)',
+                starrocks_properties={"replication_num": "1"},
+            ),
+        )
+
     @STRUCT_FIELDS_BACKTICKED
+    def test_round_trip_struct_type_consistency(self, connection):
+        """Test that a STRUCT type stays consistent through create -> reflect -> compare cycle"""
+        self._assert_reflected_types_compare_equal(
+            connection,
+            Table(
+                "test_round_trip_struct_consistency",
+                MetaData(),
+                Column("simple_int", INTEGER()),
+                Column("struct_col", STRUCT(
+                    name=VARCHAR(80),
+                    active=BOOLEAN,
+                    score=DECIMAL(6, 2)
+                )),
+                starrocks_distributed_by='HASH(simple_int)',
+                starrocks_properties={"replication_num": "1"},
+            ),
+        )
+
     def test_edge_case_parameters_preservation(self, connection):
-        """Test that edge case parameters are preserved during reflection"""
+        """Test that edge case parameters are preserved during reflection.
+
+        The same parameters nested in a STRUCT are test_edge_case_parameters_preservation_in_struct.
+        """
         table_name = "test_edge_case_parameters"
         metadata = MetaData()
 
@@ -563,12 +594,6 @@ class DataTypeReflectionTest(fixtures.TestBase):
             Column("varchar_max", VARCHAR(65533)),  # Special case for STRING equivalence
             Column("decimal_max", DECIMAL(38, 18)),  # Maximum precision/scale
             Column("char_one", CHAR(1)),  # Minimum char length
-            Column("nested_complex", STRUCT(
-                level1=ARRAY(MAP(VARCHAR(65533), STRUCT(
-                    flag=TINYINT(1),
-                    data=DECIMAL(38, 18)
-                )))
-            )),
             starrocks_distributed_by='HASH(id_col)',
             starrocks_properties={"replication_num": "1"},
         )
@@ -594,6 +619,28 @@ class DataTypeReflectionTest(fixtures.TestBase):
         char_col = reflected_table.c.char_one.type
         assert isinstance(char_col, CHAR)
         assert char_col.length == 1
+
+    @STRUCT_FIELDS_BACKTICKED
+    def test_edge_case_parameters_preservation_in_struct(self, connection):
+        """Test that edge case parameters nested in a STRUCT are preserved during reflection"""
+        table_name = "test_edge_case_parameters_struct"
+        metadata = MetaData()
+
+        table = Table(
+            table_name,
+            metadata,
+            Column("id_col", INTEGER()),
+            Column("nested_complex", STRUCT(
+                level1=ARRAY(MAP(VARCHAR(65533), STRUCT(
+                    flag=TINYINT(1),
+                    data=DECIMAL(38, 18)
+                )))
+            )),
+            starrocks_distributed_by='HASH(id_col)',
+            starrocks_properties={"replication_num": "1"},
+        )
+
+        reflected_table = self._create_and_reflect_table(connection, table_name, table)
 
         # Check nested complex type preservation
         nested_col = reflected_table.c.nested_complex.type

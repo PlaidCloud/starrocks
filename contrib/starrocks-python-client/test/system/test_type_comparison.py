@@ -30,7 +30,7 @@ from sqlalchemy.orm import declarative_base
 
 from starrocks.datatype import ARRAY, BOOLEAN, DECIMAL, INTEGER, MAP, STRING, STRUCT, TINYINT, VARCHAR
 from test.system.lifecycle import ScriptContentParser, _AlembicLifecycleBase
-from test.util import STRUCT_FIELDS_BACKTICKED
+from test.util import STRUCT_FIELDS_BACKTICKED, TOLERATE_UNPARSED_STRUCT_REFLECTION
 
 
 logger = logging.getLogger(__name__)
@@ -351,7 +351,7 @@ class TypeComparisonTest(_AlembicLifecycleBase):
         assert 'existing_type=STRUCT' in upgrade_content
         assert 'type_=STRUCT' in upgrade_content
 
-    @STRUCT_FIELDS_BACKTICKED
+    @TOLERATE_UNPARSED_STRUCT_REFLECTION
     def test_special_equivalence_rules_work_correctly(self, database, alembic_env, sr_engine):
         """
         Test that special equivalence rules (BOOLEAN<->TINYINT(1), STRING<->VARCHAR(65533)) work correctly.
