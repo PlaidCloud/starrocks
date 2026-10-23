@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import logging
-from unittest.mock import Mock, PropertyMock
+from unittest.mock import Mock, PropertyMock, patch
 
 from alembic.autogenerate.api import AutogenContext
 from alembic.operations.ops import UpgradeOps
@@ -508,13 +508,15 @@ class KeyChangesTest(fixtures.TestBase):
     """Test KEY attribute changes (ALTER KEY not supported, but changes are detected)."""
 
     def test_key_none_to_default_value(self):
-        """Test KEY from None (implicit default DUPLICATE KEY) to default value ('DUPLICATE KEY')."""
+        """Test KEY from None (implicit default DUPLICATE KEY) to default value ('DUPLICATE KEY').
+
+        The default key is patched to 'DUPLICATE KEY(id)' instead of only 'DUPLICATE KEY' for this test only;
+        replacing it for good changed every later comparison in the process.
+        """
         autogen_context = _starrocks_autogen_context()
 
-        # set default key to 'DUPLICATE KEY (id)' instead of only 'DUPLICATE KEY'
         def default_key(cls):
             return f"{TableType.DUPLICATE_KEY}(id)"
-        ReflectionTableDefaults.key = classmethod(default_key)
 
         conn_table = Mock()  # Table reflected from SR database, no KEY explicitly set, implies default DUPLICATE KEY
         type(conn_table).name = PropertyMock(return_value="test_table")
@@ -531,9 +533,10 @@ class KeyChangesTest(fixtures.TestBase):
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
         upgrade_ops = UpgradeOps([])
-        compare_starrocks_table(
-            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-        )
+        with patch.object(ReflectionTableDefaults, "key", classmethod(default_key)):
+            compare_starrocks_table(
+                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+            )
         result = upgrade_ops.ops
         assert len(result) == 0
 
@@ -797,18 +800,16 @@ class PartitionChangesTest(fixtures.TestBase):
         assert "StarRocks does not support 'ALTER TABLE PARTITION BY'" in str(exc_info.error)
 
         # Force to make diff of partition by
-        old_enablement = AlterTableEnablement.PARTITION_BY
-        AlterTableEnablement.PARTITION_BY = True
         upgrade_ops = UpgradeOps([])
-        compare_starrocks_table(
-            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-        )
+        with patch.object(AlterTableEnablement, "PARTITION_BY", True):
+            compare_starrocks_table(
+                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+            )
         result = upgrade_ops.ops
         assert len(result) == 1
         from starrocks.alembic.ops import AlterTablePartitionOp
         assert isinstance(result[0], AlterTablePartitionOp)
         assert result[0].partition_method == "LIST(category)"
-        AlterTableEnablement.PARTITION_BY = old_enablement
 
     @testing.combinations(
         ("RANGE(`date_col`)", "RANGE(date_col)"),

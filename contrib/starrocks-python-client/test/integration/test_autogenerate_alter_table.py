@@ -37,7 +37,7 @@ Example: STARROCKS_URL=starrocks://user:pass@localhost:9030/test_db
 import logging
 import textwrap
 from typing import Optional
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from alembic.autogenerate import comparators
 from alembic.autogenerate.api import AutogenContext
@@ -404,15 +404,13 @@ class AlterTableIntegrationTest(fixtures.TestBase):
                 schema=self.test_schema
             )
 
-            # Compare
-            AlterTableEnablement.PARTITION_BY = True  # Enable partition comparison
             autogen_context = self._setup_autogen_context(connection)
             upgrade_ops = UpgradeOps()
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, self.test_schema, table_name, reflected_table, target_table
-            )
+            with patch.object(AlterTableEnablement, "PARTITION_BY", True):
+                compare_starrocks_table(
+                    autogen_context, upgrade_ops, self.test_schema, table_name, reflected_table, target_table
+                )
             result = upgrade_ops.ops
-            AlterTableEnablement.PARTITION_BY = False  # Disable back to default
 
             # Should detect partition change
             assert len(result) == 1
