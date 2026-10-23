@@ -90,6 +90,11 @@ UNQUOTED_DEFAULT = testing.skip(
     "StarRocks accepts only quoted string literals as DEFAULT values, and cannot change a column's default value",
 )
 NULLABLE_TO_NOT_NULL = testing.skip("starrocks", "StarRocks cannot change a column from nullable to NOT NULL")
+AUTO_INCREMENT_IS_BIGINT = testing.skip(
+    "starrocks",
+    "StarRocks requires an AUTO_INCREMENT column to be BIGINT, so the dialect creates the INTEGER column as BIGINT "
+    "and there is no type change to detect",
+)
 
 
 class AutogenerateFKOptionsTest(_AutogenerateFKOptionsTest):
@@ -151,7 +156,7 @@ if hasattr(alembic_suite, "AutogenerateEmptyCommentsTest"):
 
 
 class AutoincrementTest(_AutoincrementTest):
-    test_alter_column_autoincrement_pk_explicit_true = PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS(
+    test_alter_column_autoincrement_pk_explicit_true = AUTO_INCREMENT_IS_BIGINT(
         _AutoincrementTest.test_alter_column_autoincrement_pk_explicit_true
     )
 
