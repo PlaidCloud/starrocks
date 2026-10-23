@@ -18,6 +18,8 @@ The dialect puts each column on its own indented line and each table clause on i
 drops the line breaks, so each expected string literal below is one line of the generated DDL.
 """
 
+import logging
+
 from sqlalchemy import BigInteger, Column, Computed, Date, DateTime, Integer, MetaData, String, Table, exc, testing
 from sqlalchemy.schema import CreateTable
 from sqlalchemy.testing import expect_raises_message, fixtures
@@ -260,36 +262,59 @@ class CreateTableCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             f"CREATE TABLE dist_tbl ({column_line})DISTRIBUTED BY {distributed_by}",
         )
 
-    @pytest.mark.parametrize("distributed_by", ["RANGE", "range", "RANGE BUCKETS 4"])
+    @testing.combinations(
+        ("range", "RANGE"), ("lowercase", "range"), ("buckets", "RANGE BUCKETS 4"), argnames="distributed_by", id_="ia"
+    )
     def test_range_distribution_omits_clause(self, distributed_by, caplog):
         """RANGE has no DISTRIBUTED BY syntax: StarRocks applies it when the clause is omitted."""
-        tbl = Table('dist_range_tbl', MetaData(), Column('k1', Integer), Column('v', Integer),
-                    starrocks_duplicate_key='k1',
-                    starrocks_distributed_by=distributed_by)
+        tbl = Table(
+            "dist_range_tbl",
+            MetaData(),
+            Column("k1", Integer),
+            Column("v", Integer),
+            starrocks_duplicate_key="k1",
+            starrocks_distributed_by=distributed_by,
+        )
         with caplog.at_level(logging.WARNING, logger="starrocks.dialect"):
-            sql = self._compile_table(tbl)
-        expected = "CREATE TABLE dist_range_tbl(k1 INTEGER, v INTEGER) DUPLICATE KEY(k1)"
-        assert normalize_sql(sql) == normalize_sql(expected)
+            self.assert_compile(
+                CreateTable(tbl),
+                "CREATE TABLE dist_range_tbl ("
+                "    k1 INTEGER, "
+                "    v INTEGER"
+                ")"
+                "DUPLICATE KEY (k1)",
+            )
         assert ("BUCKETS is ignored" in caplog.text) == ("BUCKETS" in distributed_by)
         assert "requires a key type or ORDER BY" not in caplog.text
 
     def test_range_distribution_with_order_by(self, caplog):
-        tbl = Table('dist_range_order_tbl', MetaData(), Column('k1', Integer),
-                    starrocks_order_by='k1',
-                    starrocks_distributed_by='RANGE')
+        tbl = Table(
+            "dist_range_order_tbl",
+            MetaData(),
+            Column("k1", Integer),
+            starrocks_order_by="k1",
+            starrocks_distributed_by="RANGE",
+        )
         with caplog.at_level(logging.WARNING, logger="starrocks.dialect"):
-            sql = self._compile_table(tbl)
-        expected = "CREATE TABLE dist_range_order_tbl(k1 INTEGER) ORDER BY(k1)"
-        assert normalize_sql(sql) == normalize_sql(expected)
+            self.assert_compile(
+                CreateTable(tbl),
+                "CREATE TABLE dist_range_order_tbl ("
+                "    k1 INTEGER"
+                ")"
+                "ORDER BY (k1)",
+            )
         assert "requires a key type or ORDER BY" not in caplog.text
 
     def test_range_distribution_without_key_warns(self, caplog):
         """Without a key type or ORDER BY, StarRocks falls back to RANDOM distribution."""
-        tbl = Table('dist_range_nokey_tbl', MetaData(), Column('k1', Integer),
-                    starrocks_distributed_by='RANGE')
+        tbl = Table("dist_range_nokey_tbl", MetaData(), Column("k1", Integer), starrocks_distributed_by="RANGE")
         with caplog.at_level(logging.WARNING, logger="starrocks.dialect"):
-            sql = self._compile_table(tbl)
-        assert normalize_sql(sql) == normalize_sql("CREATE TABLE dist_range_nokey_tbl(k1 INTEGER)")
+            self.assert_compile(
+                CreateTable(tbl),
+                "CREATE TABLE dist_range_nokey_tbl ("
+                "    k1 INTEGER"
+                ")",
+            )
         assert "requires a key type or ORDER BY" in caplog.text
 
     def test_order_by(self):

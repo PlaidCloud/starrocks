@@ -32,20 +32,17 @@ from unittest.mock import Mock
 
 from alembic.autogenerate.api import AutogenContext
 from alembic.operations.ops import UpgradeOps
-import pytest
-from sqlalchemy import Column, Integer, MetaData, Table, event, inspect
+from sqlalchemy import Column, Integer, MetaData, Table, event, inspect, testing
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DatabaseError
 from sqlalchemy.schema import CreateTable
+from sqlalchemy.testing import config, engines, expect_raises_message, fixtures
 
 from starrocks.alembic.compare import compare_starrocks_table
 from starrocks.common.params import TableInfoKeyWithPrefix
-from test.conftest_sr import create_test_engine
 
 
 logger = logging.getLogger(__name__)
-
-SCHEMA = "sr_range_dist_test"
 
 
 def _opt_in_to_range_distribution(dbapi_conn, _record) -> None:
@@ -58,57 +55,60 @@ def _opt_in_to_range_distribution(dbapi_conn, _record) -> None:
         cursor.close()
 
 
-def _range_distribution_available(engine: Engine) -> bool:
+def _range_distribution_available(engine: Engine, schema: str) -> bool:
     """Whether a table created without DISTRIBUTED BY gets RANGE distribution here."""
     with engine.begin() as conn:
-        conn.exec_driver_sql(f"CREATE DATABASE IF NOT EXISTS `{SCHEMA}`")
-        conn.exec_driver_sql(f"DROP TABLE IF EXISTS `{SCHEMA}`.`probe_range`")
+        conn.exec_driver_sql(f"CREATE DATABASE IF NOT EXISTS `{schema}`")
+        conn.exec_driver_sql(f"DROP TABLE IF EXISTS `{schema}`.`probe_range`")
         try:
             conn.exec_driver_sql(
-                f"CREATE TABLE `{SCHEMA}`.`probe_range` (k1 INT, v INT) DUPLICATE KEY(k1)"
+                f"CREATE TABLE `{schema}`.`probe_range` (k1 INT, v INT) DUPLICATE KEY(k1)"
             )
         except DatabaseError as exc:
             logger.info("range probe table not creatable: %s", exc)
             return False
-    return _distribute_type(engine, "probe_range") == "RANGE"
+    return _distribute_type(engine, schema, "probe_range") == "RANGE"
 
 
-def _distribute_type(engine: Engine, table: str) -> str:
+def _distribute_type(engine: Engine, schema: str, table: str) -> str:
     with engine.connect() as conn:
         return str(conn.exec_driver_sql(
             "SELECT DISTRIBUTE_TYPE FROM information_schema.tables_config "
-            f"WHERE TABLE_SCHEMA = '{SCHEMA}' AND TABLE_NAME = '{table}'"
+            f"WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}'"
         ).scalar()).upper()
 
 
-@pytest.mark.integration
-class TestRangeDistribution:
-    engine: Engine
+class RangeDistributionTest(fixtures.TestBase):
+    """Runs in a database of its own, named after the worker's, through an engine that opts in to RANGE."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
 
     @classmethod
-    def setup_class(cls) -> None:
-        cls.engine = create_test_engine()
+    def setup_test_class(cls) -> None:
+        cls.schema = f"{config.db.url.database}_range_dist"
+        cls.engine = engines.testing_engine(options={"scope": "class"})
         event.listen(cls.engine, "connect", _opt_in_to_range_distribution)
         cls.engine.dispose()  # drop pooled connections opened before the listener
-        if not _range_distribution_available(cls.engine):
+        if not _range_distribution_available(cls.engine, cls.schema):
             with cls.engine.begin() as conn:
-                conn.exec_driver_sql(f"DROP DATABASE IF EXISTS `{SCHEMA}`")
+                conn.exec_driver_sql(f"DROP DATABASE IF EXISTS `{cls.schema}`")
             cls.engine.dispose()
-            pytest.skip("cluster does not support RANGE distribution (needs StarRocks 4.1+)")
+            config.skip_test("cluster does not support RANGE distribution (needs StarRocks 4.1+)")
 
     @classmethod
-    def teardown_class(cls) -> None:
+    def teardown_test_class(cls) -> None:
         with cls.engine.begin() as conn:
-            conn.exec_driver_sql(f"DROP DATABASE IF EXISTS `{SCHEMA}`")
+            conn.exec_driver_sql(f"DROP DATABASE IF EXISTS `{cls.schema}`")
         cls.engine.dispose()
 
     def _create_range_table(self, name: str) -> Table:
         with self.engine.begin() as conn:
-            conn.exec_driver_sql(f"DROP TABLE IF EXISTS `{SCHEMA}`.`{name}`")
+            conn.exec_driver_sql(f"DROP TABLE IF EXISTS `{self.schema}`.`{name}`")
             conn.exec_driver_sql(
-                f"CREATE TABLE `{SCHEMA}`.`{name}` (k1 INT, v INT) DUPLICATE KEY(k1)"
+                f"CREATE TABLE `{self.schema}`.`{name}` (k1 INT, v INT) DUPLICATE KEY(k1)"
             )
-        return Table(name, MetaData(), autoload_with=self.engine, schema=SCHEMA)
+        return Table(name, MetaData(), autoload_with=self.engine, schema=self.schema)
 
     def _target(self, reflected: Table, distributed_by=None) -> Table:
         """The reflected table's definition, with DISTRIBUTED BY replaced."""
@@ -120,7 +120,7 @@ class TestRangeDistribution:
             kwargs[TableInfoKeyWithPrefix.DISTRIBUTED_BY] = distributed_by
         return Table(
             reflected.name, MetaData(), Column("k1", Integer), Column("v", Integer),
-            schema=SCHEMA, **kwargs,
+            schema=self.schema, **kwargs,
         )
 
     def _compare(self, reflected: Table, target: Table) -> list:
@@ -128,21 +128,21 @@ class TestRangeDistribution:
         autogen_context.dialect = self.engine.dialect
         autogen_context.inspector = inspect(self.engine)
         upgrade_ops = UpgradeOps()
-        compare_starrocks_table(autogen_context, upgrade_ops, SCHEMA, reflected.name, reflected, target)
+        compare_starrocks_table(autogen_context, upgrade_ops, self.schema, reflected.name, reflected, target)
         return upgrade_ops.ops
 
     def test_reflects_range(self):
         reflected = self._create_range_table("t_reflect")
         assert reflected.dialect_options["starrocks"]["distributed_by"] == "RANGE"
 
-    @pytest.mark.parametrize("distributed_by", [None, "RANGE"])
+    @testing.combinations(("unset", None), ("range", "RANGE"), argnames="distributed_by", id_="ia")
     def test_autogenerate_no_change(self, distributed_by):
         reflected = self._create_range_table("t_no_change")
         assert self._compare(reflected, self._target(reflected, distributed_by)) == []
 
     def test_autogenerate_range_to_hash_raises(self):
         reflected = self._create_range_table("t_to_hash")
-        with pytest.raises(NotImplementedError, match="RANGE-distributed table"):
+        with expect_raises_message(NotImplementedError, "RANGE-distributed table"):
             self._compare(reflected, self._target(reflected, "HASH(k1) BUCKETS 4"))
 
     def test_create_table_with_range_marker(self):
@@ -150,13 +150,13 @@ class TestRangeDistribution:
         name = "t_create"
         table = Table(
             name, MetaData(), Column("k1", Integer), Column("v", Integer),
-            schema=SCHEMA,
+            schema=self.schema,
             starrocks_duplicate_key="k1",
             starrocks_distributed_by="RANGE",
         )
         with self.engine.begin() as conn:
-            conn.exec_driver_sql(f"DROP TABLE IF EXISTS `{SCHEMA}`.`{name}`")
+            conn.exec_driver_sql(f"DROP TABLE IF EXISTS `{self.schema}`.`{name}`")
             ddl = str(CreateTable(table).compile(dialect=self.engine.dialect))
             assert "DISTRIBUTED BY" not in ddl
             conn.execute(CreateTable(table))
-        assert _distribute_type(self.engine, name) == "RANGE"
+        assert _distribute_type(self.engine, self.schema, name) == "RANGE"
