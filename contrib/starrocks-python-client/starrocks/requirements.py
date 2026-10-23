@@ -12,11 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from sqlalchemy.testing.requirements import SuiteRequirements
+from alembic.testing.requirements import SuiteRequirements as AlembicSuiteRequirements
+import sqlalchemy
 from sqlalchemy.testing import exclusions
+from sqlalchemy.testing.requirements import SuiteRequirements
 
 
-class Requirements(SuiteRequirements):
+IS_SQLALCHEMY_2 = int(sqlalchemy.__version__.split(".")[0]) >= 2
+
+
+class Requirements(SuiteRequirements, AlembicSuiteRequirements):
+    @property
+    def sqlalchemy_2(self) -> exclusions.compound:
+        """SQLAlchemy 2.0 or greater, which the view, materialized view and Alembic features rely on"""
+        return exclusions.skip_if(lambda config: not IS_SQLALCHEMY_2, "SQLAlchemy 2.0 or greater required")
+
     @property
     def unbounded_varchar(self):
         """Target database must support VARCHAR with no length"""
@@ -62,6 +72,11 @@ class Requirements(SuiteRequirements):
 
     @property
     def foreign_key_constraint_reflection(self):
+        return exclusions.closed()
+
+    @property
+    def foreign_key_name_reflection(self) -> exclusions.compound:
+        """Alembic: FK names reflect; StarRocks reflects no foreign keys at all"""
         return exclusions.closed()
 
     @property
