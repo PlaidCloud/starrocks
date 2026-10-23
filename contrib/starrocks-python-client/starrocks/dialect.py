@@ -93,6 +93,7 @@ from .datatype import (
     VARBINARY,
     VARCHAR,
     VARIANT,
+    StructuredType,
 )
 from .engine.interfaces import ReflectedMVState, ReflectedState, ReflectedViewState
 from .reflection import StarRocksInspector, StarRocksTableDefinitionParser
@@ -301,7 +302,7 @@ class StarRocksSQLCompiler(MySQLCompiler):
     ):
         if type_ is None:
             type_ = typeclause.type.dialect_impl(self.dialect)
-        if isinstance(type_, sqltypes.Boolean):
+        if isinstance(type_, (sqltypes.Boolean, StructuredType)):
             return self.dialect.type_compiler_instance.process(type_)
         return super().visit_typeclause(typeclause, type_, **kw)
 
