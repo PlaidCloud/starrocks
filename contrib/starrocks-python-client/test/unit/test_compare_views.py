@@ -197,8 +197,6 @@ class AutogenerateViewsTest(fixtures.TestBase):
 
     def test_duplicate_view_key_across_metadata_warns(self):
         """Duplicate view key across MetaData objects emits a warning."""
-        import warnings
-
         upgrade_ops = ops.UpgradeOps([])
         self.mock_inspector.get_view_names.return_value = []
         m1 = MetaData()

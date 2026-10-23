@@ -15,6 +15,7 @@
 """Materialized view comparison in autogenerate."""
 
 from unittest.mock import Mock
+import warnings
 
 from alembic.operations import ops
 from sqlalchemy import MetaData, Table, testing
@@ -259,10 +260,12 @@ class CompareMaterializedViewTest(fixtures.TestBase):
         eq_(len(upgrade_ops.ops), 0)
 
 
-class TestAutogenerateMaterializedViews:
+class AutogenerateMaterializedViewsTest(fixtures.TestBase):
     """Test full autogenerate flow with mock inspector for MVs."""
 
-    def setup_method(self, method):
+    __requires__ = ("sqlalchemy_2",)
+
+    def setup_test(self):
         self.mock_inspector = Mock()
         self.mock_autogen_context = Mock()
         self.mock_autogen_context.inspector = self.mock_inspector
@@ -298,8 +301,6 @@ class TestAutogenerateMaterializedViews:
 
     def test_duplicate_mv_key_across_metadata_warns(self):
         """Duplicate MV key across MetaData objects emits a warning."""
-        import warnings
-
         upgrade_ops = ops.UpgradeOps([])
         self.mock_inspector.get_materialized_view_names.return_value = []
         m1 = MetaData()
