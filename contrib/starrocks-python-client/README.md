@@ -282,22 +282,51 @@ For a full tutorial on advanced topics like data migrations, handling complex ty
 
 ### Tests
 
-#### Running Unit Tests
+Every test runs under [SQLAlchemy's testing plugin](https://github.com/sqlalchemy/sqlalchemy/blob/main/README.dialects.rst), against a running StarRocks cluster. A single `pytest` run covers the StarRocks tests in `test/sql`, `test/unit`, `test/integration` and `test/system`, SQLAlchemy's dialect compliance suite (`test/test_suite.py`) and Alembic's dialect suite (`test/test_suite_alembic.py`).
 
-To run tests for the StarRocks SQLAlchemy dialect, first install the package in editable mode along with its testing dependencies:
+#### Setting Up
+
+Install the package in editable mode with its test and Alembic dependencies:
 
 ```bash
-pip install -e .
-pip install pytest mock
+pip install -e ".[test,alembic]"
 ```
 
-Then, you can run the test suite using `pytest`:
+Create the database the tests use, and the two extra schemas SQLAlchemy's suite needs:
+
+```SQL
+CREATE DATABASE IF NOT EXISTS test_sqla;
+CREATE DATABASE IF NOT EXISTS test_schema;
+CREATE DATABASE IF NOT EXISTS test_schema_2;
+
+-- set it if you're testing on a small shared-nothing cluster
+ADMIN SET FRONTEND CONFIG ("default_replication_num" = "1");
+```
+
+The connection URL is taken from, in order of precedence:
+
+1. `--dburi starrocks://<User>:<Password>@<Host>:<Port>/<Database>` on the command line;
+2. the `STARROCKS_URL` environment variable;
+3. a `[db]` section with a `default` URL in a git-ignored `test.cfg` next to `setup.cfg`;
+4. `setup.cfg`'s `[db] default`, which is `starrocks://root@localhost:9030/test_sqla`.
+
+#### Running the Tests
+
+Run `pytest` from this directory:
 
 ```bash
 pytest
 ```
 
-This will run the standard SQLAlchemy dialect test suite as well as StarRocks-specific tests. For more details, please check [SQLAlchemy's guide for dialect development](https://github.com/sqlalchemy/sqlalchemy/blob/main/README.dialects.rst).
+`pyproject.toml` runs the tests on four `pytest-xdist` workers. Each worker gets its own databases, created from the configured one and dropped at the end, so the workers do not interfere; pass `-n0` to run serially against the configured database. A subset runs the same way, for example `pytest test/sql` or `pytest test/test_suite.py`.
+
+Tests that StarRocks itself cannot support are skipped. Tests that fail because of a known dialect bug are marked `fails_on` with the reason, so a fix shows up as an unexpected pass.
+
+The tests run on SQLAlchemy 2.0 and 1.4. On 1.4 only the compliance suite and the core compile and reflection tests run; the view, materialized view and Alembic tests need SQLAlchemy 2.0 and are skipped.
+
+#### Writing Tests
+
+Tests are classes derived from `sqlalchemy.testing.fixtures.TestBase`, with methods named `test_*`. The plugin silently ignores anything else, so collection fails for a module-level test function or a plain test class. Use `AssertsCompiledSQL` and `__dialect__` for compile tests, the `connection` and `metadata` fixtures for database tests, and `testing.combinations` for parametrized cases.
 
 #### Test Logging
 
@@ -309,75 +338,6 @@ log_cli = true
 log_cli_level = DEBUG
 log_cli_format = %(levelname)-5.5s [%(name)s] %(message)s
 ```
-
-#### Running Integration and System Tests
-
-To run the integration and system tests, you must have a running StarRocks cluster. The tests require a connection URL to be provided via the `STARROCKS_URL` environment variable.
-
-1. **Set up your StarRocks database:**
-   Ensure your StarRocks instance is running and you have a database available for testing (e.g., `test_sqla`).
-
-   ```SQL
-   CREATE DATABASE IF NOT EXISTS test_sqla;
-
-   -- set it if you're testing cases on small shared-nothing clusters
-   ADMIN SET FRONTEND CONFIG ("default_replication_num" = "1");
-   ```
-
-2. **Configure the connection URL:**
-   Set the `STARROCKS_URL` environment variable in your shell. The format should be:
-
-   ```bash
-   export STARROCKS_URL="starrocks://<User>:<Password>@<Host>:<Port>/<Database>"
-   ```
-
-   For example (the default url will be this if you don't set it):
-
-   ```bash
-   export STARROCKS_URL="starrocks://root@127.0.0.1:9030/test_sqla"
-   ```
-
-3. **Run the tests:**
-   With the development environment set up and the environment variable configured, you can run the tests using `pytest`:
-
-   ```bash
-   pytest
-   ```
-
-#### Running the Full SQLAlchemy Test Suite
-
-In addition to the StarRocks-specific tests, you can run the comprehensive test suite provided by SQLAlchemy to ensure full compatibility. To do this, you need to enable the SQLAlchemy test plugin in `test/conftest.py`.
-
-1. **Enable the SQLAlchemy test plugin:**
-   Open the file `test/conftest.py` and uncomment the line that imports from `sqlalchemy.testing.plugin.pytestplugin`.
-
-   ```python
-   # test/conftest.py
-
-   # ... other imports
-
-   # To run the test_suite.py and full SQLAlchemy test suite, uncomment the following line:
-   from sqlalchemy.testing.plugin.pytestplugin import *
-   ```
-
-   > NOTE: If you enable this line, StarRocks-specific tests will not run. We will modify the StarRocks-specific tests using SQLAlchemy's test framework in the future.
-
-   You can enable SQLAlchemy's tests from the file `test/test_suite.py` by uncomment the following line:
-
-   ```python
-   # To run the full SQLAlchemy test suite, uncomment the following line:
-   from sqlalchemy.testing.suite import *
-   ```
-
-2. **Run the tests:**
-
-   ```bash
-   pytest test/test_suite.py
-   ```
-
-This will run the standard SQLAlchemy dialect test suite as well as StarRocks-specific tests. For more details, please check [SQLAlchemy's guide for dialect development](https://github.com/sqlalchemy/sqlalchemy/blob/main/README.dialects.rst).
-
-**Note:** After running the full suite, it's good practice to re-comment the line in `test/conftest.py` to keep standard test runs focused on the dialect-specific tests.
 
 ### Build and Deploy
 

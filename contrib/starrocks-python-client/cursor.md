@@ -53,11 +53,12 @@ Please follow these standards and procedures when assisting with development:
   - **Markdownlint**: Follow the project's Markdownlint standards for all Markdown files.
 
 - **Testing Requirements**:
-  - **Framework**: Use `pytest`.
+  - **Framework**: Use `pytest` with SQLAlchemy's testing plugin. Test classes derive from `sqlalchemy.testing.fixtures.TestBase` and their methods are named `test_*`; the plugin ignores anything else, and collection fails for a module-level test function or a plain test class.
   - **Practice**:
     - Every new feature or bug fix must have corresponding test cases, following a "unit tests first, then integration tests" sequence.
+    - Mark a test StarRocks cannot support with `testing.skip("starrocks", reason)`, and one that fails because of a known dialect bug with `testing.fails_on("starrocks", reason)`.
   - **Review**: I expect to review the test cases you write or modify before you implement the code to pass them. [[memory:8065598]]
-  - **Running Tests**: Use the `pytest test/` command to run all tests.
+  - **Running Tests**: Run `pytest` from the client directory; every test, including SQLAlchemy's and Alembic's dialect suites, runs against a live StarRocks cluster.
 
 ## 4. Documentation Standards
 
