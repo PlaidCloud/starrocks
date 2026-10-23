@@ -80,6 +80,11 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
         return exclusions.closed()
 
     @property
+    def fk_names(self) -> exclusions.compound:
+        """Alembic: FK names reflect (Alembic before 1.20 leaves this open); StarRocks has no foreign keys"""
+        return exclusions.closed()
+
+    @property
     def fk_onupdate(self) -> exclusions.compound:
         """Alembic: ON UPDATE round-trips through autogenerate; StarRocks has no foreign keys"""
         return exclusions.closed()

@@ -26,10 +26,12 @@ from alembic.testing.suite import (
     BackendAlterColumnTest as _BackendAlterColumnTest,
 )
 from sqlalchemy import testing
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.testing.fixtures import TestBase
 
 from starrocks.common.defaults import ReflectionTableDefaults
 from starrocks.common.types import SystemRunMode
+from test.util import alembic_runs_dialect_comparators_first
 
 
 def _server_replication_default_differs_from_dialect_default(config: object) -> bool:
@@ -38,19 +40,42 @@ def _server_replication_default_differs_from_dialect_default(config: object) -> 
     Autogenerate compares a table's reflected ``replication_num`` against the dialect's hard-coded default, so
     it emits a spurious ``alter_table_properties`` only when the two differ, as on a single-replica cluster.
     Shared-data clusters are treated as matching: the dialect assumes 1 there, and this has not been checked.
+    A test user that may not read the FE config is treated as matching too, so a failure there shows up.
     """
     with config.db.connect() as connection:
         run_mode = connection.dialect.run_mode
         if run_mode == SystemRunMode.SHARED_DATA:
             return False
-        configured = connection.exec_driver_sql("ADMIN SHOW FRONTEND CONFIG LIKE 'default_replication_num'").first()
+        try:
+            configured = connection.exec_driver_sql(
+                "ADMIN SHOW FRONTEND CONFIG LIKE 'default_replication_num'"
+            ).first()
+        except DBAPIError:
+            return False
     return configured[2] != ReflectionTableDefaults.properties(run_mode)["replication_num"]
+
+
+def _spurious_property_alter_precedes_table_comment_op(config: object) -> bool:
+    """Whether the spurious ``alter_table_properties`` op comes before Alembic's table comment op.
+
+    Upstream's table comment tests check only the first op. The dialect's table comparator runs ahead of
+    Alembic's comment comparator only where Alembic runs its global registry first.
+    """
+    return _server_replication_default_differs_from_dialect_default(config) and (
+        alembic_runs_dialect_comparators_first(config)
+    )
 
 
 PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS = testing.fails_if(
     _server_replication_default_differs_from_dialect_default,
     "autogenerate emits alter_table_properties for default.replication_num, comparing against a hard-coded "
     "default instead of the server's (https://github.com/StarRocks/starrocks/pull/80738)",
+)
+PROPERTY_ALTER_BEFORE_TABLE_COMMENT_OP = testing.fails_if(
+    _spurious_property_alter_precedes_table_comment_op,
+    "autogenerate emits alter_table_properties for default.replication_num ahead of the table comment op, "
+    "comparing against a hard-coded default instead of the server's "
+    "(https://github.com/StarRocks/starrocks/pull/80738)",
 )
 RENAME_COMBINED_WITH_MODIFY = testing.fails_on(
     "starrocks", "the dialect combines MODIFY COLUMN with RENAME COLUMN, which StarRocks rejects as conflicting"
@@ -81,11 +106,11 @@ class AutogenerateFKOptionsTest(_AutogenerateFKOptionsTest):
 
 class AutogenerateCommentsTest(_AutogenerateCommentsTest):
     test_add_column_comment = PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS(_AutogenerateCommentsTest.test_add_column_comment)
-    test_add_table_comment = PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS(_AutogenerateCommentsTest.test_add_table_comment)
+    test_add_table_comment = PROPERTY_ALTER_BEFORE_TABLE_COMMENT_OP(_AutogenerateCommentsTest.test_add_table_comment)
     test_alter_column_comment = PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS(
         _AutogenerateCommentsTest.test_alter_column_comment
     )
-    test_alter_table_comment = PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS(
+    test_alter_table_comment = PROPERTY_ALTER_BEFORE_TABLE_COMMENT_OP(
         _AutogenerateCommentsTest.test_alter_table_comment
     )
     test_existing_column_comment_no_change = PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS(
@@ -97,7 +122,7 @@ class AutogenerateCommentsTest(_AutogenerateCommentsTest):
     test_remove_column_comment = PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS(
         _AutogenerateCommentsTest.test_remove_column_comment
     )
-    test_remove_table_comment = PROPERTY_ALTER_FROM_HARDCODED_DEFAULTS(
+    test_remove_table_comment = PROPERTY_ALTER_BEFORE_TABLE_COMMENT_OP(
         _AutogenerateCommentsTest.test_remove_table_comment
     )
 

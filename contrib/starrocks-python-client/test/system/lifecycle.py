@@ -26,7 +26,7 @@ import time
 from typing import Any, Dict, List, NamedTuple, Optional
 import uuid
 
-from alembic import command, util as alembic_util
+from alembic import command
 from alembic.config import Config
 from alembic.testing import env
 from sqlalchemy import MetaData, testing
@@ -34,22 +34,14 @@ from sqlalchemy.engine import Engine, Inspector
 from sqlalchemy.testing import config, engines, fixtures
 
 from starrocks.dialect import StarRocksDialect
+from test.util import alembic_runs_dialect_comparators_first
 
 
 logger = logging.getLogger(__name__)
 
 
-def _alembic_runs_dialect_schema_comparators_first(config: object) -> bool:
-    """Whether Alembic runs comparators from its global registry ahead of its own table comparators.
-
-    Alembic's plugin-based PriorityDispatcher copies the global registry, which holds the dialect's view and
-    materialized view ``schema`` comparators, before adding its own, so those comparators run first.
-    """
-    return hasattr(alembic_util, "PriorityDispatcher")
-
-
 VIEW_CREATED_BEFORE_ITS_TABLE = testing.fails_if(
-    _alembic_runs_dialect_schema_comparators_first,
+    alembic_runs_dialect_comparators_first,
     "autogenerate puts the dialect's create_view/create_materialized_view before the create_table of the table "
     "it selects from, so the upgrade fails with an unknown table",
 )
