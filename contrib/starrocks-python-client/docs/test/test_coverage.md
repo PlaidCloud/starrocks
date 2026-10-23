@@ -2,6 +2,8 @@
 
 This document provides a high-level overview of the test coverage for the StarRocks Python Client, organized by feature area.
 
+All tests run under SQLAlchemy's testing plugin against a live StarRocks cluster, together with SQLAlchemy's dialect compliance suite (`test/test_suite.py`) and Alembic's dialect suite (`test/test_suite_alembic.py`). `test/test_files_clause.py` covers the `FILES()` clause compilation.
+
 ## 1. DDL Compilation (`test/sql/`)
 
 This suite verifies that Python schema definitions are correctly compiled into StarRocks-compliant DDL statements.
@@ -65,12 +67,13 @@ Tests the comparison logic that detects differences between database state and m
 - **`test_parser.py`**: Tests SQL parsing utilities.
 - **`test_reflection_defaults.py`**: Tests default value reflection logic.
 - **`test_sql_normalization.py`**: Tests SQL normalization utilities.
-- **`test_utils.py`**: Tests utility functions.
 - **`test_view_schema.py`**: Tests view schema handling.
 
 ## 5. End-to-End System Tests (`test/system/`)
 
 This is the most comprehensive test suite that simulates the complete Alembic lifecycle from schema definition to migration execution. These tests verify the entire workflow that users would experience in production.
+
+The tests share `test/system/lifecycle.py`, which gives each test a database of its own and an Alembic environment in Alembic's staging directory, and drives Alembic's commands against it.
 
 ### 5.1 Table Lifecycle (`test_table_lifecycle.py`)
 
