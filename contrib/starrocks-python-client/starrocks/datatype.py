@@ -20,10 +20,11 @@ import json
 import re
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
-from sqlalchemy import func
+from sqlalchemy import cast, func
 import sqlalchemy.dialects.mysql.types as mysql_types
 from sqlalchemy.engine import Dialect
 from sqlalchemy.sql import sqltypes
+from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.types import UserDefinedType
 
 
@@ -253,6 +254,25 @@ class StructuredType(UserDefinedType):
 
         return process
 
+    def bind_processor(self, dialect: Dialect) -> Callable[[Optional[Any]], Optional[str]]:
+        """
+        Encode Python values (list, dict, ...) as JSON text for binding.
+
+        The DBAPI driver has no native encoding for structured types, so
+        values are sent as a JSON string and cast to the target structured
+        type at bind time; see ``bind_expression``.
+        """
+        def process(value: Optional[Any]) -> Optional[str]:
+            if value is None:
+                return None
+            return json.dumps(value, default=str)
+
+        return process
+
+    def bind_expression(self, bindvalue: ColumnElement) -> ColumnElement:
+        """Cast the JSON-encoded bind parameter to this structured type."""
+        return cast(bindvalue, self)
+
 
 class ARRAY(StructuredType):
     """
@@ -327,6 +347,14 @@ class MAP(StructuredType):
             types.update(self.value_type.get_sub_item_types())
         return types
 
+    def bind_expression(self, bindvalue: ColumnElement) -> ColumnElement:
+        """Cast the JSON-encoded bind parameter to this MAP type.
+
+        Unlike ``ARRAY``, StarRocks does not support casting a VARCHAR
+        directly to ``MAP``; the value must be parsed to ``JSON`` first.
+        """
+        return cast(func.parse_json(bindvalue), self)
+
 
 _PLAIN_FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -387,6 +415,14 @@ class STRUCT(StructuredType):
             if hasattr(type_, 'get_sub_item_types'):
                 types.update(type_.get_sub_item_types())
         return types
+
+    def bind_expression(self, bindvalue: ColumnElement) -> ColumnElement:
+        """Cast the JSON-encoded bind parameter to this STRUCT type.
+
+        Unlike ``ARRAY``, StarRocks does not support casting a VARCHAR
+        directly to ``STRUCT``; the value must be parsed to ``JSON`` first.
+        """
+        return cast(func.parse_json(bindvalue), self)
 
 
 class JSON(sqltypes.JSON):
