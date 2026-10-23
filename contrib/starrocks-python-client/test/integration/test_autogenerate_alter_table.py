@@ -36,8 +36,8 @@ Example: STARROCKS_URL=starrocks://user:pass@localhost:9030/test_db
 
 import logging
 import textwrap
-from typing import Optional
-from unittest.mock import Mock
+from typing import Callable, Optional
+from unittest.mock import Mock, patch
 
 from alembic.autogenerate import comparators
 from alembic.operations.ops import ModifyTableOps, UpgradeOps
