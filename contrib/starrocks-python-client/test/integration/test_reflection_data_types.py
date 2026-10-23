@@ -55,7 +55,6 @@ from starrocks.datatype import (
     VARBINARY,
     VARCHAR,
 )
-from test.util import STRUCT_FIELDS_BACKTICKED
 
 
 logger = logging.getLogger(__name__)
@@ -364,7 +363,6 @@ class DataTypeReflectionTest(fixtures.TestBase):
                (isinstance(nested_map_type.value_type.value_type, VARCHAR) and
                 getattr(nested_map_type.value_type.value_type, 'length', None) == 65533)
 
-    @STRUCT_FIELDS_BACKTICKED
     def test_reflect_struct_types(self, connection):
         """Test reflection of STRUCT data types"""
         table_name = "test_reflect_struct_types"
@@ -466,7 +464,6 @@ class DataTypeReflectionTest(fixtures.TestBase):
         assert isinstance(map_of_arrays.value_type, ARRAY)
         assert isinstance(map_of_arrays.value_type.item_type, DECIMAL)
 
-    @STRUCT_FIELDS_BACKTICKED
     def test_reflect_complex_nested_struct(self, connection):
         """Test reflection of a STRUCT nesting ARRAY, MAP and STRUCT types"""
         table_name = "test_reflect_complex_struct"
@@ -559,7 +556,6 @@ class DataTypeReflectionTest(fixtures.TestBase):
             ),
         )
 
-    @STRUCT_FIELDS_BACKTICKED
     def test_round_trip_struct_type_consistency(self, connection):
         """Test that a STRUCT type stays consistent through create -> reflect -> compare cycle"""
         self._assert_reflected_types_compare_equal(
@@ -620,7 +616,6 @@ class DataTypeReflectionTest(fixtures.TestBase):
         assert isinstance(char_col, CHAR)
         assert char_col.length == 1
 
-    @STRUCT_FIELDS_BACKTICKED
     def test_edge_case_parameters_preservation_in_struct(self, connection):
         """Test that edge case parameters nested in a STRUCT are preserved during reflection"""
         table_name = "test_edge_case_parameters_struct"
