@@ -727,6 +727,8 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         # Order By
         if order_by := opts.get(TableInfoKey.ORDER_BY):
+            if isinstance(order_by, (list, tuple)):
+                order_by = ", ".join(str(item) for item in order_by)
             order_by = TableAttributeNormalizer.remove_outer_parentheses(order_by)
             table_opts.append(f'ORDER BY ({order_by})')
 

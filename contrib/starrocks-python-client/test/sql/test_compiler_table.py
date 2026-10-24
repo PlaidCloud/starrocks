@@ -200,6 +200,34 @@ class CreateTableCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         with expect_raises_message(exc.CompileError, "only valid for AGGREGATE KEY tables"):
             CreateTable(tbl).compile(dialect=self.__dialect__)
 
+    @testing.combinations(
+        ("string", "event_date, user_id"),
+        ("parenthesised_string", "(event_date, user_id)"),
+        ("list", ["event_date", "user_id"]),
+        ("tuple", ("event_date", "user_id")),
+        argnames="order_by",
+        id_="ia",
+    )
+    def test_order_by_forms(self, order_by):
+        """``starrocks_order_by`` takes a column list string, or a list of columns as ALTER TABLE ORDER BY does."""
+        tbl = Table(
+            "ordered_tbl",
+            MetaData(),
+            Column("user_id", Integer),
+            Column("event_date", Date),
+            starrocks_duplicate_key="user_id",
+            starrocks_order_by=order_by,
+        )
+        self.assert_compile(
+            CreateTable(tbl),
+            "CREATE TABLE ordered_tbl ("
+            "    user_id INTEGER, "
+            "    event_date DATE"
+            ")"
+            "DUPLICATE KEY (user_id)"
+            "ORDER BY (event_date, user_id)",
+        )
+
     def test_column_default_value(self):
         tbl = Table(
             "default_val_tbl",
