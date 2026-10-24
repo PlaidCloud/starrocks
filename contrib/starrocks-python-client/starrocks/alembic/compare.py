@@ -1407,6 +1407,22 @@ def check_table_kind_for_view_mv(
 # Only starrocks-specific table attributes are compared.
 # Other table attributes are compared using generic comparison logic in Alembic.
 # ==============================================================================
+class UnalterableChange(NotImplementedError):
+    """A difference between metadata and database that StarRocks has no ALTER statement for."""
+
+
+def _skip_unalterable_change(compare_attribute: Callable[[], None]) -> None:
+    """Run one table attribute comparison, turning a change StarRocks cannot ALTER into a warning.
+
+    Autogenerate then still writes the operations for the table's other attributes and for every other table,
+    instead of aborting the whole run; the warning says what has to be changed by hand.
+    """
+    try:
+        compare_attribute()
+    except UnalterableChange as change:
+        logger.warning("%s No operation is generated for it; apply this change by hand.", change)
+
+
 @comparators_dispatch_for_starrocks("table")
 def compare_starrocks_table(
     autogen_context: AutogenContext,
@@ -1427,8 +1443,9 @@ def compare_starrocks_table(
         conn_table: Table object in the database, already reflected from the database
         metadata_table: Table object in the metadata
 
+    A change StarRocks cannot ALTER, such as a new key type or partitioning, is logged as a warning and skipped.
+
     Raises:
-        NotImplementedError: If a change is detected that is not supported in StarRocks.
         ValueError: If comparing View/MaterializedView objects (should use include_object_for_view_mv).
     """
     # Handle table creation and deletion scenarios
@@ -1481,13 +1498,14 @@ def compare_starrocks_table(
     # Track the number of operations before comparison
     ops_before = len(upgrade_ops.ops)
 
-    _compare_table_engine(upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes)
-    _compare_table_key(upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes)
+    attributes = (upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes)
+    _skip_unalterable_change(lambda: _compare_table_engine(*attributes))
+    _skip_unalterable_change(lambda: _compare_table_key(*attributes))
     # Note: COMMENT comparison is handled by Alembic's built-in _compare_table_comment
-    _compare_table_partition(upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes)
-    _compare_table_distribution(upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes)
-    _compare_table_order_by(upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes)
-    _compare_table_properties(upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes, run_mode)
+    _skip_unalterable_change(lambda: _compare_table_partition(*attributes))
+    _skip_unalterable_change(lambda: _compare_table_distribution(*attributes))
+    _skip_unalterable_change(lambda: _compare_table_order_by(*attributes))
+    _skip_unalterable_change(lambda: _compare_table_properties(*attributes, run_mode))
 
     # Log summary if any operations were generated
     ops_after = len(upgrade_ops.ops)
@@ -1573,7 +1591,7 @@ def _compare_table_key(
         if meta_key is None:
             meta_key = ReflectionTableDefaults.reflected_key_info()
         if conn_key.type != meta_key.type:
-            raise NotImplementedError(
+            raise UnalterableChange(
                 f"Table '{table_name}' has different key types: {conn_key.type} to {meta_key.type}, "
                 "but it's not supported to change the key type."
             )
@@ -1896,7 +1914,7 @@ def _check_range_distribution(
             f"or recreate the {ddl_object.lower()} after enabling range distribution. For models "
             f"shared across clusters, leave DISTRIBUTED BY unset instead of setting 'RANGE'."
         )
-    raise NotImplementedError(
+    raise UnalterableChange(
         f"{object_label} {table_fqn!r}: Attribute 'DISTRIBUTED BY' differs: "
         f"'{conn_distribution}' (in database) vs '{meta_distribution}' (in metadata). "
         f"{reason} No ALTER statement will be generated automatically."
@@ -2130,7 +2148,7 @@ def _compare_single_table_attribute(
         True if there's a meaningful change that requires an ALTER statement.
 
     Raises:
-        NotImplementedError: If support_change=False and a change is detected
+        UnalterableChange: If support_change=False and a change is detected
 
     Logic:
         1. If meta specifies value != (conn value or default value) -> change needed
@@ -2170,8 +2188,7 @@ def _compare_single_table_attribute(
                     f"but '{meta_str}' in metadata. "
                     f"Please update your metadata to match the database."
                 )
-                logger.error(error_msg)
-                raise NotImplementedError(error_msg)
+                raise UnalterableChange(error_msg)
             # Log the detected change at INFO level
             logger.info(
                 f"Detected attribute {attribute_name.upper()} change on {object_label.lower()} {table_fqn!r}, "
@@ -2256,10 +2273,11 @@ def compare_starrocks_column_agg_type(
         # "KEY", "SUM" for set, None for unsert
         if alter_column_op is not None:
             alter_column_op.kw[ColumnAggInfoKeyWithPrefix.AGG_TYPE] = meta_agg_type
-        raise NotImplementedError(
+        logger.warning(
             f"StarRocks does not support changing the aggregation type of a column: '{cname}', "
-            f"from {conn_agg_type} to {meta_agg_type}."
+            f"from {conn_agg_type} to {meta_agg_type}. No operation is generated for it; apply this change by hand."
         )
+        return
 
     # we need to set it in the AlterColumnOp, because the KEY/AGG_TYPE is always needed.
     # TODO: But currently, it's not passed to MySQLModifyColumn

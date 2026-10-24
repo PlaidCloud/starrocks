@@ -36,7 +36,7 @@ from sqlalchemy import Column, Integer, MetaData, Table, event, inspect, testing
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DatabaseError
 from sqlalchemy.schema import CreateTable
-from sqlalchemy.testing import config, engines, expect_raises_message, fixtures
+from sqlalchemy.testing import config, engines, fixtures
 
 from starrocks.alembic.compare import compare_starrocks_table
 from starrocks.common.params import TableInfoKeyWithPrefix
@@ -140,10 +140,11 @@ class RangeDistributionTest(fixtures.TestBase):
         reflected = self._create_range_table("t_no_change")
         assert self._compare(reflected, self._target(reflected, distributed_by)) == []
 
-    def test_autogenerate_range_to_hash_raises(self):
+    def test_autogenerate_range_to_hash_warns(self, caplog):
+        """A RANGE table cannot be redistributed, so autogenerate warns and generates nothing for it."""
         reflected = self._create_range_table("t_to_hash")
-        with expect_raises_message(NotImplementedError, "RANGE-distributed table"):
-            self._compare(reflected, self._target(reflected, "HASH(k1) BUCKETS 4"))
+        assert self._compare(reflected, self._target(reflected, "HASH(k1) BUCKETS 4")) == []
+        assert "RANGE-distributed table" in caplog.text
 
     def test_create_table_with_range_marker(self):
         """A model marked RANGE compiles without DISTRIBUTED BY and yields a RANGE table."""

@@ -20,7 +20,7 @@ from sqlalchemy import Column, MetaData, Table, testing
 from sqlalchemy.testing import fixtures
 
 import starrocks.alembic  # noqa: F401
-from starrocks.datatype import INTEGER
+from starrocks.datatype import DATETIME, INTEGER
 
 
 class OmittedAttributesTest(fixtures.TestBase):
@@ -48,3 +48,45 @@ class OmittedAttributesTest(fixtures.TestBase):
             assert self._diffs(connection, metadata, "unexpressible_") == []
         finally:
             connection.exec_driver_sql("DROP TABLE unexpressible_hash")
+
+
+class UnalterableChangesTest(fixtures.TestBase):
+    """A change StarRocks cannot ALTER is warned about and skipped; the rest of the migration is still generated."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @testing.requires.sqlalchemy_2
+    def test_partition_change_does_not_stop_other_tables(self, connection, caplog):
+        connection.exec_driver_sql(
+            "CREATE TABLE unalterable_part (id INT, dt DATETIME) DUPLICATE KEY(id) "
+            "PARTITION BY date_trunc('day', dt) DISTRIBUTED BY HASH(id) BUCKETS 1"
+        )
+        connection.exec_driver_sql(
+            "CREATE TABLE unalterable_plain (id INT) DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1"
+        )
+        try:
+            metadata = MetaData()
+            Table(
+                "unalterable_part",
+                metadata,
+                Column("id", INTEGER),
+                Column("dt", DATETIME),
+                starrocks_duplicate_key="id",
+                starrocks_partition_by="date_trunc('month', dt)",
+                starrocks_distributed_by="HASH(id) BUCKETS 1",
+            )
+            Table(
+                "unalterable_plain",
+                metadata,
+                Column("id", INTEGER),
+                Column("added", INTEGER),
+                starrocks_duplicate_key="id",
+                starrocks_distributed_by="HASH(id) BUCKETS 1",
+            )
+            diffs = OmittedAttributesTest._diffs(connection, metadata, "unalterable_")
+            assert [(diff[0], diff[2], diff[3].name) for diff in diffs] == [("add_column", "unalterable_plain", "added")]
+            assert "StarRocks does not support 'ALTER TABLE PARTITION BY'" in caplog.text
+        finally:
+            connection.exec_driver_sql("DROP TABLE unalterable_part")
+            connection.exec_driver_sql("DROP TABLE unalterable_plain")
