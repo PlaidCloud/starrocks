@@ -657,13 +657,14 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             raise exc.CompileError(f"Property {key!r} has no value; StarRocks properties are strings")
         return self.sql_text(f"{self.quoted_property(key)}{separator}{self.quoted_property(value)}")
 
-    def sql_text(self, text: str) -> str:
+    def sql_text(self, text: Any) -> str:
         """Return SQL given as text, such as a view definition or a PARTITION BY clause, ready to splice into DDL.
 
         The driver formats parameters into a statement with ``%``, so a ``%`` of the text, as in
         ``str2date(s, '%Y-%m-%d')`` or ``date_format(d, '%Y')``, is doubled for a driver that does. Identifiers
-        and comments are escaped by SQLAlchemy already.
+        and comments are escaped by SQLAlchemy already. A reflected clause object gives its text.
         """
+        text = str(text)
         return text.replace("%", "%%") if self.preparer._double_percents else text
 
     def visit_create_index(self, create: sa_schema.CreateIndex, **kw: Any) -> str:  # type: ignore[override]
