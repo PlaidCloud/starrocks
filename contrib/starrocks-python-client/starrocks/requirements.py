@@ -189,7 +189,11 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
 
     @property
     def sane_rowcount(self) -> exclusions.compound:
-        """UPDATE and DELETE report how many rows they matched."""
+        """UPDATE and DELETE on a PRIMARY KEY table report how many rows they matched.
+
+        A DELETE on a DUPLICATE or UNIQUE KEY table reports 0 rows, even when it deletes some, so the ORM warns that
+        it matched none; the suite's tables are PRIMARY KEY tables.
+        """
         return exclusions.open()
 
     @property
@@ -360,7 +364,10 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
 
     @property
     def precision_numerics_retains_significant_digits(self) -> exclusions.compound:
-        """DECIMAL keeps significant digits, so ``Numeric`` without a scale reads back exact."""
+        """DECIMAL keeps trailing zeros: ``Numeric(5, 3)`` reads 1.000 back as ``Decimal('1.000')``.
+
+        ``Numeric`` without a precision is ``decimal(10, 0)`` in StarRocks, so it rounds a fraction away.
+        """
         return exclusions.open()
 
     @property
