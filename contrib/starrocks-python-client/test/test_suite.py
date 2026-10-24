@@ -45,6 +45,7 @@ from sqlalchemy.testing.suite import (
     CompositeKeyReflectionTest,
     CTETest as _CTETest,
     FetchLimitOffsetTest as _FetchLimitOffsetTest,
+    JSONLegacyStringCastIndexTest as _JSONLegacyStringCastIndexTest,
     JSONTest as _JSONTest,
     LongNameBlowoutTest,
     NumericTest as _NumericTest,
@@ -122,6 +123,15 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL, SRAssertsCompiledSQLMix
         self.assert_compile_normalized(
             schema.CreateTable(tbl),
             'CREATE TABLE btable (id INTEGER NOT NULL)PRIMARY KEY(id) DISTRIBUTED BY HASH(id)PROPERTIES("replication_num"="3")')
+
+    def test_offset_without_limit_gets_a_limit(self):
+        """StarRocks takes OFFSET only after LIMIT; 2**62 - 1 rows leaves the sum within 64 bits."""
+        t = table("t", column("id"))
+        self.assert_compile(
+            select(t.c.id).order_by(t.c.id).offset(5),
+            "SELECT t.id FROM t ORDER BY t.id LIMIT 4611686018427387903 OFFSET 5",
+            literal_binds=True,
+        )
 
 
 class StarrocksMogrifyTest(fixtures.TablesTest, AssertsCompiledSQL):
@@ -214,20 +224,6 @@ class FetchLimitOffsetTest(_FetchLimitOffsetTest):
             ],
         )
 
-    @testing.skip('starrocks', 'cannot render offset without limit')
-    @testing.requires.offset
-    def test_simple_offset(self, connection):
-        pass
-
-    @testing.skip('starrocks', 'cannot render offset without limit')
-    @testing.requires.offset
-    def test_simple_offset_zero(self, connection):
-        pass
-
-    @testing.skip('starrocks', 'cannot render offset without limit')
-    @testing.requires.bound_limit_offset
-    def test_bound_offset(self, connection):
-        pass
 
 
 class NumericTest(_NumericTest,):
@@ -451,18 +447,35 @@ class StringTest(_StringTest):
         )
 
 class CTETest(_CTETest):
-    @testing.requires.ctes_with_update_delete
-    @testing.skip('starrocks', 'needs a primary column')
-    def test_delete_scalar_subq_round_trip(self, connection):
-        pass
+    """The suite's tables become PRIMARY KEY tables, the only kind StarRocks lets UPDATE and DELETE target."""
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "some_table",
+            metadata,
+            Column("id", Integer, primary_key=True, autoincrement=False),
+            Column("data", String(50)),
+            Column("parent_id", Integer),
+            starrocks_primary_key="id",
+            starrocks_distributed_by="HASH(id)",
+        )
+
+        Table(
+            "some_other_table",
+            metadata,
+            Column("id", Integer, primary_key=True, autoincrement=False),
+            Column("data", String(50)),
+            Column("parent_id", Integer),
+            starrocks_primary_key="id",
+            starrocks_distributed_by="HASH(id)",
+        )
 
     @testing.skip('starrocks', 'Does not support recursive CTE')
     def test_select_recursive_round_trip(self, connection):
         pass
 
 class JSONTest(_JSONTest):
-    """On SQLAlchemy 1.4 the typed-access tests are gated on ``legacy_unconditional_json_extract``, as 2.0 does."""
-
     # Override define_tables to specify autoincrement=True explicitly for test on Starrocks
     @classmethod
     def define_tables(cls, metadata):
@@ -475,45 +488,19 @@ class JSONTest(_JSONTest):
             Column("nulldata", cls.datatype(none_as_null=True)),
         )
 
-    @testing.skip('starrocks', 'Seems to return "null", not sure why')
-    def test_round_trip_json_null_as_json_null(self, connection):
-        pass
 
-    @testing.combinations(
-        ("parameters",),
-        ("multiparameters",),
-        ("values",),
-        argnames="insert_type",
-    )
-    @testing.skip("starrocks", 'Seems to return "null", not sure why')
-    def test_round_trip_none_as_json_null(self, connection, insert_type):
-        pass
-
-    @testing.combinations(
-        (True,),
-        (False,),
-        (None,),
-        (15,),
-        (0,),
-        (-1,),
-        (-1.0,),
-        (15.052,),
-        ("a string",),
-        ("réve illé",),
-        ("réve🐍 illé",),
-    )
-    @testing.skip("starrocks", 'Seems to return "null", not sure why')
-    def test_single_element_round_trip(self, element):
-        pass
-
-    if not IS_SQLALCHEMY_2:
-        test_index_typed_access = testing.requires.legacy_unconditional_json_extract(_JSONTest.test_index_typed_access)
-        test_index_typed_comparison = testing.requires.legacy_unconditional_json_extract(
-            _JSONTest.test_index_typed_comparison
+class JSONLegacyStringCastIndexTest(_JSONLegacyStringCastIndexTest):
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "data_table",
+            metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("name", String(30), nullable=False),
+            Column("data", cls.datatype),
+            Column("nulldata", cls.datatype(none_as_null=True)),
         )
-        test_path_typed_comparison = testing.requires.legacy_unconditional_json_extract(
-            _JSONTest.test_path_typed_comparison
-        )
+
 
 FOR_UPDATE = testing.skip("starrocks", "StarRocks does not support SELECT ... FOR UPDATE")
 

@@ -21,6 +21,8 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
 from sqlalchemy import cast, func
+from sqlalchemy import cast, func, literal_column, util
+import sqlalchemy.dialects.mysql.json as mysql_json
 import sqlalchemy.dialects.mysql.types as mysql_types
 from sqlalchemy.engine import Dialect
 from sqlalchemy.sql import sqltypes
@@ -425,8 +427,53 @@ class STRUCT(StructuredType):
         return cast(func.parse_json(bindvalue), self)
 
 
+def _check_json_path_key(element: Any) -> None:
+    """Refuse a key StarRocks' JSON path cannot name, which would read the wrong value.
+
+    An empty key and ``$`` read the whole document, a key holding ``[`` is read as an array index, and a key
+    holding a double quote cannot be escaped.
+    """
+    if isinstance(element, int):
+        return
+    key = str(element)
+    if key in ("", "$") or '"' in key or "[" in key:
+        raise ValueError(
+            f"StarRocks JSON paths cannot name the key {element!r}; an empty key and $ read the whole document, "
+            "and a key holding [ or a double quote reads another value"
+        )
+
+
+class JSONIndexType(mysql_json.JSONIndexType):
+    """The path of one JSON index, ``$."key"`` or ``$[0]``, for a key StarRocks' path syntax can name."""
+
+    def _format_value(self, value: Any) -> str:
+        _check_json_path_key(value)
+        return super()._format_value(value)
+
+
+class JSONPathType(mysql_json.JSONPathType):
+    """The path of a JSON path index, ``$."a"[0]``, for keys StarRocks' path syntax can name."""
+
+    def _format_value(self, value: Any) -> str:
+        for element in value:
+            _check_json_path_key(element)
+        return super()._format_value(value)
+
+
 class JSON(sqltypes.JSON):
+    """JSON column type that round-trips scalars as JSON scalars, not JSON strings.
+
+    The server's ``parse_json('1')`` and ``CAST('1' AS JSON)`` yield the JSON *string* ``"1"``, so a bare scalar
+    bound as text would read back as ``'1'``. The bound text is therefore wrapped in a one-element array and
+    the element is taken out again, ``json_query(parse_json(concat('[', :value, ']')), '$[0]')``, which keeps
+    the JSON type of the value. A SQL NULL bind stays SQL NULL, and a JSON null (``'null'``) stays a JSON null.
+    """
+
     __visit_name__ = "JSON"
+
+    def bind_expression(self, bindvalue: Any) -> Any:
+        wrapped = func.concat(literal_column("'['"), bindvalue, literal_column("']'"))
+        return func.json_query(func.parse_json(wrapped), literal_column("'$[0]'"))
 
 
 class VARIANT(sqltypes.TypeEngine):

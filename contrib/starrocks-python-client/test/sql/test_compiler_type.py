@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
+
 from sqlalchemy import Column, MetaData, Table, testing
+import sqlalchemy as sa
+from sqlalchemy import TIMESTAMP, Column, Enum, LargeBinary, MetaData, Table, Text, UnicodeText, testing
+from sqlalchemy.dialects import mysql
 from sqlalchemy.schema import CreateColumn
 from sqlalchemy.testing import expect_warnings, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
@@ -136,3 +141,31 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         column = Column("col", type_, **column_kwargs)
         Table("t", MetaData(), column)
         self.assert_compile(CreateColumn(column), expected)
+
+
+class SysdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    """``func.sysdate()`` compiles to a function StarRocks has."""
+
+    __dialect__ = StarRocksDialect()
+
+    def test_sysdate_compiles_to_now(self):
+        self.assert_compile(sa.func.sysdate(), "now()")
+
+    def test_sysdate_keeps_its_precision(self):
+        self.assert_compile(sa.func.sysdate(6), "now(6)", literal_binds=True)
+
+
+class SysdateExecutionTest(fixtures.TestBase):
+    """``func.sysdate()`` runs on the server and returns a datetime."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    def test_sysdate_returns_a_datetime(self, connection):
+        assert isinstance(connection.scalar(sa.select(sa.func.sysdate())), datetime.datetime)
+    def test_sysdate_with_a_precision_returns_microseconds(self, connection):
+        """``now()`` has no fraction, so reads that all lack microseconds mean the precision was dropped."""
+        readings = [connection.scalar(sa.select(sa.func.sysdate(6))) for _ in range(3)]
+        assert all(isinstance(reading, datetime.datetime) for reading in readings)
+        assert any(reading.microsecond for reading in readings), readings
+

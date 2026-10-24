@@ -49,7 +49,9 @@ from sqlalchemy.engine import reflection
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
 from sqlalchemy.engine.row import Row
 from sqlalchemy.sql import sqltypes, bindparam
-from sqlalchemy.sql.expression import Delete, Select, Update, TableClause
+from sqlalchemy.sql.expression import Delete, Insert, Select, Update, TableClause
+from sqlalchemy.sql import bindparam, operators, sqltypes
+from sqlalchemy.sql.elements import BinaryExpression, Grouping
 
 from starrocks.common import utils
 from starrocks.common.defaults import ReflectionMVDefaults, ReflectionTableDefaults, ReflectionViewDefaults
@@ -93,6 +95,8 @@ from .datatype import (
     VARBINARY,
     VARCHAR,
     VARIANT,
+    JSONIndexType,
+    JSONPathType,
     StructuredType,
 )
 from .engine.interfaces import ReflectedMVState, ReflectedState, ReflectedViewState
@@ -187,6 +191,9 @@ colspecs = base_colspecs | {
     sqltypes.DateTime: DATETIME,
     sqltypes.DECIMAL: DECIMAL,
     sqltypes.Time: TIME,
+    sqltypes.JSON: JSON,
+    sqltypes.JSON.JSONIndexType: JSONIndexType,
+    sqltypes.JSON.JSONPathType: JSONPathType,
 }
 
 class StarRocksTypeCompiler(MySQLTypeCompiler):
@@ -268,6 +275,12 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
 
 
 class StarRocksSQLCompiler(MySQLCompiler):
+    render_table_with_column_in_update_from = False
+
+    def visit_sysdate_func(self, fn: Any, **kw: Any) -> str:
+        """StarRocks has no SYSDATE(); NOW() is its current-timestamp function, and takes the same precision."""
+        return "now" + self.function_argspec(fn, **kw)
+
     def visit_delete(self, delete_stmt: Delete, **kw: Any) -> str:
         result: str = super().visit_delete(delete_stmt, **kw)
         compile_state: Any = delete_stmt._compile_state_factory(
@@ -281,18 +294,159 @@ class StarRocksSQLCompiler(MySQLCompiler):
             return "TRUNCATE TABLE " + table
         return result
 
+    def visit_insert(self, insert_stmt: Insert, **kw: Any) -> str:
+        """Render ``INSERT OVERWRITE`` and ``WITH LABEL`` when the ``starrocks_overwrite`` and ``starrocks_label`` options ask.
+
+        StarRocks takes the label straight after the table, ``INSERT INTO t WITH LABEL l (a, b) VALUES ...``, and
+        replaces ``INTO`` with ``OVERWRITE``. The base compiler renders the whole statement, so the head is rewritten
+        around the table name it just emitted.
+        """
+        text: str = super().visit_insert(insert_stmt, **kw)
+        overwrite = bool(insert_stmt.dialect_options[self.dialect.name]["overwrite"])
+        label = insert_stmt.dialect_options[self.dialect.name]["label"]
+        if not overwrite and label is None:
+            return text
+        into_table = "INTO " + self.preparer.format_table(insert_stmt.table)
+        head, found, tail = text.partition(into_table)
+        if not found:
+            raise exc.CompileError(f"Cannot apply starrocks_overwrite or starrocks_label to: {text}")
+        keyword = "OVERWRITE" if overwrite else "INTO"
+        label_clause = "" if label is None else " WITH LABEL " + self._quoted_insert_label(label)
+        return f"{head}{keyword} {into_table[len('INTO '):]}{label_clause}{tail}"
+
+    def _quoted_insert_label(self, label: Any) -> str:
+        if not isinstance(label, str) or not label:
+            raise exc.CompileError(f"starrocks_label must be a non-empty string, not {label!r}")
+        return self.preparer.quote(label)
+
+    _JSON_ACCESS_OPERATORS: Final[Tuple[Any, ...]] = (operators.json_getitem_op, operators.json_path_getitem_op)
+
+    def _render_json_extract_from_binary(self, binary: Any, operator: Any, **kw: Any) -> str:
+        """Render a JSON index or path access with ``json_query`` or the ``get_json_*`` function for its type.
+
+        StarRocks has no ``JSON_EXTRACT``. ``json_query`` returns JSON, with a JSON null kept as JSON null, and
+        the ``get_json_*`` functions return the SQL type of the accessor (``as_integer()`` and the like): a
+        missing key or a JSON null is SQL NULL, and a value of another type is converted as StarRocks casts it,
+        so the JSON string ``"5"`` reads as 5 and ``1.5`` as 1.
+
+        A chained access such as ``j["arr"][1]`` is one call with its paths joined at run time: StarRocks returns
+        NULL when ``json_query`` indexes into an array an inner ``json_query`` returned.
+        """
+        function = self._json_access_function(binary.type)
+        document, paths = self._json_document_and_paths(binary, **kw)
+        path = paths[0] if len(paths) == 1 else "concat(%s)" % ", ".join(
+            [paths[0], *(f"substring({later}, 2)" for later in paths[1:])]
+        )
+        access = f"{function}({document}, {path})"
+        if function == "get_json_double" and binary.type._type_affinity is sqltypes.Numeric:
+            precision, scale = binary.type.precision, binary.type.scale
+            if precision is not None and scale is not None:
+                return f"CAST({access} AS DECIMAL({precision}, {scale}))"
+        return access
+
+    def _json_document_and_paths(self, binary: Any, **kw: Any) -> Tuple[str, List[str]]:
+        """Return the JSON document a chain of accesses starts from, and the path of each access in order.
+
+        SQLAlchemy groups the inner access when the chain mixes an index with a path, as ``j[("a", 2)][1]``
+        does, so the grouping is looked through to find it.
+        """
+        left = self._ungrouped(binary.left)
+        if isinstance(left, BinaryExpression) and left.operator in self._JSON_ACCESS_OPERATORS:
+            document, paths = self._json_document_and_paths(left, **kw)
+        else:
+            document, paths = self.process(binary.left, **kw), []
+        return document, [*paths, self.process(binary.right, **kw)]
+
+    @staticmethod
+    def _ungrouped(element: Any) -> Any:
+        while isinstance(element, Grouping):
+            element = element.element
+        return element
+
+    def _json_access_function(self, access_type: sqltypes.TypeEngine) -> str:
+        affinity = access_type._type_affinity
+        if affinity is sqltypes.JSON:
+            return "json_query"
+        if affinity is sqltypes.Integer:
+            return "get_json_int"
+        if affinity is sqltypes.Boolean:
+            return "get_json_bool"
+        if affinity is sqltypes.String:
+            return "get_json_string"
+        if issubclass(affinity, sqltypes.Numeric):
+            return "get_json_double"
+        return "json_query"
+
+    def update_tables_clause(
+        self,
+        update_stmt: Update,
+        from_table: Any,
+        extra_froms: list[Any],
+        **kw: Any,
+    ) -> str:
+        """Render only the updated table; StarRocks takes the other tables from ``FROM``, not a comma list."""
+        kw["asfrom"] = True
+        return from_table._compiler_dispatch(self, **kw)
+
+    def update_from_clause(
+        self,
+        update_stmt: Update,
+        from_table: Any,
+        extra_froms: list[Any],
+        from_hints: Any,
+        **kw: Any,
+    ) -> str:
+        """Render ``FROM b, c`` for the extra tables, as ``UPDATE a SET ... FROM b, c WHERE ...``."""
+        kw["asfrom"] = True
+        return "FROM " + ", ".join(
+            t._compiler_dispatch(self, fromhints=from_hints, **kw) for t in extra_froms
+        )
+
+    def delete_extra_from_clause(
+        self,
+        delete_stmt: Delete,
+        from_table: Any,
+        extra_froms: list[Any],
+        from_hints: Any,
+        **kw: Any,
+    ) -> str:
+        """Render ``USING b, c`` for the extra tables only; StarRocks rejects the deleted table repeated in it."""
+        kw["asfrom"] = True
+        return "USING " + ", ".join(
+            t._compiler_dispatch(self, fromhints=from_hints, **kw) for t in extra_froms
+        )
+
+    _LIMIT_FOR_OFFSET_ALONE: Final[int] = 2**62 - 1
+
     def limit_clause(self, select: Select, **kw: Any) -> str:
-        # StarRocks supports:
-        #   LIMIT <limit>
-        #   LIMIT <limit> OFFSET <offset>
+        """Render ``LIMIT <limit>`` and ``LIMIT <limit> OFFSET <offset>``, the forms StarRocks takes.
+
+        StarRocks has no OFFSET without a LIMIT, so an offset alone gets a LIMIT of 2**62 - 1. StarRocks refuses
+        a limit and offset whose sum overflows a signed 64-bit integer, which leaves room for any offset below 2**62.
+        """
         text = ""
         if select._limit_clause is not None:
             text += "\n LIMIT " + self.process(select._limit_clause, **kw)
+        elif select._offset_clause is not None:
+            text += f"\n LIMIT {self._LIMIT_FOR_OFFSET_ALONE}"
         if select._offset_clause is not None:
-            # if select._limit_clause is None:
-            #     text += "\n LIMIT -1"
             text += " OFFSET " + self.process(select._offset_clause, **kw)
         return text
+
+    def visit_cast(self, cast: Any, **kw: Any) -> str:
+        """Render a cast of a JSON expression to a string type as ``json_string``, which yields the JSON text.
+
+        ``CAST(<JSON> AS VARCHAR)`` on StarRocks drops the quotes of a JSON string and turns a JSON null into SQL
+        NULL, whereas SQLAlchemy documents the cast as the JSON text (``"value"``, ``null``). ``json_string``
+        returns that text, and SQL NULL for a missing value.
+        """
+        casts_json_to_string = (
+            cast.clause.type._type_affinity is sqltypes.JSON
+            and cast.typeclause.type._type_affinity is sqltypes.String
+        )
+        if casts_json_to_string:
+            return f"json_string({self.process(cast.clause, **kw)})"
+        return super().visit_cast(cast, **kw)
 
     def visit_typeclause(
         self,
@@ -1296,8 +1450,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
     construct_arguments = [
         (Table, {variant: None for k in TableInfoKey.ALL for variant in (k.lower(), k.upper())}),
         (Column, {variant: None for k in ColumnAggInfoKey.ALL for variant in (k.lower(), k.upper())}),
-        (Update, {"limit": None}),
-        (Delete, {"limit": None}),
+        (Insert, {"overwrite": False, "label": None}),
         (sa_schema.PrimaryKeyConstraint, {"using": None}),
         (
             sa_schema.Index,
