@@ -30,6 +30,7 @@ from starrocks.alembic import compare
 from starrocks.common.types import TableModel
 from starrocks.datatype import BIGINT, VARCHAR
 from starrocks.dialect import KEY_OR_AGGREGATE_ATTRIBUTE, StarRocksDialect, column_default_change_error
+from starrocks.reflection import column_auto_increments
 from starrocks.sql.ddl import AlterTableColumns, AlterTableDistribution, AlterTableOrder, AlterTableProperties
 
 
@@ -354,20 +355,18 @@ class StarRocksImpl(MySQLImpl):
         StarRocks takes a RENAME COLUMN only in an ALTER TABLE of its own, so a new ``name`` is applied after the
         column's other changes, which keep the old name.
 
-        StarRocks refuses AUTO_INCREMENT in MODIFY COLUMN, and keeps it on a column whose MODIFY leaves it out, so
-        an unchanged ``autoincrement`` is left out and a changed one raises CompileError.
+        StarRocks refuses AUTO_INCREMENT in MODIFY COLUMN and can't add or remove it, so an unchanged
+        ``autoincrement`` is left out and a changed one raises CompileError; see :meth:`_refuse_autoincrement_change`.
+        StarRocks 4.1 keeps a column's AUTO_INCREMENT through a MODIFY COLUMN that leaves it out, while 3.3 and 3.5
+        refuse any MODIFY COLUMN of an AUTO_INCREMENT column.
         """
         if server_default is not False and self._unquoted_default(server_default) != self._unquoted_default(
             existing_server_default
         ):
             raise column_default_change_error(table_name, column_name)
-        autoincrement = kw.pop("autoincrement", None)
-        existing_autoincrement = kw.pop("existing_autoincrement", None)
-        if autoincrement is not None and bool(autoincrement) != bool(existing_autoincrement):
-            raise exc.CompileError(
-                f"StarRocks cannot {'add' if autoincrement else 'remove'} AUTO_INCREMENT on column {column_name!r} "
-                f"of table {table_name!r}; recreate the table to change it"
-            )
+        self._refuse_autoincrement_change(
+            table_name, column_name, schema, kw.pop("autoincrement", None), kw.pop("existing_autoincrement", None)
+        )
         renamed = name is not None and name != column_name
         if not renamed or self._changes_besides_the_name(server_default, kw):
             super().alter_column(
@@ -380,6 +379,44 @@ class StarRocksImpl(MySQLImpl):
             )
         if renamed:
             self._exec(alembic_base.ColumnName(table_name, column_name, name, schema=schema))
+
+    def _refuse_autoincrement_change(
+        self,
+        table_name: str,
+        column_name: str,
+        schema: Optional[str],
+        autoincrement: Optional[bool],
+        existing_autoincrement: Optional[bool],
+    ) -> None:
+        """Raise CompileError for an ``autoincrement`` that differs from the column's AUTO_INCREMENT.
+
+        Without ``existing_autoincrement``, which Alembic never writes into a script, the column's AUTO_INCREMENT
+        is read from the database. Offline (``--sql``) there is none to read, so an ``autoincrement`` without
+        ``existing_autoincrement`` raises there too.
+        """
+        if autoincrement is None:
+            return
+        if existing_autoincrement is None:
+            if self.as_sql or not isinstance(self.connection, Connection):
+                raise exc.CompileError(
+                    f"Without a database to read, the dialect can't tell whether AUTO_INCREMENT on column "
+                    f"{column_name!r} of table {table_name!r} changes; pass existing_autoincrement"
+                )
+            existing_autoincrement = self._column_auto_increments(table_name, column_name, schema)
+        if bool(autoincrement) != bool(existing_autoincrement):
+            raise exc.CompileError(
+                f"StarRocks cannot {'add' if autoincrement else 'remove'} AUTO_INCREMENT on column {column_name!r} "
+                f"of table {table_name!r}; recreate the table to change it"
+            )
+
+    def _column_auto_increments(self, table_name: str, column_name: str, schema: Optional[str]) -> bool:
+        """Return whether SHOW CREATE TABLE gives the column AUTO_INCREMENT; StarRocks column names ignore case."""
+        full_name = ".".join(self.dialect.identifier_preparer.quote(name) for name in (schema, table_name) if name)
+        create_table = self.connection.exec_driver_sql(f"SHOW CREATE TABLE {full_name}").fetchone()[1]
+        return any(
+            name.lower() == column_name.lower() and auto_increments
+            for name, auto_increments in column_auto_increments(create_table).items()
+        )
 
     @staticmethod
     def _changes_besides_the_name(server_default: Any, kw: Mapping[str, Any]) -> bool:

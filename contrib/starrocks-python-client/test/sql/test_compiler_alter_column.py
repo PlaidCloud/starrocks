@@ -168,12 +168,19 @@ class AlterColumnAutoincrementOperationTest(fixtures.TestBase):
                         autoincrement=True, existing_autoincrement=True)
         context.assert_("ALTER TABLE t MODIFY COLUMN id BIGINT NOT NULL COMMENT 'key'")
 
-    @testing.combinations((True, None), (True, False), (False, True), argnames="autoincrement,existing")
+    @testing.combinations((True, False), (False, True), argnames="autoincrement,existing")
     def test_changed_autoincrement_is_refused(self, autoincrement, existing):
         op_fixture("starrocks")
         with expect_raises_message(exc.CompileError, "AUTO_INCREMENT on column 'id'"):
             op.alter_column("t", "id", existing_type=BIGINT(), existing_nullable=False,
                             autoincrement=autoincrement, existing_autoincrement=existing)
+
+    @testing.combinations((True,), (False,), argnames="autoincrement")
+    def test_autoincrement_without_existing_is_refused_without_a_database(self, autoincrement):
+        op_fixture("starrocks")
+        with expect_raises_message(exc.CompileError, "pass existing_autoincrement"):
+            op.alter_column("t", "id", comment="key", existing_type=BIGINT(), existing_nullable=False,
+                            autoincrement=autoincrement)
 
 
 class AlterColumnRenameOperationTest(fixtures.TestBase):

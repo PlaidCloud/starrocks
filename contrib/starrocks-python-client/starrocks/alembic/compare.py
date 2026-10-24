@@ -2586,7 +2586,7 @@ def compare_starrocks_column_agg_type(
         alter_column_op.kw[ColumnAggInfoKeyWithPrefix.AGG_TYPE] = meta_agg_type
 
 
-@comparators_dispatch_for_starrocks("column")
+@comparators_dispatch_for_starrocks("column", run_last=True)
 def compare_starrocks_column_autoincrement(
     autogen_context: AutogenContext,
     alter_column_op: AlterColumnOp,
@@ -2596,24 +2596,28 @@ def compare_starrocks_column_autoincrement(
     conn_col: Column[Any],
     metadata_col: Column[Any],
 ) -> None:
-    """
-    Compare StarRocks-specific column options.
-    It will run after the  built-in comparator for "column" auto_increment.
+    """Keep ``autoincrement`` on an altered column only when the model declares one the database does not have.
 
-    StarRocks does not support changing the autoincrement of a column.
+    Alembic gives the alter of any single Integer primary key column, and of one declared ``autoincrement=True``,
+    ``autoincrement=True``, and the script carries no ``existing_autoincrement``. The dialect renders
+    AUTO_INCREMENT only for a column declared with it, and StarRocks keeps a column's AUTO_INCREMENT through a
+    MODIFY COLUMN that leaves it out, so ``autoincrement`` is dropped unless it differs from the database. StarRocks
+    cannot add or remove AUTO_INCREMENT, so a difference is warned about here and refused by the impl. This
+    comparator runs after Alembic's column comparators.
     """
     if conn_col is None or metadata_col is None:
         raise ArgumentError("Both conn column and meta column should not be None.")
 
-    # Because we can't inspect the autoincrement, we can't do the check of difference.
-    if conn_col.autoincrement != metadata_col.autoincrement and \
-            "auto" != metadata_col.autoincrement:
+    conn_autoincrement = conn_col.autoincrement is True
+    declared = metadata_col.autoincrement if isinstance(metadata_col.autoincrement, bool) else None
+    if alter_column_op is not None and (declared is None or declared == conn_autoincrement):
+        alter_column_op.kw.pop("autoincrement", None)
+    if declared is not None and declared != conn_autoincrement:
         table_fqn = utils.gen_simple_qualified_name(tname, schema)
         logger.warning(
-            f"Detected AUTO_INCREMENT change on column '{table_fqn}.{cname}'. "
-            f"from {conn_col.autoincrement!r} (in database) to {metadata_col.autoincrement!r} (in metadata). "
-            f"No ALTER statement will be generated automatically, "
-            f"Because we can't inspect the column's autoincrement currently."
+            f"Column '{table_fqn}.{cname}' is declared with autoincrement={declared!r}, but the database "
+            f"{'does not give it' if declared else 'gives it'} AUTO_INCREMENT. StarRocks cannot add or remove "
+            "AUTO_INCREMENT, so an alter of this column will be refused; recreate the table to change it."
         )
     return None
 

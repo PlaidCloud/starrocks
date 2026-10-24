@@ -1242,7 +1242,8 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         if autoincrement:
             raise exc.CompileError(
                 f"StarRocks cannot set AUTO_INCREMENT in MODIFY COLUMN (column {name!r}); "
-                "op.alter_column leaves an unchanged AUTO_INCREMENT out, which StarRocks keeps"
+                "op.alter_column leaves an unchanged AUTO_INCREMENT out, which StarRocks 4.1 keeps (3.3 and 3.5 "
+                "refuse any MODIFY COLUMN of an AUTO_INCREMENT column)"
             )
         # DEFAULT: include if provided (even if 0 or empty string), but not when False
         elif default is not False and default is not None:
