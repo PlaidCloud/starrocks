@@ -944,7 +944,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         # Handle MV-specific REFRESH clause
         if refresh := opts.get(TableInfoKey.REFRESH):
-            table_opts.append(f"REFRESH {str(refresh)}")
+            table_opts.append(f"REFRESH {self._refresh_scheme(refresh)}")
 
         # Properties
         properties = opts.get(TableInfoKey.PROPERTIES)
@@ -1370,6 +1370,17 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
                 "dialect cannot reflect or compare"
             )
 
+    _SCHEDULE_REFRESH = re.compile(r"^(\s*(?:(?:IMMEDIATE|DEFERRED)\s+)?)SCHEDULE\b", re.IGNORECASE)
+
+    @classmethod
+    def _refresh_scheme(cls, refresh: Any) -> str:
+        """Return a materialized view's refresh scheme with ``SCHEDULE`` spelled ``ASYNC``.
+
+        ``REFRESH SCHEDULE [START(...)] EVERY(...)`` is the 4.1.1 synonym of ``REFRESH ASYNC [START(...)]
+        EVERY(...)``, which every version knows; reflection reads either back as ASYNC.
+        """
+        return cls._SCHEDULE_REFRESH.sub(r"\1ASYNC", str(refresh), count=1)
+
     def _view_security_keyword(self, view: Table, security: str) -> str:
         """Return the view's SECURITY keyword, refusing anything but the NONE and INVOKER that StarRocks has.
 
@@ -1433,7 +1444,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         # ALTER REFRESH
         if alter.refresh is not None:
-            statements.append(f"ALTER MATERIALIZED VIEW {mv_name} REFRESH {alter.refresh}")
+            statements.append(f"ALTER MATERIALIZED VIEW {mv_name} REFRESH {self._refresh_scheme(alter.refresh)}")
 
         # ALTER PROPERTIES
         if alter.properties is not None:

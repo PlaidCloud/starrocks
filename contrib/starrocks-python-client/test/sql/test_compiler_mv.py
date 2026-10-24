@@ -74,6 +74,18 @@ class CreateMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "CREATE MATERIALIZED VIEW mv" "REFRESH ASYNC START('2025-01-01 00:00:00') EVERY(INTERVAL 1 DAY)",
         ),
         (
+            "refresh_schedule",
+            {"starrocks_refresh": "SCHEDULE EVERY(INTERVAL 1 HOUR)"},
+            {},
+            "CREATE MATERIALIZED VIEW mv" "REFRESH ASYNC EVERY(INTERVAL 1 HOUR)",
+        ),
+        (
+            "refresh_deferred_schedule",
+            {"starrocks_refresh": "deferred schedule START('2025-01-01 00:00:00') EVERY(INTERVAL 1 DAY)"},
+            {},
+            "CREATE MATERIALIZED VIEW mv" "REFRESH deferred ASYNC START('2025-01-01 00:00:00') EVERY(INTERVAL 1 DAY)",
+        ),
+        (
             "distribution_without_refresh",
             {"starrocks_distributed_by": "HASH(id) BUCKETS 16"},
             {},
@@ -189,6 +201,13 @@ class AlterMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_alter_mv_refresh(self):
         self.assert_compile(
             AlterMaterializedView("my_mv", refresh="ASYNC EVERY(INTERVAL 2 HOUR)"),
+            "ALTER MATERIALIZED VIEW my_mv REFRESH ASYNC EVERY(INTERVAL 2 HOUR)",
+        )
+
+    def test_alter_mv_refresh_schedule_is_async(self):
+        """Before 4.1.1 StarRocks knows only ASYNC for the same refresh."""
+        self.assert_compile(
+            AlterMaterializedView("my_mv", refresh="SCHEDULE EVERY(INTERVAL 2 HOUR)"),
             "ALTER MATERIALIZED VIEW my_mv REFRESH ASYNC EVERY(INTERVAL 2 HOUR)",
         )
 
