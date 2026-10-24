@@ -19,6 +19,7 @@ line breaks, so each expected string literal below is one line of the generated 
 """
 
 from sqlalchemy import Column, MetaData, Table, select, testing
+from sqlalchemy.schema import CreateTable, DropTable
 from sqlalchemy.testing import eq_, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
@@ -159,6 +160,22 @@ class DropViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_drop_view_if_exists(self):
         view = View("my_view", MetaData(), definition="SELECT * FROM my_table")
         self.assert_compile(DropView(view, if_exists=True), "DROP VIEW IF EXISTS my_view")
+
+
+class ViewInMetaDataCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    """``MetaData.create_all()`` and ``drop_all()`` emit ``CreateTable`` and ``DropTable`` for a View."""
+
+    __dialect__ = StarRocksDialect()
+    __requires__ = ("sqlalchemy_2",)
+
+    def test_create_table_of_view(self):
+        view = View("my_view", MetaData(), definition="SELECT * FROM my_table", comment="c")
+        self.assert_compile(CreateTable(view), "CREATE VIEW my_view" "COMMENT 'c'" "AS" "SELECT * FROM my_table")
+
+    @testing.combinations((False, "DROP VIEW my_view"), (True, "DROP VIEW IF EXISTS my_view"), argnames="if_exists, expected")
+    def test_drop_table_of_view(self, if_exists, expected):
+        view = View("my_view", MetaData(), definition="SELECT * FROM my_table")
+        self.assert_compile(DropTable(view, if_exists=if_exists), expected)
 
 
 class AlterViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):

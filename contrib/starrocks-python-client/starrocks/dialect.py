@@ -1076,7 +1076,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             raise exc.CompileError("View definition is required")
         security = utils.get_dialect_option(table, TableInfoKey.SECURITY)
 
-        or_replace_clause = "OR REPLACE " if create.or_replace else ""
+        or_replace_clause = "OR REPLACE " if getattr(create, "or_replace", False) else ""
         if_not_exists_clause = "IF NOT EXISTS " if create.if_not_exists else ""
 
         text = f"CREATE {or_replace_clause}VIEW {if_not_exists_clause}{view_name}"
@@ -1101,6 +1101,19 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         But, this is still needed for alembic's `CreateViewOp`.
         """
         return self._compile_create_view_from_table(create.element, create, **kw)
+
+    def visit_drop_table(self, drop: sa_schema.DropTable, **kw: Any) -> str:
+        """Drop a View or MaterializedView held in a MetaData with its own DROP statement.
+
+        ``MetaData.drop_all()`` issues a ``DropTable`` for every member, and StarRocks rejects ``DROP TABLE`` for a
+        view or a materialized view.
+        """
+        table_kind = drop.element.info.get(TableObjectInfoKey.TABLE_KIND, TableKind.TABLE).upper()
+        if table_kind == TableKind.VIEW:
+            return self.visit_drop_view(drop, **kw)
+        if table_kind == TableKind.MATERIALIZED_VIEW:
+            return self.visit_drop_materialized_view(drop, **kw)
+        return super().visit_drop_table(drop, **kw)
 
     def visit_drop_view(self, drop: DropView, **kw: Any) -> str:
         view = drop.element

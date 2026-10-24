@@ -19,6 +19,7 @@ breaks, so each expected string literal below is one line of the generated DDL.
 """
 
 from sqlalchemy import Column, MetaData, Table, select, testing
+from sqlalchemy.schema import DropTable
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
@@ -147,6 +148,14 @@ class DropMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_drop_mv_with_schema(self):
         mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", schema="test_db")
         self.assert_compile(DropMaterializedView(mv), "DROP MATERIALIZED VIEW test_db.my_mv")
+
+    @testing.combinations(
+        (False, "DROP MATERIALIZED VIEW my_mv"), (True, "DROP MATERIALIZED VIEW IF EXISTS my_mv"), argnames="if_exists, expected"
+    )
+    def test_drop_table_of_mv(self, if_exists, expected):
+        """``MetaData.drop_all()`` drops a MaterializedView through ``DropTable``."""
+        mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1")
+        self.assert_compile(DropTable(mv, if_exists=if_exists), expected)
 
 
 class AlterMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
