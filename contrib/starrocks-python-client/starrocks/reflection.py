@@ -83,6 +83,15 @@ class StarRocksInspector(Inspector):
         with self._operation_context() as conn:
             return self.dialect.get_view(conn, view_name, schema=schema, **kwargs)
 
+    def get_materialized_view_names(self, schema: Optional[str] = None, **kwargs: Any) -> List[str]:
+        """Return the names of the materialized views in ``schema``, which SQLAlchemy 1.4's inspector cannot.
+
+        Autogenerate compares materialized views on every run, so without it autogenerate fails on 1.4 even for
+        a metadata that has none.
+        """
+        with self._operation_context() as conn:
+            return self.dialect.get_materialized_view_names(conn, schema, info_cache=self.info_cache, **kwargs)
+
     def get_materialized_view(self, view_name: str, schema: Optional[str] = None, **kwargs: Any) -> Optional[ReflectedMVState]:
         """
         Retrieves information about a specific materialized view.
@@ -169,6 +178,58 @@ class StarRocksInspector(Inspector):
         # table.dialect_options.setdefault(DialectName, {}).update(mv_state.table_options)
 
 
+_SHOW_CREATE_COLUMN_LINE = re.compile(r"^\s*`((?:[^`]|``)+)`\s(.*)$")
+_SHOW_CREATE_QUOTED = re.compile(r'`(?:[^`]|``)*`|"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'', re.DOTALL)
+_SHOW_CREATE_DEFAULT = re.compile(r"\sDEFAULT\s+(\S)")
+_SHOW_CREATE_AUTO_INCREMENT = re.compile(r"\bAUTO_INCREMENT\b", re.IGNORECASE)
+
+
+def show_create_column_specs(create_table: str) -> Dict[str, str]:
+    """Return each column's definition from SHOW CREATE TABLE, after its name, with its string literals emptied.
+
+    An emptied literal keeps its quotes, so ``COMMENT "not AUTO_INCREMENT"`` reads as ``COMMENT ""`` and a default
+    or comment can't pass for a keyword. Backquoted names are kept whole. The column list ends at the line that
+    closes it, not at an ``ENGINE=`` inside a literal. A view's DDL lists no columns.
+    """
+    if create_table.lstrip().upper().startswith("CREATE VIEW"):
+        return {}
+    emptied = _SHOW_CREATE_QUOTED.sub(
+        lambda match: match.group(0) if match.group(0)[0] == "`" else match.group(0)[0] * 2, create_table
+    )
+    specs: Dict[str, str] = {}
+    for line in emptied.split("\n")[1:]:
+        if line.lstrip().startswith(")"):
+            break
+        match = _SHOW_CREATE_COLUMN_LINE.match(line)
+        if match is not None:
+            specs[match.group(1).replace("``", "`")] = match.group(2)
+    return specs
+
+
+def column_default_kinds(create_table: str) -> Dict[str, str]:
+    """Return how SHOW CREATE TABLE spells each column's default: ``literal``, ``expression``, ``keyword`` or ``none``.
+
+    A quoted default is a literal, a parenthesized one an expression such as ``(uuid())``, and a bare one a keyword
+    such as CURRENT_TIMESTAMP.
+    """
+    kinds: Dict[str, str] = {}
+    for name, spec in show_create_column_specs(create_table).items():
+        default = _SHOW_CREATE_DEFAULT.search(" " + spec)
+        if default is None:
+            kinds[name] = "none"
+        else:
+            kinds[name] = {'"': "literal", "'": "literal", "(": "expression"}.get(default.group(1), "keyword")
+    return kinds
+
+
+def column_auto_increments(create_table: str) -> Dict[str, bool]:
+    """Return whether SHOW CREATE TABLE gives each column AUTO_INCREMENT, outside its comment and default."""
+    return {
+        name: bool(_SHOW_CREATE_AUTO_INCREMENT.search(spec))
+        for name, spec in show_create_column_specs(create_table).items()
+    }
+
+
 @log.class_logger
 class StarRocksTableDefinitionParser(object):
     """
@@ -218,6 +279,7 @@ class StarRocksTableDefinitionParser(object):
         column_2_agg_type: Dict[str, str] = None,
         column_autoinc: dict[str, bool] = None,
         charset: str = None,
+        column_default_kinds: Optional[Dict[str, str]] = None,
         secondary_indexes: Optional[List[Dict[str, Any]]] = None,
     ) -> ReflectedState:
         """
@@ -229,6 +291,7 @@ class StarRocksTableDefinitionParser(object):
         :param columns: A list of rows from `information_schema.columns`.
         :param column_2_agg_type: A dictionary mapping column names to their aggregation types.
         :param charset: The character set of the table.
+        :param column_default_kinds: How SHOW CREATE TABLE spells each column's default; see column_default_kinds.
         :return: A ReflectedState object containing the parsed table information.
         """
         # logger.debug("parsing table: %s", table.TABLE_NAME)
@@ -239,6 +302,7 @@ class StarRocksTableDefinitionParser(object):
                 self._parse_column(
                     column=column,
                     col_2_autoinc=column_autoinc,
+                    default_kinds=column_default_kinds,
                     **{ColumnAggInfoKeyWithPrefix.AGG_TYPE: column_2_agg_type.get(column.COLUMN_NAME)} if column_2_agg_type else {},
                 )
                 for column in sorted_columns
@@ -299,7 +363,13 @@ class StarRocksTableDefinitionParser(object):
             return [name.replace("``", "`") for name in quoted]
         return [name.strip() for name in column_list.split(",")]
 
-    def _parse_column(self, column: _DecodingRow, col_2_autoinc: dict | None = None, **kwargs: Any) -> dict:
+    def _parse_column(
+        self,
+        column: _DecodingRow,
+        col_2_autoinc: dict | None = None,
+        default_kinds: Optional[Dict[str, str]] = None,
+        **kwargs: Any,
+    ) -> dict:
         """
         Parse column from information_schema.columns table.
         It returns dictionary with column informations expected by sqlalchemy.
@@ -322,7 +392,7 @@ class StarRocksTableDefinitionParser(object):
             "name": column.COLUMN_NAME,
             "type": self._parse_column_type(column=column),
             "nullable": column.IS_NULLABLE != "NO",
-            "default": self._ColumnDefaultValueRenderer().build(column),
+            "default": self._ColumnDefaultValueRenderer().build(column, (default_kinds or {}).get(column.COLUMN_NAME)),
             "autoincrement": col_2_autoinc.get(column.COLUMN_NAME, False) if col_2_autoinc else False,
             "comment": column.COLUMN_COMMENT or None,
             "dialect_options": {
@@ -343,31 +413,43 @@ class StarRocksTableDefinitionParser(object):
         Apply StarRocks-friendly default value rendering:
         1. DATETIME CURRENT_TIMESTAMP defaults are emitted verbatim.
         2. Function-looking defaults become `(func_expr)`.
-        3. Remaining literals are double quoted.
+        3. Remaining literals are single quoted SQL string literals.
         4. The NUL placeholder StarRocks reports for HLL, BITMAP and PERCENTILE columns is no default.
         """
         _SKETCH_COLUMN_TYPES = ("HLL", "BITMAP", "PERCENTILE")
         _SKETCH_PLACEHOLDER_DEFAULT = "\x00"
 
-        def build(self, column: _DecodingRow) -> Optional[str]:
+        def build(self, column: _DecodingRow, kind: Optional[str] = None) -> Optional[str]:
+            """Render the column's default, as SHOW CREATE TABLE spells it when ``kind`` says how.
+
+            information_schema reports the string ``'uuid()'`` and the expression ``(uuid())`` alike, and the
+            string ``'NULL'`` as ``NULL``. SHOW CREATE TABLE tells them apart: ``kind`` is ``literal`` (quoted),
+            ``expression`` (parenthesized), ``keyword`` (bare, such as CURRENT_TIMESTAMP) or ``none`` (no DEFAULT
+            clause), from :func:`column_default_kinds`. Without it, the default is guessed from its text.
+            """
             raw_default = getattr(column, "COLUMN_DEFAULT", None)
-            if raw_default is None:
+            if raw_default is None or kind == "none":
                 return None
-
-            default = str(raw_default).strip()
-            if default is None or default.upper() == "NULL":
-                return None
-
+            default = str(raw_default)
             if self._is_sketch_placeholder(column, default):
                 return None
+            if kind == "literal":
+                return utils.quote_sql_string_literal(default)
+            if kind == "expression":
+                return self._wrap_function_default(default)
+            if kind == "keyword":
+                return default.strip()
+            return self._guessed_default(column, default.strip())
 
+        def _guessed_default(self, column: _DecodingRow, default: str) -> Optional[str]:
+            """Render a default from its text alone: NULL is none, and a call is taken for an expression."""
+            if default.upper() == "NULL":
+                return None
             if self._is_datetime_column(column) and default.upper().startswith("CURRENT_TIMESTAMP"):
                 return default
-
             if self._looks_like_function(default):
                 return self._wrap_function_default(default)
-
-            return f"{default!r}"
+            return utils.quote_sql_string_literal(default)
 
         @classmethod
         def _is_sketch_placeholder(cls, column: _DecodingRow, default: str) -> bool:
@@ -911,7 +993,7 @@ class StarRocksTableDefinitionParser(object):
             ddl_properties = self._parse_properties(properties_match.group(1))
             ddl_only_properties = {
                 key: value for key, value in ddl_properties.items()
-                if key.lower() in ReflectionMVDefaults.ddl_only_property_keys()
+                if ReflectionMVDefaults.is_ddl_only_property(key)
             }
             if ddl_only_properties:
                 logger.debug("mv: %r, ddl-only properties: %s", mv_name, ddl_only_properties)

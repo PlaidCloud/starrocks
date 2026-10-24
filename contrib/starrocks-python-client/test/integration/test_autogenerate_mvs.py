@@ -17,7 +17,8 @@ import logging
 from alembic.autogenerate import api
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import MetaData, text
-from sqlalchemy.testing import config, expect_raises, fixtures
+from sqlalchemy.testing import config, fixtures
+from sqlalchemy import MetaData, exc, testing, text
 
 from starrocks.alembic.compare import combine_include_object
 from starrocks.alembic.ops import (
@@ -185,6 +186,62 @@ class AlterMaterializedViewTest(_MaterializedViewAutogenerateBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.combinations(
+        ("session_variable", "session.query_timeout", "500", "1000"),
+        ("rewrite_consistency", "query_rewrite_consistency", "loose", "checked"),
+        argnames="key,in_database,in_model",
+        id_="iaaa",
+    )
+    def test_a_property_tables_config_leaves_out_is_compared(self, connection, key, in_database, in_model) -> None:
+        mv_name = "test_alter_mv_ddl_only_property"
+        connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+        connection.execute(text(
+            f"CREATE MATERIALIZED VIEW {mv_name} REFRESH MANUAL PROPERTIES('{key}' = '{in_database}') "
+            "AS SELECT val FROM t_autogen"
+        ))
+        try:
+            def migration_for(value):
+                target_metadata = MetaData()
+                MaterializedView(
+                    mv_name, target_metadata, definition="SELECT val FROM t_autogen", starrocks_refresh="MANUAL",
+                    starrocks_properties={key: value},
+                )
+                return api.produce_migrations(create_migration_context(connection, target_metadata), target_metadata)
+
+            assert migration_for(in_database).upgrade_ops.ops == []
+            changed = migration_for(in_model)
+            assert [op.properties for op in changed.upgrade_ops.ops] == [{key: in_model}]
+            restored = [{name: value.lower() for name, value in op.properties.items()} for op in changed.downgrade_ops.ops]
+            assert restored == [{key: in_database}]
+        finally:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+
+    @testing.combinations(
+        ("with_a_distribution", {"starrocks_distributed_by": "HASH(val)"}),
+        ("with_nothing_else", {}),
+        argnames="model_options",
+        id_="ia",
+    )
+    def test_a_recreated_mv_keeps_what_the_model_leaves_out(self, connection, model_options) -> None:
+        """A definition change recreates the MV; the database's refresh and session properties carry over."""
+        mv_name = "test_recreate_keeps_refresh"
+        connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+        connection.execute(text(
+            f"CREATE MATERIALIZED VIEW {mv_name} REFRESH ASYNC EVERY (INTERVAL 1 DAY) "
+            "PROPERTIES('session.query_timeout' = '900') AS SELECT val FROM t_autogen"
+        ))
+        try:
+            target_metadata = MetaData()
+            MaterializedView(mv_name, target_metadata, definition="SELECT val + 1 AS val FROM t_autogen", **model_options)
+            script = api.produce_migrations(create_migration_context(connection, target_metadata), target_metadata)
+            operations = Operations(MigrationContext.configure(connection))
+            for op in script.upgrade_ops.ops:
+                operations.invoke(op)
+            ddl = connection.exec_driver_sql(f"SHOW CREATE MATERIALIZED VIEW {mv_name}").fetchone()[1]
+            assert "INTERVAL 1 DAY" in ddl and '"session.query_timeout" = "900"' in ddl, ddl
+        finally:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+
     def test_alter_immutable_attributes(self, connection) -> None:
         """ALTER: Change immutable attributes (definition) triggers DROP/CREATE."""
         mv_name = "test_alter_mv_immutable"
@@ -192,10 +249,21 @@ class AlterMaterializedViewTest(_MaterializedViewAutogenerateBase):
         connection.execute(text(f"CREATE MATERIALIZED VIEW {mv_name} REFRESH MANUAL AS SELECT val FROM t_autogen"))
         try:
             target_metadata = MetaData()
-            MaterializedView(mv_name, target_metadata, definition="SELECT val + 1 AS val FROM t_autogen")
+            MaterializedView(
+                mv_name, target_metadata, definition="SELECT val + 1 AS val FROM t_autogen", starrocks_refresh="MANUAL"
+            )
             mc = create_migration_context(connection, target_metadata)
-            with expect_raises(NotImplementedError):
-                api.produce_migrations(mc, target_metadata)
+            script = api.produce_migrations(mc, target_metadata)
+
+            upgrade = [(type(op), op.view_name) for op in script.upgrade_ops.ops]
+            assert upgrade == [(DropMaterializedViewOp, mv_name), (CreateMaterializedViewOp, mv_name)]
+            assert "val + 1" in script.upgrade_ops.ops[1].definition
+            downgrade = script.downgrade_ops.ops
+            assert [(type(op), op.view_name) for op in downgrade] == [
+                (DropMaterializedViewOp, mv_name),
+                (CreateMaterializedViewOp, mv_name),
+            ]
+            assert "val + 1" not in downgrade[1].definition
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
@@ -317,6 +385,31 @@ class AlterMaterializedViewTest(_MaterializedViewAutogenerateBase):
                 f"Unexpected REFRESH diff for explicit IMMEDIATE moment: "
                 f"{[(op.refresh, op.existing_refresh) for op in refresh_ops]}"
             )
+        finally:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+
+    def test_deferred_view_converges_after_altering_its_refresh(self, connection) -> None:
+        """A DEFERRED MANUAL view altered to REFRESH ASYNC reflects as DEFERRED ASYNC, which a model saying ASYNC matches."""
+        mv_name = "test_mv_deferred_after_alter"
+        connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+        connection.execute(text(
+            f"CREATE MATERIALIZED VIEW {mv_name} REFRESH DEFERRED MANUAL "
+            "PROPERTIES ('replication_num' = '1') AS SELECT val FROM t_autogen"
+        ))
+        connection.execute(text(f"ALTER MATERIALIZED VIEW {mv_name} REFRESH ASYNC"))
+        try:
+            target_metadata = MetaData()
+            MaterializedView(
+                mv_name,
+                target_metadata,
+                definition="SELECT val FROM t_autogen",
+                starrocks_refresh="ASYNC",
+                starrocks_properties={"replication_num": "1"},
+            )
+            mc = create_migration_context(connection, target_metadata)
+            migration_script = api.produce_migrations(mc, target_metadata)
+
+            assert migration_script.upgrade_ops.ops == []
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 

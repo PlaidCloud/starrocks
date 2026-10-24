@@ -18,7 +18,7 @@ from unittest.mock import Mock, PropertyMock, patch
 from alembic.autogenerate.api import AutogenContext
 from alembic.operations.ops import UpgradeOps
 from sqlalchemy import testing
-from sqlalchemy.testing import expect_raises, expect_raises_message, fixtures
+from sqlalchemy.testing import expect_raises, fixtures
 
 from starrocks.alembic.compare import compare_starrocks_table, extract_starrocks_dialect_attributes
 from starrocks.common.defaults import ReflectionMVDefaults, ReflectionTableDefaults
@@ -45,7 +45,6 @@ def _starrocks_autogen_context() -> Mock:
     return autogen_context
 
 
-LOG_ATTRIBUTE_NEED_SPECIFIED = "Please specify this attribute explicitly"
 LOG_NO_DEFAULT_VALUE = "no default is defined in ReflectionTableDefaults"
 LOG_NO_ALERT_AUTO_GENERATED = "No ALTER TABLE SET operation will be generated"
 
@@ -216,7 +215,7 @@ class RealTableObjectsTest(fixtures.TestBase):
         assert result[0].properties == {'compression': 'LZ4'}
 
 
-    def test_real_table_unsupported_engine_change(self):
+    def test_real_table_unsupported_engine_change(self, caplog):
         """Test unsupported ENGINE change using real Table objects."""
         from sqlalchemy import Column, Integer, MetaData, Table
 
@@ -239,14 +238,14 @@ class RealTableObjectsTest(fixtures.TestBase):
             schema='test_db'
         )
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert "StarRocks does not support 'ALTER TABLE ENGINE'" in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
+        assert "StarRocks does not support 'ALTER TABLE ENGINE'" in caplog.text
 
-    def test_real_table_unsupported_key_change(self):
+    def test_real_table_unsupported_key_change(self, caplog):
         """Test unsupported KEY change using real Table objects."""
         from sqlalchemy import Column, Integer, MetaData, Table
 
@@ -268,14 +267,14 @@ class RealTableObjectsTest(fixtures.TestBase):
             starrocks_primary_key='id',
             schema='test_db'
         )
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert "not supported to change the key type" in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
+        assert "not supported to change the key type" in caplog.text
 
-    def test_real_table_unsupported_partition_change(self):
+    def test_real_table_unsupported_partition_change(self, caplog):
         """Test unsupported PARTITION_BY change using real Table objects."""
         from sqlalchemy import Column, Integer, MetaData, String, Table
 
@@ -300,12 +299,12 @@ class RealTableObjectsTest(fixtures.TestBase):
             schema='test_db'
         )
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert "StarRocks does not support 'ALTER TABLE PARTITION BY'" in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
+        assert "StarRocks does not support 'ALTER TABLE PARTITION BY'" in caplog.text
 
 
 # Test cases organized by StarRocks grammar order:
@@ -338,7 +337,7 @@ class EngineChangesTest(fixtures.TestBase):
         result = upgrade_ops.ops
         assert len(result) == 0
 
-    def test_engine_none_to_non_default_value(self):
+    def test_engine_none_to_non_default_value(self, caplog):
         """Test ENGINE from None (implicit default OLAP) to a non-default value (MYSQL)."""
         autogen_context = _starrocks_autogen_context()
 
@@ -356,12 +355,12 @@ class EngineChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert "StarRocks does not support 'ALTER TABLE ENGINE'" in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
+        assert "StarRocks does not support 'ALTER TABLE ENGINE'" in caplog.text
 
     def test_engine_default_to_none(self):
         """Test ENGINE from default value ('OLAP') to None."""
@@ -392,7 +391,7 @@ class EngineChangesTest(fixtures.TestBase):
         assert len(result) == 0
 
     def test_engine_non_default_to_none(self):
-        """Test ENGINE from a non-default value ('MYSQL') to None."""
+        """ENGINE the metadata omits is left alone, whatever the database has."""
         autogen_context = _starrocks_autogen_context()
 
         conn_table = Mock()  # Table reflected from SR database, explicitly MYSQL
@@ -411,14 +410,13 @@ class EngineChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert LOG_ATTRIBUTE_NEED_SPECIFIED in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
 
-    def test_engine_change(self):
+    def test_engine_change(self, caplog):
         """Test ENGINE value changes ('OLAP' to 'MYSQL')."""
         autogen_context = _starrocks_autogen_context()
 
@@ -439,13 +437,13 @@ class EngineChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        # ENGINE changes are not supported in StarRocks, should raise NotImplementedError
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert "StarRocks does not support 'ALTER TABLE ENGINE'" in str(exc_info.error)
+        # ENGINE changes are not supported in StarRocks, so autogenerate warns and skips it
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
+        assert "StarRocks does not support 'ALTER TABLE ENGINE'" in caplog.text
 
     @testing.combinations(
         ("OLAP", "OLAP"),
@@ -540,7 +538,7 @@ class KeyChangesTest(fixtures.TestBase):
         result = upgrade_ops.ops
         assert len(result) == 0
 
-    def test_key_none_to_non_default_value(self):
+    def test_key_none_to_non_default_value(self, caplog):
         """Test KEY from None (implicit default DUPLICATE KEY) to a non-default value (PRIMARY KEY)."""
         autogen_context = _starrocks_autogen_context()
 
@@ -558,12 +556,12 @@ class KeyChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert "not supported to change the key type" in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
+        assert "not supported to change the key type" in caplog.text
 
     def test_key_default_to_none(self):
         """Test KEY from default value ('DUPLICATE KEY') to None."""
@@ -595,7 +593,7 @@ class KeyChangesTest(fixtures.TestBase):
         assert len(result) == 0
 
     def test_key_non_default_to_none(self):
-        """Test KEY from a non-default value ('PRIMARY KEY') to None."""
+        """KEY the metadata omits is left alone, whatever the database has."""
         autogen_context = _starrocks_autogen_context()
 
         conn_table = Mock()  # Table reflected from SR database, explicitly PRIMARY KEY
@@ -614,15 +612,13 @@ class KeyChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
 
-        assert LOG_ATTRIBUTE_NEED_SPECIFIED in str(exc_info.error)
-
-    def test_key_change(self):
+    def test_key_change(self, caplog):
         """Test KEY value changes ('DUPLICATE KEY' to 'UNIQUE KEY')."""
         autogen_context = _starrocks_autogen_context()
 
@@ -643,12 +639,12 @@ class KeyChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert "not supported to change the key type" in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
+        assert "not supported to change the key type" in caplog.text
 
     @testing.combinations(
         ("UNIQUE_KEY", "id", "UNIQUE_key", "id"),
@@ -719,7 +715,7 @@ class CommentChangesTest(fixtures.TestBase):
 class PartitionChangesTest(fixtures.TestBase):
     """Test PARTITION_BY attribute changes (ALTER PARTITION not supported, but changes are detected)."""
 
-    def test_partition_none_to_value(self):
+    def test_partition_none_to_value(self, caplog):
         """Test PARTITION_BY from None to value."""
         autogen_context = _starrocks_autogen_context()
 
@@ -737,15 +733,15 @@ class PartitionChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert "StarRocks does not support 'ALTER TABLE PARTITION BY'" in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
+        assert "StarRocks does not support 'ALTER TABLE PARTITION BY'" in caplog.text
 
     def test_partition_value_to_none(self):
-        """Test PARTITION_BY from value to None."""
+        """PARTITION_BY the metadata omits is left alone, whatever the database has."""
         autogen_context = _starrocks_autogen_context()
 
         conn_table = Mock()  # Database has PARTITION_BY set
@@ -764,14 +760,13 @@ class PartitionChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert LOG_ATTRIBUTE_NEED_SPECIFIED in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
 
-    def test_partition_change(self):
+    def test_partition_change(self, caplog):
         """Test PARTITION_BY value changes."""
         autogen_context = _starrocks_autogen_context()
 
@@ -792,12 +787,12 @@ class PartitionChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert "StarRocks does not support 'ALTER TABLE PARTITION BY'" in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
+        assert "StarRocks does not support 'ALTER TABLE PARTITION BY'" in caplog.text
 
         # Force to make diff of partition by
         upgrade_ops = UpgradeOps([])
@@ -846,6 +841,53 @@ class PartitionChangesTest(fixtures.TestBase):
         )
         result = upgrade_ops.ops
         assert len(result) == 0
+
+    @staticmethod
+    def _partition_ops(conn_partition, meta_partition):
+        conn_table = Mock()
+        type(conn_table).name = PropertyMock(return_value="test_table")
+        type(conn_table).schema = PropertyMock(return_value="test_db")
+        conn_table.kwargs = {
+            TableInfoKeyWithPrefix.DISTRIBUTED_BY: "HASH(id)",
+            TableInfoKeyWithPrefix.PARTITION_BY: conn_partition,
+        }
+        conn_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(conn_table.kwargs)}
+        meta_table = Mock(
+            kwargs={
+                TableInfoKeyWithPrefix.DISTRIBUTED_BY: "HASH(id)",
+                TableInfoKeyWithPrefix.PARTITION_BY: meta_partition,
+            }
+        )
+        meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
+        upgrade_ops = UpgradeOps([])
+        with patch.object(AlterTableEnablement, "PARTITION_BY", True):
+            compare_starrocks_table(
+                _starrocks_autogen_context(), upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+            )
+        return upgrade_ops.ops
+
+    @testing.combinations(
+        ("time_slice(dt, 7, 'day', 'floor')", "time_slice(dt, INTERVAL 7 DAY)"),
+        ("time_slice(`dt`, 7, 'day', 'floor')", "time_slice(dt, interval 7 day, floor)"),
+        ("time_slice(dt, 7, 'day', 'floor')", "time_slice(dt, INTERVAL 7 DAY, 'floor')"),
+        ("time_slice(dt, 1, 'month', 'floor')", "TIME_SLICE( dt , INTERVAL 1 MONTH )"),
+        ("time_slice(dt, INTERVAL 3 hour, ceil)", "time_slice(dt, INTERVAL 3 HOUR, CEIL)"),
+        ("time_slice(dt, INTERVAL 3 hour, ceil)", "time_slice(dt, 3, 'hour', 'ceil')"),
+        ("RANGE(time_slice(dt, 7, 'day', 'floor'))", "RANGE(time_slice(dt, INTERVAL 7 DAY))"),
+        argnames="conn_partition, meta_partition",
+    )
+    def test_time_slice_spellings_are_equal(self, conn_partition, meta_partition):
+        assert self._partition_ops(conn_partition, meta_partition) == []
+
+    @testing.combinations(
+        ("time_slice(dt, 7, 'day', 'floor')", "time_slice(dt, INTERVAL 14 DAY)"),
+        ("time_slice(dt, 7, 'day', 'floor')", "time_slice(dt, INTERVAL 7 DAY, ceil)"),
+        ("time_slice(dt, 7, 'day', 'floor')", "time_slice(dt, INTERVAL 7 HOUR)"),
+        ("time_slice(dt, 7, 'day', 'floor')", "time_slice(other, INTERVAL 7 DAY)"),
+        argnames="conn_partition, meta_partition",
+    )
+    def test_time_slice_real_changes_are_detected(self, conn_partition, meta_partition):
+        assert len(self._partition_ops(conn_partition, meta_partition)) == 1
 
     def test_partition_none_to_none(self):
         """Test PARTITION_BY from None to None (no change)."""
@@ -948,7 +990,7 @@ class DistributionChangesTest(fixtures.TestBase):
         assert len(result) == 0
 
     def test_distribution_non_default_to_none(self):
-        """Test DISTRIBUTED_BY from a non-default value to None."""
+        """DISTRIBUTED_BY the metadata omits is left alone, whatever the database has."""
         autogen_context = _starrocks_autogen_context()
 
         conn_table = Mock()  # Database has non-default DISTRIBUTED_BY
@@ -962,12 +1004,11 @@ class DistributionChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert LOG_ATTRIBUTE_NEED_SPECIFIED in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
 
     def test_distribution_change(self):
         """Test DISTRIBUTED_BY value changes."""
@@ -1103,24 +1144,21 @@ class RangeDistributionTest(fixtures.TestBase):
         argnames="meta_distribution",
         id_="ia",
     )
-    def test_range_to_other_raises(self, meta_distribution):
-        with expect_raises_message(
-            NotImplementedError, "cannot change the distribution of a RANGE-distributed table"
-        ):
-            self._compare("RANGE", meta_distribution)
+    def test_range_to_other_warns(self, meta_distribution, caplog):
+        assert self._compare("RANGE", meta_distribution) == []
+        assert "cannot change the distribution of a RANGE-distributed table" in caplog.text
 
     @testing.combinations(
         ("random", "RANDOM"), ("hash_buckets", "HASH(id) BUCKETS 8"), argnames="conn_distribution", id_="ia"
     )
-    def test_other_to_range_raises(self, conn_distribution):
-        with expect_raises_message(NotImplementedError, "no DISTRIBUTED BY RANGE syntax"):
-            self._compare(conn_distribution, "RANGE")
+    def test_other_to_range_warns(self, conn_distribution, caplog):
+        assert self._compare(conn_distribution, "RANGE") == []
+        assert "no DISTRIBUTED BY RANGE syntax" in caplog.text
 
-    def test_other_to_range_error_points_to_cluster_config(self):
+    def test_other_to_range_warning_points_to_cluster_config(self, caplog):
         """Metadata RANGE vs a non-RANGE table usually means the cluster didn't apply RANGE."""
-        with expect_raises(NotImplementedError) as raised:
-            self._compare("RANDOM", "RANGE")
-        message = str(raised.error)
+        assert self._compare("RANDOM", "RANGE") == []
+        message = caplog.text
         assert "did not apply range distribution" in message
         assert "'enable_range_distribution' defaults to false" in message
         assert "shared-nothing clusters do not use it by default" in message
@@ -1362,7 +1400,7 @@ class PropertiesChangesTest(fixtures.TestBase):
         assert len(result) == 0
 
     @testing.combinations(
-        ("colocate_with", None, "not_exists"),
+        ("partition_live_number", None, "3"),
         argnames="prop_key, default_value, non_default_value",
     )
     def test_properties_non_default_none_to_none(self, prop_key, default_value, non_default_value, caplog):
@@ -1391,6 +1429,11 @@ class PropertiesChangesTest(fixtures.TestBase):
         ("bucket_size", "1073741824"),
         ("fast_schema_evolution", "false"),
         ("compression", "ZSTD"),
+        ("dynamic_partition.time_zone", "Asia/Shanghai"),
+        ("dynamic_partition.history_partition_num", "3"),
+        ("flat_json.null.factor", "0.5"),
+        ("flat_json.sparsity.factor", "0.5"),
+        ("flat_json.column.max", "50"),
         argnames="prop_key, non_default_value",
     )
     def test_properties_non_default_to_none(self, prop_key, non_default_value, caplog):
@@ -1686,6 +1729,33 @@ class UnmanagedDefaultPropertiesTest(fixtures.TestBase):
         assert to_set == {}
         assert LOG_NO_DEFAULT_VALUE in caplog.text
         assert LOG_NO_ALERT_AUTO_GENERATED in caplog.text
+
+
+class PropertyDowngradeTest(fixtures.TestBase):
+    """The downgrade of a property the metadata sets and the database does not have."""
+
+    @staticmethod
+    def _run(meta_props, default_cls=ReflectionTableDefaults):
+        from starrocks.alembic.compare import _compare_table_properties_impl
+
+        return _compare_table_properties_impl(
+            "test_db", "test_table",
+            {TableInfoKey.PROPERTIES: {}}, {TableInfoKey.PROPERTIES: meta_props},
+            SystemRunMode.SHARED_NOTHING, default_cls=default_cls,
+        )
+
+    @testing.combinations(("colocate_with", "g1"), ("bloom_filter_columns", "v"), argnames="key,value")
+    def test_a_property_absent_until_set_is_cleared(self, key, value):
+        to_set, to_reverse = self._run({key: value})
+        assert to_set == {key: value}
+        assert to_reverse == {key: ""}
+
+    def test_a_property_without_a_default_is_left_out_of_the_downgrade(self, caplog):
+        caplog.set_level("WARNING")
+        to_set, to_reverse = self._run({"session.query_timeout": "1000"}, ReflectionMVDefaults)
+        assert to_set == {"session.query_timeout": "1000"}
+        assert to_reverse == {}
+        assert "the downgrade cannot restore it" in caplog.text
 
 
 class PropertiesNotReportedByDatabaseTest(fixtures.TestBase):

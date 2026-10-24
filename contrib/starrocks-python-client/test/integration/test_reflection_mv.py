@@ -895,7 +895,6 @@ class EngineBoundInspectorMaterializedViewTest(fixtures.TestBase):
     __backend__ = True
     __only_on__ = "starrocks"
 
-    @testing.requires.sqlalchemy_2
     def test_materialized_view_through_engine_inspector(self):
         mv_name = "engine_inspector_mv"
         schema = config.db.url.database
@@ -913,6 +912,7 @@ class EngineBoundInspectorMaterializedViewTest(fixtures.TestBase):
         try:
             inspector = inspect(config.db)
 
+            assert mv_name in inspector.get_materialized_view_names(schema=schema)
             assert inspector.get_materialized_view(mv_name, schema=schema).name == mv_name
             assert "SELECT" in inspector.get_materialized_view_definition(mv_name, schema=schema)
         finally:
@@ -927,7 +927,6 @@ class ReflectionMaterializedViewColumnsTest(fixtures.TestBase):
     __backend__ = True
     __only_on__ = "starrocks"
 
-    @testing.requires.sqlalchemy_2
     def test_reflect_materialized_view_columns(self, connection):
         mv_name = "reflect_mv_columns"
         connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))

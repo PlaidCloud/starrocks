@@ -123,6 +123,7 @@ from .sql.ddl import (
     AlterTablePartition,
     AlterTableProperties,
     AlterView,
+    AlterViewSecurity,
     CreateMaterializedView,
     CreateView,
     DropMaterializedView,
@@ -683,6 +684,9 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         return '"%s"' % str(value).replace("\\", "\\\\").replace('"', '\\"')
 
     def quoted_property_pair(self, key: Any, value: Any, separator: str = " = ") -> str:
+        """Quote a ``"key" = "value"`` PROPERTIES pair, refusing a missing value rather than writing "None"."""
+        if value is None:
+            raise exc.CompileError(f"Property {key!r} has no value; StarRocks properties are strings")
         return self.sql_text(f"{self.quoted_property(key)}{separator}{self.quoted_property(value)}")
 
     _COLUMN_LIST: Final[re.Pattern[str]] = re.compile(
@@ -708,6 +712,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         ``%``. A reflected clause object gives its text.
         """
         return self.sql_compiler.post_process_text(str(text))
+
     def visit_create_index(self, create: sa_schema.CreateIndex, **kw: Any) -> str:  # type: ignore[override]
         """Compile ``CREATE INDEX name ON table (columns) [USING <type> [(properties)]] [COMMENT '...']``.
 
@@ -757,7 +762,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
                 "properties only after an index type"
             )
         return "(%s)" % ", ".join(
-            f"{self.quoted_property(key)} = {self.quoted_property(value)}" for key, value in properties.items()
+            self.quoted_property_pair(key, value) for key, value in properties.items()
         )
 
     def _indexed_column_name(self, index: sa_schema.Index, expression: Any) -> str:
@@ -865,7 +870,8 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
                 break  # Found the key, no need to check for others
 
         if not key_str:
-            return  # No key defined, nothing to validate
+            self._validate_inferred_primary_key(table)
+            return
 
         key_column_names = [k.strip() for k in key_str.split(',')]
         table_column_names = {c.name for c in table.columns}
@@ -880,6 +886,30 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         # 2. Specific Check: For AGGREGATE KEY tables, validate column order.
         if key_type == TableType.AGGREGATE_KEY:
             self._validate_aggregate_key_order(table, key_column_names)
+
+    @staticmethod
+    def _validate_inferred_primary_key(table: sa_schema.Table) -> None:
+        """Refuse a primary key that cannot become the table's PRIMARY KEY.
+
+        StarRocks needs a PRIMARY KEY table's key columns first, and keeps them in table order, so a
+        ``PrimaryKeyConstraint`` that lists them in another order cannot be kept either.
+        """
+        key_columns = utils.inferred_primary_key_columns(table)
+        if not key_columns:
+            return
+        if [column.name for column in table.columns][: len(key_columns)] != key_columns:
+            raise exc.CompileError(
+                f"Table {table.name!r} is created as a PRIMARY KEY table on {', '.join(key_columns)}, and StarRocks "
+                "needs a PRIMARY KEY table's key columns to come first; move them to the start of the table, or "
+                "name another key model such as starrocks_duplicate_key"
+            )
+        declared_order = [column.name for column in table.primary_key.columns]
+        if declared_order != key_columns:
+            raise exc.CompileError(
+                f"Table {table.name!r} declares its primary key as ({', '.join(declared_order)}), and StarRocks keeps "
+                f"a PRIMARY KEY table's key in table column order, ({', '.join(key_columns)}); declare the columns "
+                "in key order"
+            )
 
     def _validate_aggregate_key_order(self, table: sa_schema.Table, key_column_names: List[str]) -> None:
         """
@@ -1042,7 +1072,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         #     props_dict.setdefault("replication_num", str(self.dialect.test_replication_num))
         if props_dict:
             props = ",\n".join(
-                f"{self.indent}{self.quoted_property(k)}={self.quoted_property(v)}" for k, v in props_dict.items()
+                f"{self.indent}{self.quoted_property_pair(k, v, separator='=')}" for k, v in props_dict.items()
             )
             table_opts.append(f"PROPERTIES(\n{props}\n)")
 
@@ -1057,7 +1087,8 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             opts: The table options.
 
         Returns:
-            The table key description. like "PRIMARY KEY (id, name)"
+            The table key description. like "PRIMARY KEY (id, name)". A table that names no key model but has
+            ``primary_key=True`` columns gets a PRIMARY KEY on them.
         """
         # Key / Table Type (Primary key, Duplicate key, Aggregate key, Unique key)
         key_type = None
@@ -1079,6 +1110,8 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
                         raise exc.CompileError(f"Primary key columns doesn't equal to the table KEY columns. "
                                             f"primary_keys: {primary_keys}, SR's key_columns: ({key_columns_str})")
                 key_desc = f"{key_type} ({key_columns_str})"
+        if key_desc is None and primary_keys:
+            key_desc = f"{TableType.PRIMARY_KEY} ({', '.join(self.preparer.quote(name) for name in primary_keys)})"
         return key_desc
 
 
@@ -1361,13 +1394,15 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         if view.columns:
             text += self._get_view_column_clauses(view)
 
-        # StarRocks does not support altering COMMENT or SECURITY via ALTER VIEW.
-        # TODO: we can optimize it when StarRocks supports it in the future
-        # Only redefine the SELECT statement.
         text += f"AS\n{self.sql_text(view.definition)}"
 
         logger.debug("Compiled SQL for AlterView: \n%s", text)
         return text
+
+    def visit_alter_view_security(self, alter: AlterViewSecurity, **kw: Any) -> str:
+        """Compile ALTER VIEW ... SET SECURITY, the only way to change a view's security."""
+        keyword = self._view_security_keyword(alter.element, alter.security)
+        return f"ALTER VIEW {self.preparer.format_table(alter.element)} SET SECURITY {keyword}"
 
     def _get_view_column_clauses(self, view: View) -> str:
         """
@@ -1525,7 +1560,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         # ALTER PROPERTIES
         if alter.properties is not None:
             props_str = ", ".join(
-                f"{self.quoted_property(k)} = {self.quoted_property(v)}" for k, v in alter.properties.items()
+                self.quoted_property_pair(k, v) for k, v in alter.properties.items()
             )
             statements.append(f"ALTER MATERIALIZED VIEW {mv_name} SET ({props_str})")
 
@@ -2094,6 +2129,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
         full_name = self._get_quote_full_table_name(table_name, schema=schema)
         show_create_table = self._show_create_table(connection, None, charset, full_name)
         column_autoinc = self._get_autoinc_from_show_create_table(show_create_table)
+        column_default_kinds = _reflection.column_default_kinds(show_create_table)
 
         # Get aggregate info from `SHOW FULL COLUMNS`
         full_column_rows: List[Row] = (
@@ -2125,6 +2161,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
             columns=column_rows,
             column_2_agg_type=column_2_agg_type,
             column_autoinc=column_autoinc,
+            column_default_kinds=column_default_kinds,
             charset=charset,
             secondary_indexes=parser.parse_secondary_indexes(show_create_table),
         )
@@ -2270,17 +2307,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
             The key is the column name, the value is True/False whether the column has auto increment
             Example: `{"col1": True, "col2": False, ...}`
         """
-        if create_table.lstrip().startswith("CREATE VIEW"):
-            return dict()
-        only_create = create_table.split('ENGINE=')[0]
-        only_columns = only_create.split("\n")[1:-1]
-        only_columns = [c.strip() for c in only_columns if c.strip().startswith("`")]
-        col_autoinc = {
-            c.split(' ')[0].strip('`'): 'AUTO_INCREMENT' in c
-            for c in only_columns
-        }
-        # logger.debug("get auto increment info from show create table: %s", col_autoinc)
-        return col_autoinc
+        return _reflection.column_auto_increments(create_table)
 
     _GENERATED_PARTITION_COLUMN: Final[re.Pattern[str]] = re.compile(
         r'^\s*`(__generated_partition_column_\d+)`\s.*?\sAS\s(.+?)\sCOMMENT\s"', re.MULTILINE
@@ -2723,12 +2750,18 @@ def _starrocks_change_column(element: MySQLChangeColumn, compiler: StarRocksDDLC
 @compiles(MySQLAlterDefault, DialectName)
 def _starrocks_alter_default(element: MySQLAlterDefault, compiler: StarRocksDDLCompiler, **kw: Any) -> str:  # type: ignore[name-defined]
     """
-    StarRocks only supports MODIFY DEFAULT, no DROP DEFAULT now.
+    StarRocks cannot change a column's default value, so refuse instead of rendering a statement it rejects.
+
+    The statement Alembic's MySQL dialect builds, ``MODIFY COLUMN c DEFAULT ...``, has no column type, and
+    StarRocks rejects it with "Column's type is null" even before it reaches the real limitation.
     """
-    return "%s MODIFY COLUMN %s %s" % (
-        alter_table(compiler, element.table_name, element.schema),
-        format_column_name(compiler, element.column_name),
-        (
-            "DEFAULT %s" % format_server_default(compiler, element.default)
-        ),
+    raise column_default_change_error(element.table_name, element.column_name)
+
+
+def column_default_change_error(table_name: str, column_name: str) -> exc.CompileError:
+    """Return the CompileError for a change of a column's default value, which StarRocks cannot make."""
+    return exc.CompileError(
+        f"StarRocks cannot change a column's default value ('Can not change default value'), so the default "
+        f"of column {column_name!r} of table {table_name!r} cannot be altered. Recreate the table or the "
+        f"column with the new default instead."
     )

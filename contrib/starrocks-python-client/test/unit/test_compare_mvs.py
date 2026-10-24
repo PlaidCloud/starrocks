@@ -19,10 +19,10 @@ import warnings
 
 from alembic.operations import ops
 from sqlalchemy import MetaData, Table, testing
-from sqlalchemy.testing import eq_, expect_raises_message, fixtures
+from sqlalchemy.testing import eq_, fixtures
 
 from starrocks.alembic.compare import _autogen_for_mvs, _compare_mv
-from starrocks.alembic.ops import AlterMaterializedViewOp, CreateMaterializedViewOp
+from starrocks.alembic.ops import AlterMaterializedViewOp, CreateMaterializedViewOp, DropMaterializedViewOp
 from starrocks.common.params import DialectName, TableInfoKey, TableKind, TableObjectInfoKey
 from starrocks.sql.schema import MaterializedView
 
@@ -61,7 +61,7 @@ class CompareMaterializedViewTest(fixtures.TestBase):
         if comment:
             table.comment = comment
 
-        dialect_opts = table.dialect_options.setdefault(DialectName, {})
+        dialect_opts = table.dialect_options[DialectName]
         if partition_by:
             dialect_opts[TableInfoKey.PARTITION_BY] = partition_by
         if distributed_by:
@@ -97,6 +97,39 @@ class CompareMaterializedViewTest(fixtures.TestBase):
         assert op.properties is None
         assert op.existing_properties is None
 
+    def test_spacing_around_parentheses_is_no_refresh_change(self):
+        """SHOW CREATE writes EVERY(INTERVAL ...), the model may write EVERY (INTERVAL ...)."""
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv(
+            "my_mv", definition="SELECT 1", refresh="DEFERRED ASYNC EVERY(INTERVAL 2 HOUR)"
+        )
+        meta_mv = MaterializedView(
+            "my_mv", MetaData(), definition="SELECT 1", starrocks_refresh="DEFERRED ASYNC EVERY ( INTERVAL 2 HOUR )"
+        )
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        eq_(upgrade_ops.ops, [])
+
+    def test_an_omitted_refresh_is_left_alone(self):
+        """An MV with a distribution may omit its refresh; StarRocks then reports MANUAL, which is no change."""
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", distributed_by="RANDOM", refresh="MANUAL")
+        meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_distributed_by="RANDOM")
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        eq_(upgrade_ops.ops, [])
+
+    def test_a_refresh_the_database_does_not_report_has_no_downgrade_value(self):
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1")
+        meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_refresh="MANUAL")
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        eq_([(op.refresh, op.existing_refresh) for op in upgrade_ops.ops], [("MANUAL", None)])
+
     def test_alter_mv_properties_changed(self):
         """ALTER: Properties changed (generates AlterMaterializedViewOp)."""
         upgrade_ops = ops.UpgradeOps([])
@@ -120,32 +153,39 @@ class CompareMaterializedViewTest(fixtures.TestBase):
     # DROP/CREATE MV - Immutable Attributes
     # ========================================================================
 
-    def test_modify_mv_definition_changed(self):
+    @staticmethod
+    def _assert_recreated(upgrade_ops, caplog, reason):
+        """The materialized view is dropped and created again, and the warning names the change behind it."""
+        eq_([type(op) for op in upgrade_ops.ops], [DropMaterializedViewOp, CreateMaterializedViewOp])
+        assert "drops it and creates it again" in caplog.text
+        assert reason in caplog.text
+
+    def test_modify_mv_definition_changed(self, caplog):
         """DROP/CREATE: Definition changed."""
         upgrade_ops = ops.UpgradeOps([])
         conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1")
         meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 2")
 
-        with expect_raises_message(NotImplementedError, "does not support altering MV definition"):
-            _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        self._assert_recreated(upgrade_ops, caplog, "does not support altering MV definition")
 
-    def test_modify_mv_partition_by_changed(self):
+    def test_modify_mv_partition_by_changed(self, caplog):
         """DROP/CREATE: Partition by changed."""
         upgrade_ops = ops.UpgradeOps([])
         conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", partition_by="date_trunc('day', dt)")
         meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_partition_by="dt")
 
-        with expect_raises_message(NotImplementedError, "does not support 'ALTER MATERIALIZED VIEW PARTITION BY'"):
-            _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        self._assert_recreated(upgrade_ops, caplog, "does not support 'ALTER MATERIALIZED VIEW PARTITION BY'")
 
-    def test_modify_mv_distributed_by_changed(self):
+    def test_modify_mv_distributed_by_changed(self, caplog):
         """DROP/CREATE: Distributed by changed."""
         upgrade_ops = ops.UpgradeOps([])
         conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", distributed_by="HASH(id)")
         meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_distributed_by="RANDOM")
 
-        with expect_raises_message(NotImplementedError, "does not support 'ALTER MATERIALIZED VIEW DISTRIBUTED BY'"):
-            _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        self._assert_recreated(upgrade_ops, caplog, "does not support 'ALTER MATERIALIZED VIEW DISTRIBUTED BY'")
 
     @testing.combinations(
         ("explicit_bucket_count", "RANDOM BUCKETS 10"),
@@ -170,14 +210,14 @@ class CompareMaterializedViewTest(fixtures.TestBase):
 
         eq_(len(upgrade_ops.ops), 0)
 
-    def test_modify_mv_order_by_changed(self):
+    def test_modify_mv_order_by_changed(self, caplog):
         """DROP/CREATE: Order by changed."""
         upgrade_ops = ops.UpgradeOps([])
         conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", order_by="id")
         meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_order_by="name")
 
-        with expect_raises_message(NotImplementedError, "does not support 'ALTER MATERIALIZED VIEW ORDER BY'"):
-            _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        self._assert_recreated(upgrade_ops, caplog, "does not support 'ALTER MATERIALIZED VIEW ORDER BY'")
 
     # ========================================================================
     # No-Change Tests
@@ -247,6 +287,9 @@ class CompareMaterializedViewTest(fixtures.TestBase):
         ("ASYNC EVERY(INTERVAL 1 HOUR)", "IMMEDIATE ASYNC EVERY(INTERVAL 1 HOUR)"),
         ("ASYNC EVERY(INTERVAL 1 HOUR)", "IMMEDIATE SCHEDULE EVERY(INTERVAL 1 HOUR)"),
         ("ASYNC", "IMMEDIATE ASYNC"),
+        # StarRocks keeps a START time in full: midnight for a date alone, and seconds for a time without them.
+        ('ASYNC START("2026-10-25 00:00:00") EVERY(INTERVAL 1 DAY)', "ASYNC START('2026-10-25') EVERY (INTERVAL 1 DAY)"),
+        ('ASYNC START("2026-10-25 10:30:00") EVERY(INTERVAL 1 HOUR)', "ASYNC START('2026-10-25 10:30') EVERY(INTERVAL 1 HOUR)"),
         argnames="conn_refresh, meta_refresh",
     )
     def test_no_change_mv_refresh_schedule_alias(self, conn_refresh, meta_refresh):
@@ -258,6 +301,62 @@ class CompareMaterializedViewTest(fixtures.TestBase):
         _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
 
         eq_(len(upgrade_ops.ops), 0)
+
+    def test_another_refresh_start_is_a_change(self):
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv(
+            "my_mv", definition="SELECT 1", refresh='ASYNC START("2026-10-25 00:00:00") EVERY(INTERVAL 1 DAY)'
+        )
+        meta_mv = MaterializedView(
+            "my_mv", MetaData(), definition="SELECT 1", starrocks_refresh="ASYNC START('2026-10-26') EVERY(INTERVAL 1 DAY)"
+        )
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        eq_(len(upgrade_ops.ops), 1)
+
+
+    @testing.combinations(
+        ("DEFERRED ASYNC", "ASYNC"),
+        ("DEFERRED ASYNC EVERY(INTERVAL 1 HOUR)", "ASYNC EVERY(INTERVAL 1 HOUR)"),
+        ("DEFERRED MANUAL", "MANUAL"),
+        ("DEFERRED ASYNC", "DEFERRED ASYNC"),
+        ("ASYNC", "ASYNC"),
+        argnames="conn_refresh, meta_refresh",
+    )
+    def test_no_change_when_model_states_no_refresh_moment(self, conn_refresh, meta_refresh):
+        """ALTER ... REFRESH ASYNC leaves a DEFERRED view deferred, so a model that states no moment is unchanged."""
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", refresh=conn_refresh)
+        meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_refresh=meta_refresh)
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        eq_(len(upgrade_ops.ops), 0)
+
+    @testing.combinations(
+        ("DEFERRED ASYNC", "IMMEDIATE ASYNC", "from DEFERRED to IMMEDIATE"),
+        ("ASYNC", "DEFERRED ASYNC", "from IMMEDIATE to DEFERRED"),
+        argnames="conn_refresh, meta_refresh, reason",
+    )
+    def test_refresh_moment_the_model_states_is_recreated(self, caplog, conn_refresh, meta_refresh, reason):
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", refresh=conn_refresh)
+        meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_refresh=meta_refresh)
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        self._assert_recreated(upgrade_ops, caplog, reason)
+
+    def test_refresh_scheme_change_on_a_deferred_view_is_altered(self):
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", refresh="DEFERRED MANUAL")
+        meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_refresh="ASYNC")
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        eq_([type(op) for op in upgrade_ops.ops], [AlterMaterializedViewOp])
+        eq_(upgrade_ops.ops[0].refresh, "ASYNC")
 
 
 class AutogenerateMaterializedViewsTest(fixtures.TestBase):

@@ -15,7 +15,7 @@
 from enum import Enum
 import logging
 import time
-from typing import Any, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Collection, Mapping, Optional, Sequence, Tuple, Union
 
 from alembic.ddl import base as alembic_base
 from alembic.ddl.mysql import MySQLImpl
@@ -26,7 +26,7 @@ from sqlalchemy.sql import Executable
 from starrocks import datatype
 from starrocks.alembic import compare
 from starrocks.datatype import BIGINT, VARCHAR
-from starrocks.dialect import StarRocksDialect
+from starrocks.dialect import StarRocksDialect, column_default_change_error
 from starrocks.sql.ddl import AlterTableColumns
 
 
@@ -239,6 +239,93 @@ class StarRocksImpl(MySQLImpl):
                 table_name, raw_state,
             )
             time.sleep(poll_interval)
+
+    @staticmethod
+    def _unquoted_default(server_default: Any) -> Optional[str]:
+        """Return the text of a server default without the quotes around a string, or ``None`` for none."""
+        text_of_default = compare.server_default_text(server_default)
+        return None if text_of_default is None else text_of_default.strip("'\"")
+
+    def alter_column(
+        self,
+        table_name: str,
+        column_name: str,
+        *,
+        server_default: Any = False,
+        existing_server_default: Any = None,
+        **kw: Any,
+    ) -> None:
+        """Alter a column, refusing a change of its default value, which StarRocks cannot make.
+
+        A ``server_default`` that equals ``existing_server_default`` is no change, so it is passed on to the
+        MODIFY COLUMN that keeps the default; any other one raises CompileError.
+        """
+        if server_default is not False and self._unquoted_default(server_default) != self._unquoted_default(
+            existing_server_default
+        ):
+            raise column_default_change_error(table_name, column_name)
+        super().alter_column(
+            table_name,
+            column_name,
+            server_default=server_default,
+            existing_server_default=existing_server_default,
+            **kw,
+        )
+
+    def correct_for_autogen_constraints(
+        self,
+        conn_unique_constraints: Collection[UniqueConstraint],
+        conn_indexes: Collection[Index],
+        metadata_unique_constraints: Collection[UniqueConstraint],
+        metadata_indexes: Collection[Index],
+    ) -> None:
+        """Leave unique constraints out of the comparison: StarRocks tables cannot hold them.
+
+        CREATE TABLE drops a model's UniqueConstraint and reflection reports none, so comparing them proposed the same
+        ``create_unique_constraint`` on every run, which StarRocks then rejects. Uniqueness comes from a PRIMARY KEY or
+        UNIQUE KEY table instead. MySQL's correction for its implicit foreign key indexes does not apply.
+        """
+        self._empty(conn_unique_constraints, metadata_unique_constraints)
+
+    def correct_for_autogen_foreignkeys(
+        self, conn_fks: Collection[ForeignKeyConstraint], metadata_fks: Collection[ForeignKeyConstraint]
+    ) -> None:
+        """Leave foreign keys out of the comparison: StarRocks tables cannot hold them.
+
+        As with unique constraints, a model's ForeignKey never reaches the table, so comparing them proposed the same
+        ``create_foreign_key`` on every run.
+        """
+        self._empty(conn_fks, metadata_fks)
+
+    @staticmethod
+    def _empty(*collections: Collection[Any]) -> None:
+        """Empty each collection; for a table that does not exist yet Alembic passes an already empty frozenset."""
+        for collection in collections:
+            if isinstance(collection, set):
+                collection.clear()
+
+    def compare_server_default(
+        self,
+        inspector_column: Column[Any],
+        metadata_column: Column[Any],
+        rendered_metadata_default: Optional[str],
+        rendered_inspector_default: Optional[str],
+    ) -> bool:
+        """
+        Compare column defaults, treating a default that only differs in how it is written as the same.
+
+        MySQL's comparison reads ``uuid()`` and the ``(uuid())`` that StarRocks reports as different defaults, and
+        compares function names case sensitively, so a default such as that diffed on every run. Defaults that
+        still differ fall through to MySQL's comparison.
+
+        Returns:
+            True if the defaults are different, False if they are the same.
+        """
+        if compare.server_defaults_match(metadata_column, rendered_metadata_default, rendered_inspector_default):
+            return False
+        return super().compare_server_default(
+            inspector_column, metadata_column, rendered_metadata_default, rendered_inspector_default
+        )
 
     def compare_type(self, inspector_column: Column[Any], metadata_column: Column[Any]) -> bool:
         """

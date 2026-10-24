@@ -18,7 +18,7 @@ from unittest.mock import Mock
 
 from alembic.autogenerate.api import AutogenContext
 from sqlalchemy import BIGINT, Column, MetaData, Table, testing
-from sqlalchemy.testing import expect_raises_message, fixtures
+from sqlalchemy.testing import fixtures
 
 from starrocks.alembic.compare import compare_starrocks_column_agg_type, compare_starrocks_column_autoincrement
 from starrocks.common.types import ColumnAggType
@@ -66,22 +66,24 @@ class CompareColumnAggTypeTest(_ReflectedTableFixture, fixtures.TestBase):
             starrocks_distributed_by="HASH(id)",
         )
 
-    def test_compare_agg_type_no_changes(self, connection, reflected_table):
+    def test_compare_agg_type_no_changes(self, connection, reflected_table, caplog):
         conn_table = reflected_table("compare_agg_type_no_changes", AGGREGATE_TABLE_DDL)
         meta_table = self._metadata_table("compare_agg_type_no_changes", ColumnAggType.SUM)
+        caplog.set_level("INFO")
 
         compare_starrocks_column_agg_type(
             self._autogen_context(connection), None, None, conn_table.name, "v", conn_table.c.v, meta_table.c.v
         )
+        assert "aggregation type" not in caplog.text
 
-    def test_compare_agg_type_changes_raises(self, connection, reflected_table):
-        conn_table = reflected_table("compare_agg_type_changes_raises", AGGREGATE_TABLE_DDL)
-        meta_table = self._metadata_table("compare_agg_type_changes_raises", ColumnAggType.REPLACE)
+    def test_compare_agg_type_changes_warns(self, connection, reflected_table, caplog):
+        conn_table = reflected_table("compare_agg_type_changes_warns", AGGREGATE_TABLE_DDL)
+        meta_table = self._metadata_table("compare_agg_type_changes_warns", ColumnAggType.REPLACE)
 
-        with expect_raises_message(NotImplementedError, "does not support changing the aggregation type"):
-            compare_starrocks_column_agg_type(
-                self._autogen_context(connection), None, None, conn_table.name, "v", conn_table.c.v, meta_table.c.v
-            )
+        compare_starrocks_column_agg_type(
+            self._autogen_context(connection), None, None, conn_table.name, "v", conn_table.c.v, meta_table.c.v
+        )
+        assert "does not support changing the aggregation type" in caplog.text
 
 
 class CompareColumnAutoIncrementTest(_ReflectedTableFixture, fixtures.TestBase):
@@ -99,14 +101,16 @@ class CompareColumnAutoIncrementTest(_ReflectedTableFixture, fixtures.TestBase):
             self._autogen_context(connection), None, None, conn_table.name, "id", conn_table.c.id, meta_table.c.id
         )
 
-    def test_compare_autoincrement_no_changes(self, connection, reflected_table):
+    def test_compare_autoincrement_no_changes(self, connection, reflected_table, caplog):
         conn_table = reflected_table(
             "compare_autoincrement_no_changes",
             "CREATE TABLE {name} (id BIGINT NOT NULL AUTO_INCREMENT) DISTRIBUTED BY RANDOM "
             'PROPERTIES("replication_num"="1")',
         )
+        caplog.set_level("INFO")
 
         assert not self._compare_with_autoincrement_metadata(connection, conn_table)
+        assert "AUTO_INCREMENT change" not in caplog.text
 
     def test_compare_autoincrement_changes_warns(self, connection, reflected_table, caplog):
         """A column without AUTO_INCREMENT against metadata asking for it: no op, but a warning."""

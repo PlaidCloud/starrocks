@@ -15,31 +15,32 @@
 import logging
 import re
 
-import pytest
 from sqlalchemy import Column, MetaData, Table, inspect, text
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.testing import expect_raises_message
-from sqlalchemy.testing.assertions import is_true
+from sqlalchemy.testing.assertions import eq_, is_true
 
 from starrocks.alembic.compare import TableAttributeNormalizer
 from starrocks.common.params import TableKind, TableObjectInfoKey
 from starrocks.datatype import INTEGER, STRING, VARCHAR
-from starrocks.sql.schema import View
+from starrocks.sql.schema import MaterializedView, View
 from test.system.lifecycle import (
     EMPTY_DOWNGRADE_STR,
     EMPTY_UPGRADE_STR,
-    VIEW_CREATED_BEFORE_ITS_TABLE,
     ScriptContentParser,
     _AlembicLifecycleBase,
 )
-from test.util import VIEW_TEXT_REWRITTEN_BEFORE_4_0_6, normalize_py_call, normalize_sql
+from test.util import (
+    VIEW_SECURITY_NEEDS_3_4_1,
+    VIEW_TEXT_REWRITTEN_BEFORE_4_0_6,
+    normalize_py_call,
+    normalize_sql,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
 class ViewLifecycleTest(_AlembicLifecycleBase):
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_create_view_basic(self, database, alembic_env, sr_engine):
         """Tests creating a view."""
         # 1. Define metadata with a view
@@ -82,7 +83,6 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         inspector.clear_cache()
         is_true('user_view' not in inspector.get_view_names())
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_create_view_with_columns(self, database, alembic_env, sr_engine):
         """Tests creating a view with explicit column definitions."""
         # 1. Define metadata with a view that has columns
@@ -132,7 +132,7 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         inspector.clear_cache()
         is_true('user_view' not in inspector.get_view_names())
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
+    @VIEW_SECURITY_NEEDS_3_4_1
     def test_view_idempotency(self, database, alembic_env, sr_engine):
         """Tests that no changes are detected if the view is in sync.
         Qualifiers, like '`schema`.`table`.', for column names are removed.
@@ -166,7 +166,7 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         is_true(re.search(EMPTY_UPGRADE_STR, script_content), "Upgrade script should be empty")
         is_true(re.search(EMPTY_DOWNGRADE_STR, script_content), "Downgrade script should be empty")
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
+    @VIEW_SECURITY_NEEDS_3_4_1
     def test_alter_view_comment_and_security(self, database, alembic_env, sr_engine):
         """
         Tests that altering view comment and security generates an AlterViewOp
@@ -185,7 +185,7 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
             Base.metadata,
             definition='SELECT id FROM user',
             comment='Initial comment',
-            starrocks_security='NONE'  # DEFINDER is not supported in StarRocks v3.5.
+            starrocks_security='NONE'
         )
         alembic_env.harness.generate_autogen_revision(
             metadata=Base.metadata, message="Initial view with attrs"
@@ -208,33 +208,38 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
             starrocks_security='INVOKER'
         )
 
-        with pytest.warns(UserWarning) as record:
-            alembic_env.harness.generate_autogen_revision(
-                metadata=AlteredBase.metadata, message="Alter comment and security"
-            )
+        alembic_env.harness.generate_autogen_revision(
+            metadata=AlteredBase.metadata, message="Alter comment and security"
+        )
 
-        # Check that both warnings were issued
-        messages = [str(w.message) for w in record]
-        assert any("does not support altering view comments" in m for m in messages)
-        assert any("does not support altering view security" in m for m in messages)
-
-        # 3. Verify ALTER is generated
+        # 3. Verify ALTER is generated, and carries the existing definition the comment change recreates the view from
         script_content = ScriptContentParser.check_script_content(alembic_env, 1, "alter_comment_and_security")
         upgrade_content = ScriptContentParser.extract_upgrade_content(script_content)
         upgrade_content = normalize_sql(upgrade_content)
         assert 'op.alter_view("user_view"' in upgrade_content
         assert 'comment="Modified comment"' in upgrade_content
         assert 'security="INVOKER"' in upgrade_content
-        assert "SELECT id FROM user" not in upgrade_content
+        assert "existing_definition=" in upgrade_content
 
         downgrade_content = ScriptContentParser.extract_downgrade_content(script_content)
         downgrade_content = normalize_sql(downgrade_content)
         assert 'op.alter_view("user_view"' in downgrade_content
         assert 'comment="Initial comment"' in downgrade_content
         assert 'security="NONE"' in downgrade_content or 'security=None' in downgrade_content
-        assert "SELECT id FROM user" not in downgrade_content
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
+        # 4. Apply it and undo it
+        def view_ddl() -> str:
+            with sr_engine.connect() as connection:
+                return connection.exec_driver_sql("SHOW CREATE VIEW user_view").fetchone()[1]
+
+        alembic_env.harness.upgrade("head")
+        assert 'COMMENT "Modified comment"' in view_ddl()
+        assert "SECURITY INVOKER" in view_ddl()
+
+        alembic_env.harness.downgrade("-1")
+        assert 'COMMENT "Initial comment"' in view_ddl()
+        assert "SECURITY NONE" in view_ddl()
+
     def test_alter_view_definition(self, database, alembic_env, sr_engine):
         """Tests altering a view's definition.
         Qualifiers, like '`schema`.`table`.', for column names are removed.
@@ -296,7 +301,6 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         definition = inspector.get_view_definition('user_view')
         assert 'name' not in definition.lower()
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_drop_view(self, database, alembic_env, sr_engine):
         """Tests dropping a view."""
         # 1. Initial state
@@ -340,10 +344,8 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         normalized_def = TableAttributeNormalizer.normalize_sql(definition, remove_qualifiers=True)
         assert "select id from user" in normalized_def
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
-    def test_columns_change_ignored(self, database, alembic_env, sr_engine, caplog):
-        """Tests that column changes are detected but not altered (StarRocks limitation)."""
-        caplog.set_level("WARNING")
+    def test_columns_change(self, database, alembic_env, sr_engine):
+        """Tests that a column-only change generates an ALTER VIEW that redefines the view with the new columns."""
 
         # 1. Initial state with columns
         Base = declarative_base()
@@ -380,12 +382,16 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
             Column('name', VARCHAR(50), comment='Modified name'),  # Changed comment
             definition='SELECT id, name FROM user',  # Definition unchanged
         )
-        with expect_raises_message(NotImplementedError, "StarRocks does not support altering view columns independently"):
-            alembic_env.harness.generate_autogen_revision(metadata=AlteredBase.metadata, message="Modify column comment")
+        alembic_env.harness.generate_autogen_revision(metadata=AlteredBase.metadata, message="Modify column comment")
 
-        # 3. Verify no ALTER is generated (only definition changes trigger ALTER)
-        # script_content = ScriptContentParser.check_script_content(alembic_env, 1, "modify_column_comment")
-        # is_true(re.search(EMPTY_UPGRADE_STR, script_content), "Upgrade script should be empty for column comment changes")
+        # 3. Verify the ALTER carries the unchanged definition and the new column comment, and apply it
+        script_content = ScriptContentParser.check_script_content(alembic_env, 1, "modify_column_comment")
+        upgrade_content = ScriptContentParser.extract_upgrade_content(script_content)
+        assert "op.alter_view" in upgrade_content
+        assert "Modified name" in upgrade_content
+        alembic_env.harness.upgrade("head")
+        with sr_engine.connect() as connection:
+            assert '"Modified name"' in connection.exec_driver_sql("SHOW CREATE VIEW user_view").fetchone()[1]
 
         # 4. Change definition to test that it triggers ALTER (even with column changes)
         AlteredBase2 = declarative_base()
@@ -412,7 +418,6 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         assert "op.alter_view" in upgrade_content
         assert "email" in upgrade_content
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_create_view_with_schema(self, database, alembic_env, sr_engine):
         """Tests creating a view in a specific schema (non-default schema)."""
         # 1. Define metadata with a view in a schema
@@ -456,7 +461,6 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         inspector.clear_cache()
         is_true('user_view' not in inspector.get_view_names(schema=database))
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_multiple_views_in_one_migration(self, database, alembic_env, sr_engine):
         """Tests creating, altering, and dropping multiple views in one migration.
 
@@ -767,3 +771,87 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         with sr_engine.connect() as conn:
             conn.execute(text("DROP TABLE IF EXISTS test_users"))
             conn.commit()
+
+
+class ViewOrderLifecycleTest(_AlembicLifecycleBase):
+    """Revisions whose views and materialized views read what the same revision creates, changes or removes."""
+
+    @staticmethod
+    def _base_table(metadata, *columns):
+        return Table(
+            "t1", metadata, Column("id", INTEGER, primary_key=True), *columns, starrocks_properties={"replication_num": "1"}
+        )
+
+    @staticmethod
+    def _assert_in_order(content, *calls):
+        missing = [call for call in calls if call not in content]
+        assert not missing, (missing, content)
+        positions = [content.index(call) for call in calls]
+        assert positions == sorted(positions), content
+
+    def test_removing_a_table_and_what_reads_it_downgrades(self, alembic_env, sr_engine):
+        Base = declarative_base()
+        self._base_table(Base.metadata, Column("name", VARCHAR(20)))
+        View("v1", Base.metadata, definition="SELECT id, name FROM t1")
+        MaterializedView(
+            "mv1", Base.metadata, definition="SELECT id FROM t1", starrocks_refresh="MANUAL",
+            starrocks_properties={"replication_num": "1"},
+        )
+        alembic_env.harness.generate_autogen_revision(metadata=Base.metadata, message="create")
+        alembic_env.harness.upgrade("head")
+        alembic_env.harness.generate_autogen_revision(metadata=declarative_base().metadata, message="remove")
+        upgrade_content = ScriptContentParser.extract_upgrade_content(
+            ScriptContentParser.check_script_content(alembic_env, 1, "remove")
+        )
+        self._assert_in_order(upgrade_content, "op.drop_materialized_view('mv1'", "op.drop_view('v1'", "op.drop_table('t1'")
+        alembic_env.harness.upgrade("head")
+        alembic_env.harness.downgrade("-1")
+        inspector = inspect(sr_engine)
+        is_true("v1" in inspector.get_view_names())
+        is_true("mv1" in inspector.get_materialized_view_names())
+
+    def test_dropping_a_column_a_view_stops_reading_downgrades(self, alembic_env, sr_engine):
+        Base = declarative_base()
+        self._base_table(Base.metadata, Column("name", VARCHAR(20)))
+        View("v1", Base.metadata, definition="SELECT id, name FROM t1")
+        alembic_env.harness.generate_autogen_revision(metadata=Base.metadata, message="create")
+        alembic_env.harness.upgrade("head")
+        Narrowed = declarative_base()
+        self._base_table(Narrowed.metadata)
+        View("v1", Narrowed.metadata, definition="SELECT id FROM t1")
+        alembic_env.harness.generate_autogen_revision(metadata=Narrowed.metadata, message="narrow")
+        upgrade_content = ScriptContentParser.extract_upgrade_content(
+            ScriptContentParser.check_script_content(alembic_env, 1, "narrow")
+        )
+        self._assert_in_order(upgrade_content, "op.drop_view('v1'", "op.drop_column('t1', 'name'", "op.create_view('v1'")
+        alembic_env.harness.upgrade("head")
+        alembic_env.harness.downgrade("-1")
+        inspector = inspect(sr_engine)
+        is_true("name" in [column["name"] for column in inspector.get_columns("t1")])
+        is_true("name" in inspector.get_view_definition("v1"))
+
+    def test_views_over_views_and_mvs_follow_what_they_read(self, alembic_env, sr_engine):
+        Base = declarative_base()
+        self._base_table(Base.metadata)
+        MaterializedView(
+            "z_mv", Base.metadata, definition="SELECT id FROM t1", starrocks_refresh="MANUAL",
+            starrocks_properties={"replication_num": "1"},
+        )
+        View("m_view", Base.metadata, definition="SELECT id FROM z_mv")
+        View("a_view", Base.metadata, definition="SELECT id FROM m_view")
+        alembic_env.harness.generate_autogen_revision(metadata=Base.metadata, message="create")
+        upgrade_content = ScriptContentParser.extract_upgrade_content(
+            ScriptContentParser.check_script_content(alembic_env, 1, "create")
+        )
+        self._assert_in_order(
+            upgrade_content,
+            "op.create_table('t1'",
+            "'z_mv',\n        'SELECT id FROM t1'",
+            "op.create_view('m_view'",
+            "op.create_view('a_view'",
+        )
+        alembic_env.harness.upgrade("head")
+        alembic_env.harness.downgrade("base")
+        alembic_env.harness.upgrade("head")
+        inspector = inspect(sr_engine)
+        eq_(sorted(inspector.get_view_names()), ["a_view", "m_view"])

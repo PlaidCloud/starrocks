@@ -160,6 +160,10 @@ class ReflectedRefreshInfo:
             parts.append(self.type)
         return " ".join(parts)
 
+    def __repr__(self) -> str:
+        """The clause text, so that a migration script that renders the option needs no import."""
+        return repr(str(self))
+
     def __hash__(self) -> int:
         return hash(str(self))
 

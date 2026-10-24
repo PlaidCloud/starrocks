@@ -16,11 +16,13 @@
 
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import Column, MetaData, Table, inspect, testing
+from sqlalchemy import Column, MetaData, Table, func, inspect, literal, testing, text
 from sqlalchemy.testing import fixtures
 
 import starrocks.alembic  # noqa: F401
-from starrocks.datatype import BITMAP, HLL, INTEGER, PERCENTILE
+from starrocks.common.utils import unquote_sql_string_literal
+from starrocks.datatype import BITMAP, DATE, HLL, INTEGER, JSON, PERCENTILE, VARCHAR
+from test.util import FLAT_JSON_PROPERTIES_NEED_4_0
 
 
 class _DefaultsTestBase(fixtures.TestBase):
@@ -62,3 +64,125 @@ class SketchColumnDefaultTest(_DefaultsTestBase):
         assert [c.name for c in reflected.columns if c.server_default is not None] == []
         assert inspect(connection).get_columns("sketch_defaults")[1]["default"] is None
         assert self._diff_ops(connection, metadata, "sketch_defaults") == []
+
+
+class ServerDefaultComparisonTest(_DefaultsTestBase):
+    """A default that is only written differently is not a change, and a different default still is."""
+
+    @staticmethod
+    def _table(metadata: MetaData, name: str, **column_defaults) -> Table:
+        return Table(
+            name,
+            metadata,
+            Column("id", INTEGER),
+            *[Column(column, VARCHAR(40), server_default=default) for column, default in column_defaults.items()],
+            starrocks_duplicate_key="id",
+            starrocks_distributed_by="HASH(id) BUCKETS 1",
+            starrocks_properties={"replication_num": "1"},
+        )
+
+    @testing.combinations(
+        ("bare_function", text("uuid()")),
+        ("upper_case_function", text("UUID()")),
+        ("wrapped_function", text("(uuid())")),
+        ("function_element", func.uuid()),
+        argnames="metadata_default",
+        id_="ia",
+    )
+    @testing.requires.sqlalchemy_2
+    def test_uuid_default_converges(self, connection, metadata, metadata_default):
+        self._table(metadata, "default_uuid", token=text("(uuid())"))
+        metadata.create_all(connection)
+        model = MetaData()
+        self._table(model, "default_uuid", token=metadata_default)
+
+        assert self._diff_ops(connection, model, "default_uuid") == []
+
+    @testing.combinations(
+        ("plain", "a-b"),
+        ("single_quote", "it's"),
+        ("backslash", "x\\y"),
+        ("double_quote", 'say "hi"'),
+        ("number_like", "5"),
+        ("empty", ""),
+        ("padded", "  padded  "),
+        ("null_word", "NULL"),
+        ("call_like", "uuid()"),
+        argnames="value",
+        id_="ia",
+    )
+    @testing.requires.sqlalchemy_2
+    def test_literal_default_round_trips(self, connection, metadata, value, caplog):
+        self._table(metadata, "default_literal", label=value)
+        metadata.create_all(connection)
+
+        reflected = Table("default_literal", MetaData(), autoload_with=connection)
+
+        assert unquote_sql_string_literal(reflected.c.label.server_default.arg.text) == value
+        assert self._diff_ops(connection, metadata, "default_literal") == []
+        assert "Detected DEFAULT change" not in caplog.text
+
+    @testing.requires.sqlalchemy_2
+    def test_expression_default_with_a_percent_converges(self, connection, metadata, caplog):
+        """An expression default compares as the text StarRocks reflects, so its ``%`` is not doubled."""
+        self._table(metadata, "default_percent", label=literal("50%"))
+        metadata.create_all(connection)
+
+        assert self._diff_ops(connection, metadata, "default_percent") == []
+        assert "Detected DEFAULT change" not in caplog.text
+
+    @testing.requires.sqlalchemy_2
+    def test_changed_literal_default_is_still_a_difference(self, connection, metadata, caplog):
+        """StarRocks cannot change a default, so the detected change is reported instead of generated."""
+        self._table(metadata, "default_changed", label="before")
+        metadata.create_all(connection)
+        model = MetaData()
+        self._table(model, "default_changed", label="after")
+
+        ops = self._diff_ops(connection, model, "default_changed")
+
+        assert ops == []
+        assert "Detected DEFAULT change on column 'default_changed.label'" in caplog.text
+
+
+class ServerAddedPropertiesTest(_DefaultsTestBase):
+    """Properties StarRocks adds next to the ones a model sets are left alone without a warning."""
+
+    @testing.combinations(
+        (
+            "dynamic_partition",
+            {
+                "dynamic_partition.enable": "true",
+                "dynamic_partition.time_unit": "DAY",
+                "dynamic_partition.start": "-3",
+                "dynamic_partition.end": "3",
+                "dynamic_partition.prefix": "p",
+                "dynamic_partition.buckets": "1",
+            },
+            "dynamic_partition.time_zone",
+        ),
+        ("flat_json", {"flat_json.enable": "true"}, "flat_json.null.factor", FLAT_JSON_PROPERTIES_NEED_4_0),
+        argnames="properties, added_key",
+        id_="iaa",
+    )
+    @testing.requires.sqlalchemy_2
+    def test_added_properties_do_not_warn(self, connection, metadata, caplog, properties, added_key):
+        Table(
+            "server_added_properties",
+            metadata,
+            Column("d", DATE),
+            Column("j", JSON),
+            starrocks_duplicate_key="d",
+            starrocks_partition_by="RANGE(d)()",
+            starrocks_distributed_by="HASH(d) BUCKETS 1",
+            starrocks_properties={"replication_num": "1", **properties},
+        )
+        metadata.create_all(connection)
+        reported = inspect(connection).get_table_options("server_added_properties")["starrocks_properties"]
+        caplog.set_level("WARNING")
+
+        ops = self._diff_ops(connection, metadata, "server_added_properties")
+
+        assert added_key in reported
+        assert ops == []
+        assert "no default is defined" not in caplog.text

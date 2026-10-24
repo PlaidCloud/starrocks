@@ -15,7 +15,7 @@
 from unittest.mock import Mock
 
 from alembic.autogenerate.api import AutogenContext
-from sqlalchemy.testing import expect_raises_message, fixtures
+from sqlalchemy.testing import fixtures
 
 from starrocks.alembic.compare import (
     compare_starrocks_column_agg_type,
@@ -50,19 +50,18 @@ class CompareColumnAggTypeTest(fixtures.TestBase):
         )
         assert not caplog.records
 
-    def test_changed_agg_type_raises(self):
-        with expect_raises_message(
-            NotImplementedError, "StarRocks does not support changing the aggregation type of a column"
-        ):
-            compare_starrocks_column_agg_type(
-                _starrocks_autogen_context(),
-                None,
-                "test_schema",
-                "t1",
-                "val1",
-                _column_with_agg_type(ColumnAggType.SUM),
-                _column_with_agg_type(ColumnAggType.REPLACE),
-            )
+    def test_changed_agg_type_warns(self, caplog):
+        """StarRocks cannot change a column's aggregate type, so autogenerate warns and carries on."""
+        compare_starrocks_column_agg_type(
+            _starrocks_autogen_context(),
+            None,
+            "test_schema",
+            "t1",
+            "val1",
+            _column_with_agg_type(ColumnAggType.SUM),
+            _column_with_agg_type(ColumnAggType.REPLACE),
+        )
+        assert "StarRocks does not support changing the aggregation type of a column" in caplog.text
 
 
 class CompareColumnAutoIncrementTest(fixtures.TestBase):
