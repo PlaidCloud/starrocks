@@ -260,6 +260,9 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
     def visit_BITMAP(self, type_, **kw):
         return "BITMAP"
 
+    def visit_PERCENTILE(self, type_, **kw):
+        return "PERCENTILE"
+
     def visit_VARIANT(self, type_, **kw):
         return "VARIANT"
 

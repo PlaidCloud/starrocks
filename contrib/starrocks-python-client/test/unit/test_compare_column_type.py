@@ -32,6 +32,7 @@ from starrocks.datatype import (
     JSON,
     LARGEINT,
     MAP,
+    PERCENTILE,
     SMALLINT,
     STRING,
     STRUCT,
@@ -87,7 +88,7 @@ simple_type_params = [
     ("DATETIME vs DATETIME (same)", DATETIME(), DATETIME(), False),
     ("HLL vs HLL (same)", HLL(), HLL(), False),
     ("BITMAP vs BITMAP (same)", BITMAP(), BITMAP(), False),
-    # ("PERCENTILE vs PERCENTILE (same)", PERCENTILE(), PERCENTILE(), False),  # Not supported by compiler yet
+    ("PERCENTILE vs PERCENTILE (same)", PERCENTILE(), PERCENTILE(), False),
     ("JSON vs JSON (same)", JSON(), JSON(), False),
 
     # 1.2 Equivalent types (special rules)
