@@ -84,20 +84,17 @@ class IsolationLevelTest(fixtures.TestBase):
 
 
 class TransactionEndTest(fixtures.TestBase):
-    @staticmethod
-    def _pooled(open_transaction):
-        info = {"starrocks_transaction_open": True} if open_transaction else {}
-        driver = _DriverConnection(False)
-        return SimpleNamespace(info=info, commit=driver.commit, rollback=driver.rollback), driver
-
-    @testing.combinations((True, 1), (False, 0), argnames="open_transaction,sent")
-    def test_commit_and_rollback_go_to_the_server_only_for_an_open_transaction(self, open_transaction, sent):
+    @testing.combinations((True,), (False,), argnames="open_transaction")
+    def test_commit_and_rollback_always_reach_the_driver_and_clear_the_flag(self, open_transaction):
         dialect = StarRocksDialect()
-        pooled, driver = self._pooled(open_transaction)
+        driver = _DriverConnection(False)
+        info = {"starrocks_transaction_open": True} if open_transaction else {}
+        pooled = SimpleNamespace(info=info, commit=driver.commit, rollback=driver.rollback)
         dialect.do_commit(pooled)
+        eq_(pooled.info, {})
         pooled.info["starrocks_transaction_open"] = open_transaction
         dialect.do_rollback(pooled)
-        eq_((driver.commits, driver.rollbacks), (sent, sent))
+        eq_((driver.commits, driver.rollbacks), (1, 1))
         eq_(pooled.info, {})
 
     def test_an_untracked_connection_is_committed(self):
@@ -107,6 +104,39 @@ class TransactionEndTest(fixtures.TestBase):
         eq_((driver.commits, driver.rollbacks), (1, 1))
 
 
+class StatementKeywordTest(fixtures.TestBase):
+    @testing.combinations(
+        ("plain", "INSERT INTO t VALUES (1)", "INSERT"),
+        ("block_comment", "/* note */ INSERT INTO t VALUES (1)", "INSERT"),
+        ("hint", "/*+ SET_VAR(query_timeout=10) */ UPDATE t SET a = 1", "UPDATE"),
+        ("line_comment", "-- note\nupdate t set a = 1", "UPDATE"),
+        ("hash_comment", "# note\ndelete from t where 1", "DELETE"),
+        ("cte_update", "WITH c AS (SELECT 1 AS a) UPDATE t SET a = (SELECT a FROM c)", "UPDATE"),
+        ("cte_quoted", 'with c as (select "x)" as a) delete from t where 1', "DELETE"),
+        ("cte_select", "WITH RECURSIVE c(a) AS (SELECT (1)) SELECT * FROM c", "SELECT"),
+        ("truncate", "TRUNCATE TABLE t", "TRUNCATE"),
+        ("empty", "", ""),
+        id_="iaa",
+        argnames="statement,keyword",
+    )
+    def test_keyword(self, statement, keyword):
+        eq_(StarRocksDialect._statement_keyword(statement), keyword)
+
+    @testing.combinations(
+        ("BEGIN WORK", True, False),
+        ("/* c */ START TRANSACTION", True, False),
+        ("COMMIT WORK", False, True),
+        ("ROLLBACK", False, True),
+        ("ROLLBACK TO SAVEPOINT s", False, False),
+        ("rollback work to s", False, False),
+        argnames="statement,starts,ends",
+    )
+    def test_transaction_control(self, statement, starts, ends):
+        position = StarRocksDialect._LEADING_COMMENTS.match(statement).end()
+        eq_(bool(StarRocksDialect._TRANSACTION_START.match(statement, position)), starts)
+        eq_(bool(StarRocksDialect._TRANSACTION_END.match(statement, position)), ends)
+
+
 class DeleteTargetTest(fixtures.TestBase):
     @testing.combinations(
         ("DELETE FROM t WHERE id = 1", ("t", None)),
@@ -114,6 +144,9 @@ class DeleteTargetTest(fixtures.TestBase):
         ("DELETE FROM `a``b` WHERE x = 1", ("a`b", None)),
         ("DELETE FROM s . t USING u WHERE t.id = u.id", ("t", "s")),
         ("\n  DELETE FROM `my-db`.events", ("events", "my-db")),
+        ("DELETE /*+ SET_VAR(query_timeout=10) */ FROM dup WHERE id = 2", ("dup", None)),
+        ("/* note */ DELETE FROM dup WHERE id = 2", ("dup", None)),
+        ("DELETE FROM default_catalog.db.dup WHERE id = 2", ("dup", "db")),
         ("SELECT * FROM t", None),
         ("INSERT INTO t VALUES (1)", None),
         argnames="statement,target",

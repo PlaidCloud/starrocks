@@ -1772,6 +1772,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
         """
         self._prepare_connection_for(cursor, statement, context)
         super().do_execute(cursor, statement, parameters, context)
+        self._track_transaction_control(statement, context)
 
     def do_executemany(
         self,
@@ -1780,18 +1781,22 @@ class StarRocksDialect(MySQLDialect_pymysql):
         parameters: Any,
         context: Optional[ExecutionContext] = None,
     ) -> None:
+        """Execute a statement for many parameter sets, prepared as :meth:`do_execute` prepares one."""
         self._prepare_connection_for(cursor, statement, context)
         super().do_executemany(cursor, statement, parameters, context)
+        self._track_transaction_control(statement, context)
 
     def do_execute_no_params(
         self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext] = None
     ) -> None:
         self._prepare_connection_for(cursor, statement, context)
         super().do_execute_no_params(cursor, statement, context)
+        self._track_transaction_control(statement, context)
 
     def _prepare_connection_for(
         self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext]
     ) -> None:
+        """Refuse what StarRocks would run other than as asked, then ready the transaction and the table."""
         self._refuse_split_overwrite_or_label(context)
         self._match_transaction_to(cursor, statement, context)
         self._wait_for_schema_change_blocking(cursor, statement, context)
@@ -1815,17 +1820,29 @@ class StarRocksDialect(MySQLDialect_pymysql):
     _ISOLATION_LEVELS: Final[Tuple[str, ...]] = ("AUTOCOMMIT", "READ COMMITTED")
     _TRANSACTIONS_SINCE: Final[Tuple[int, ...]] = (3, 5)
     _TRANSACTION_OPEN: Final[str] = "starrocks_transaction_open"
-    _TRANSACTION_START: Final[re.Pattern[str]] = re.compile(r"\s*(BEGIN|START\s+TRANSACTION)\b", re.IGNORECASE)
-    _TRANSACTION_END: Final[re.Pattern[str]] = re.compile(r"\s*(COMMIT|ROLLBACK)\b", re.IGNORECASE)
-    _DML_STATEMENT: Final[re.Pattern[str]] = re.compile(r"\s*(INSERT|UPDATE|DELETE)\b", re.IGNORECASE)
-    _DDL_STATEMENT: Final[re.Pattern[str]] = re.compile(
-        r"\s*(CREATE|ALTER|DROP|TRUNCATE|RENAME|GRANT|REVOKE|REFRESH)\b", re.IGNORECASE
+    _DML_KEYWORDS: Final[frozenset[str]] = frozenset({"INSERT", "UPDATE", "DELETE"})
+    _DDL_KEYWORDS: Final[frozenset[str]] = frozenset(
+        {"CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "GRANT", "REVOKE", "REFRESH"}
     )
+    _LEADING_COMMENTS: Final[re.Pattern[str]] = re.compile(r"(?:\s+|/\*.*?\*/|(?:--|#)[^\n]*(?:\n|$))*", re.DOTALL)
+    _STATEMENT_TOKEN: Final[re.Pattern[str]] = re.compile(
+        r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|`(?:[^`]|``)*`|/\*.*?\*/|(?:--|#)[^\n]*|\w+|[()]|[^\w\s()]",
+        re.DOTALL,
+    )
+    _TRANSACTION_START: Final[re.Pattern[str]] = re.compile(r"(?:BEGIN|START\s+TRANSACTION)\b", re.IGNORECASE)
+    _TRANSACTION_END: Final[re.Pattern[str]] = re.compile(
+        r"(?:COMMIT|ROLLBACK)\b(?!\s+(?:WORK\s+)?TO\b)", re.IGNORECASE
+    )
+    _INSERT_INTO_FILES: Final[re.Pattern[str]] = re.compile(r"INSERT\s+INTO\s+FILES\s*\(", re.IGNORECASE)
     _IDENTIFIER: Final[str] = r"(`(?:[^`]|``)+`|\w+)"
     _DELETE_TARGET: Final[re.Pattern[str]] = re.compile(
-        rf"\s*DELETE\s+FROM\s+(?:{_IDENTIFIER}\s*\.\s*)?{_IDENTIFIER}", re.IGNORECASE
+        rf"DELETE\s+(?:/\*.*?\*/\s*)*FROM\s+{_IDENTIFIER}(?:\s*\.\s*{_IDENTIFIER})?(?:\s*\.\s*{_IDENTIFIER})?",
+        re.IGNORECASE | re.DOTALL,
     )
-    _PRIMARY_KEY_MODELS: Final[frozenset[str]] = frozenset({TableModel.PRI_KEYS, TableModel.PRI_KEYS2})
+    _KEYED_MODELS_WITHOUT_PRIMARY_KEY: Final[frozenset[str]] = frozenset({
+        TableModel.DUP_KEYS, TableModel.DUP_KEYS2, TableModel.AGG_KEYS, TableModel.AGG_KEYS2,
+        TableModel.UNQ_KEYS, TableModel.UNQ_KEYS2,
+    })
 
     def get_isolation_level_values(self, dbapi_conn: Any) -> Tuple[str, ...]:
         """Return ``AUTOCOMMIT``, how StarRocks runs statements by default, and ``READ COMMITTED``, its transactions."""
@@ -1861,24 +1878,23 @@ class StarRocksDialect(MySQLDialect_pymysql):
         return mode is None or bool(mode)
 
     def do_commit(self, dbapi_connection: Any) -> None:
-        """Commit the StarRocks transaction open on the connection; without one there is nothing to commit."""
-        if self._end_transaction(dbapi_connection):
-            dbapi_connection.commit()
+        """Commit, and forget the StarRocks transaction the dialect saw opened on the connection."""
+        self._forget_transaction(dbapi_connection)
+        super().do_commit(dbapi_connection)
 
     def do_rollback(self, dbapi_connection: Any) -> None:
-        """Roll back the StarRocks transaction open on the connection; without one there is nothing to undo."""
-        if self._end_transaction(dbapi_connection):
-            dbapi_connection.rollback()
+        """Roll back, and forget the StarRocks transaction the dialect saw opened on the connection.
 
-    def _end_transaction(self, connection: Any) -> bool:
-        """Mark the connection's StarRocks transaction ended, and return whether one was open.
-
-        A connection without the pool's ``info`` dictionary isn't tracked, so it is taken to have one open.
+        The rollback goes to StarRocks even when the dialect saw no transaction open, so the pool's rollback on
+        checkin also ends one opened through a raw DBAPI cursor.
         """
+        self._forget_transaction(dbapi_connection)
+        super().do_rollback(dbapi_connection)
+
+    def _forget_transaction(self, connection: Any) -> None:
         info = self._pool_info(connection)
-        if info is None:
-            return True
-        return bool(info.pop(self._TRANSACTION_OPEN, False))
+        if info is not None:
+            info.pop(self._TRANSACTION_OPEN, None)
 
     @staticmethod
     def _pool_info(connection: Any) -> Optional[Dict[str, Any]]:
@@ -1893,68 +1909,119 @@ class StarRocksDialect(MySQLDialect_pymysql):
             return None
         return info if isinstance(info, dict) else None
 
+    @classmethod
+    def _statement_keyword(cls, statement: str) -> str:
+        """Return the statement's first keyword, upper case, past leading comments.
+
+        For ``WITH``, it is the keyword of the statement the common table expressions belong to: the first
+        SELECT, INSERT, UPDATE or DELETE outside parentheses.
+        """
+        tokens = cls._STATEMENT_TOKEN.finditer(statement, cls._LEADING_COMMENTS.match(statement).end())
+        first = next(tokens, None)
+        keyword = first.group(0).upper() if first else ""
+        if keyword != "WITH":
+            return keyword
+        depth = 0
+        for token in tokens:
+            text = token.group(0)
+            if text == "(":
+                depth += 1
+            elif text == ")":
+                depth -= 1
+            elif depth == 0 and text.upper() in cls._DML_KEYWORDS | {"SELECT"}:
+                return text.upper()
+        return keyword
+
     def _match_transaction_to(
         self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext]
     ) -> None:
-        """Open or commit the connection's StarRocks transaction as ``statement`` needs, and track text that does.
+        """Open or commit the connection's StarRocks transaction as ``statement`` needs.
 
         - On a ``READ COMMITTED`` connection the first INSERT, UPDATE or DELETE opens a transaction with BEGIN WORK,
-          which the SQLAlchemy commit or rollback ends. Reads open none, so a transaction that only reads leaves
-          nothing to end.
+          which the SQLAlchemy commit or rollback ends. Reads open none.
         - StarRocks refuses DDL inside a transaction, so DDL first commits the open one, as MySQL does.
-        - BEGIN, START TRANSACTION, COMMIT and ROLLBACK sent as text are tracked, so the SQLAlchemy commit and
-          rollback end a transaction opened by hand on an ``AUTOCOMMIT`` connection too.
+        - A BEGIN or START TRANSACTION sent as text is refused before StarRocks 3.5, which accepts it and ignores it.
+
+        A statement compiled from a construct is classified by the construct, and text by its first keyword.
         """
         if context is None:
             return
         info = self._pool_info(context.root_connection.connection)
         if info is None:
             return
-        if self._TRANSACTION_START.match(statement):
-            info[self._TRANSACTION_OPEN] = True
-        elif self._TRANSACTION_END.match(statement):
-            info.pop(self._TRANSACTION_OPEN, None)
-        elif self._DML_STATEMENT.match(statement):
-            self._open_transaction_for_dml(cursor, statement, context, info)
-        elif info.get(self._TRANSACTION_OPEN) and (context.isddl or self._DDL_STATEMENT.match(statement)):
+        keyword = self._statement_keyword(statement)
+        if context.isinsert or context.isupdate or context.isdelete or keyword in self._DML_KEYWORDS:
+            self._open_transaction_for_dml(cursor, statement, keyword, context, info)
+        elif info.get(self._TRANSACTION_OPEN) and (context.isddl or keyword in self._DDL_KEYWORDS):
             cursor.execute("COMMIT")
             del info[self._TRANSACTION_OPEN]
+        elif self._TRANSACTION_START.match(statement, self._LEADING_COMMENTS.match(statement).end()):
+            self._require_transactions("A transaction (BEGIN)")
+
+    def _track_transaction_control(self, statement: str, context: Optional[ExecutionContext]) -> None:
+        """Note a BEGIN, START TRANSACTION, COMMIT or ROLLBACK sent as text, once StarRocks has accepted it.
+
+        So the SQLAlchemy commit and rollback, and DDL, see a transaction opened by hand on an ``AUTOCOMMIT``
+        connection. ``ROLLBACK TO`` a savepoint ends nothing.
+        """
+        info = self._pool_info(context.root_connection.connection) if context is not None else None
+        if info is None:
+            return
+        position = self._LEADING_COMMENTS.match(statement).end()
+        if self._TRANSACTION_START.match(statement, position):
+            info[self._TRANSACTION_OPEN] = True
+        elif self._TRANSACTION_END.match(statement, position):
+            info.pop(self._TRANSACTION_OPEN, None)
+
+    def _require_transactions(self, feature: str) -> None:
+        """Refuse a transaction before StarRocks 3.5, which accepts BEGIN WORK and commits each statement anyway."""
+        require_server_version(self, self._TRANSACTIONS_SINCE, feature, error=exc.InvalidRequestError)
 
     def _open_transaction_for_dml(
-        self, cursor: "DBAPICursor", statement: str, context: ExecutionContext, info: Dict[str, Any]
+        self,
+        cursor: "DBAPICursor",
+        statement: str,
+        keyword: str,
+        context: ExecutionContext,
+        info: Dict[str, Any],
     ) -> None:
         """Open a transaction for a DML statement on a ``READ COMMITTED`` connection, unless one is open already.
 
-        StarRocks has transactions from 3.5; before it, BEGIN WORK is accepted and does nothing, so the dialect
-        refuses instead of committing the statement at once.
+        A ``delete()`` without a WHERE clause compiles to TRUNCATE TABLE, which StarRocks runs outside any
+        transaction, so it is refused. ``INSERT INTO FILES`` writes files, not a table, and opens no transaction.
         """
         transaction_open = bool(info.get(self._TRANSACTION_OPEN))
         if not transaction_open and self._driver_autocommits(context.root_connection.connection):
             return
-        self._refuse_delete_escaping_transaction(cursor, statement)
-        if not transaction_open:
-            require_server_version(
-                self,
-                self._TRANSACTIONS_SINCE,
-                "A transaction (isolation_level 'READ COMMITTED')",
-                error=exc.InvalidRequestError,
+        if keyword == "TRUNCATE":
+            raise exc.InvalidRequestError(
+                "A delete() without a WHERE clause compiles to TRUNCATE TABLE, which StarRocks runs outside the "
+                "transaction; give it a WHERE clause, or run it on an AUTOCOMMIT connection"
             )
-            cursor.execute("BEGIN WORK")
-            info[self._TRANSACTION_OPEN] = True
+        self._refuse_delete_escaping_transaction(cursor, statement, context)
+        if transaction_open:
+            return
+        if self._INSERT_INTO_FILES.match(statement, self._LEADING_COMMENTS.match(statement).end()):
+            return
+        self._require_transactions("A transaction (isolation_level 'READ COMMITTED')")
+        cursor.execute("BEGIN WORK")
+        info[self._TRANSACTION_OPEN] = True
 
-    def _refuse_delete_escaping_transaction(self, cursor: "DBAPICursor", statement: str) -> None:
+    def _refuse_delete_escaping_transaction(
+        self, cursor: "DBAPICursor", statement: str, context: ExecutionContext
+    ) -> None:
         """Refuse a DELETE that StarRocks would apply at once, outside the transaction.
 
-        StarRocks runs a DELETE on a table without a primary key as a job of its own, which ROLLBACK does not undo
-        (https://github.com/StarRocks/starrocks/issues/81471). A DELETE on a table information_schema doesn't list
-        is left for StarRocks to judge.
+        StarRocks runs a DELETE on a DUPLICATE, AGGREGATE or UNIQUE KEY table as a job of its own, which ROLLBACK
+        does not undo (https://github.com/StarRocks/starrocks/issues/81471). Any other DELETE, on a table
+        information_schema doesn't list or on a view, is left for StarRocks to judge.
         """
-        target = self._delete_target(statement)
+        target = self._delete_target(statement, context)
         if target is None:
             return
         table_name, schema = target
         table_model = self._table_model(cursor, table_name, schema)
-        if table_model is not None and table_model not in self._PRIMARY_KEY_MODELS:
+        if table_model in self._KEYED_MODELS_WITHOUT_PRIMARY_KEY:
             raise exc.InvalidRequestError(
                 f"StarRocks applies a DELETE on the {table_model} table {table_name!r} at once, outside the "
                 "transaction, and ROLLBACK does not undo it (https://github.com/StarRocks/starrocks/issues/81471); "
@@ -1962,16 +2029,26 @@ class StarRocksDialect(MySQLDialect_pymysql):
             )
 
     @classmethod
-    def _delete_target(cls, statement: str) -> Optional[Tuple[str, Optional[str]]]:
-        """Return the (name, schema) of the table a DELETE statement deletes from, or None for other statements."""
-        target = cls._DELETE_TARGET.match(statement)
+    def _delete_target(
+        cls, statement: str, context: Optional[ExecutionContext] = None
+    ) -> Optional[Tuple[str, Optional[str]]]:
+        """Return the (name, schema) of the table a DELETE deletes from, or None for other statements.
+
+        A ``delete()`` construct names its table; text is read past comments and optimizer hints, and a
+        catalog-qualified ``catalog.database.table`` gives the database as the schema.
+        """
+        if context is not None and context.isdelete:
+            table = context.compiled.statement.table
+            return table.name, getattr(table, "schema", None)
+        target = cls._DELETE_TARGET.match(statement, cls._LEADING_COMMENTS.match(statement).end())
         if target is None:
             return None
-        schema, table_name = target.groups()
-        return cls._unquote_identifier(table_name), cls._unquote_identifier(schema) if schema else None
+        names = [cls._unquote_identifier(name) for name in target.groups() if name]
+        return names[-1], names[-2] if len(names) > 1 else None
 
     @staticmethod
     def _unquote_identifier(name: str) -> str:
+        """Return a backquoted identifier's name, undoubling its backquotes, or a bare one as it is."""
         return name[1:-1].replace("``", "`") if name.startswith("`") else name
 
     @staticmethod

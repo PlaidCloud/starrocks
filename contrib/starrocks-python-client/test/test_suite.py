@@ -610,6 +610,24 @@ TRANSACTIONS_NEED_3_5 = testing.skip_if("starrocks<3.5", "StarRocks has transact
 class AutocommitIsolationTest(_AutocommitIsolationTest):
     """Upstream's tests take the default isolation level to be a transactional one; StarRocks' is AUTOCOMMIT."""
 
+    def _test_conn_autocommits(self, conn, autocommit, ensure_table=False):
+        """Upstream's check, with the clean-up on an AUTOCOMMIT connection.
+
+        Upstream deletes the rows with a ``delete()`` without WHERE, which compiles to TRUNCATE TABLE, and the
+        dialect refuses that inside a transaction.
+        """
+        some_table = self.tables.some_table
+        trans = conn.begin()
+        conn.execute(some_table.insert(), {"id": 1, "data": "some data"})
+        trans.rollback()
+
+        eq_(conn.scalar(select(some_table.c.id)), 1 if autocommit else None)
+        if IS_SQLALCHEMY_2:
+            conn.rollback()
+
+        with config.db.begin() as cleanup:
+            cleanup.execute(some_table.delete())
+
     def test_autocommit_on(self, connection_no_trans):
         conn = connection_no_trans
         c2 = conn.execution_options(isolation_level="AUTOCOMMIT")

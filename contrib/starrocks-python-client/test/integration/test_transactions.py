@@ -14,7 +14,7 @@
 
 """Transactions: connections autocommit by default, and ``READ COMMITTED`` runs DML in StarRocks transactions."""
 
-from sqlalchemy import MetaData, Table, delete, exc, insert, select, testing
+from sqlalchemy import MetaData, Table, delete, exc, insert, literal, select, testing, update
 from sqlalchemy.testing import config, engines, fixtures
 from sqlalchemy.testing.assertions import eq_, expect_raises, expect_raises_message
 from sqlalchemy.testing.schema import Column
@@ -144,18 +144,28 @@ class TransactionTest(fixtures.TablesTest):
         eq_(self._ids("txn_keyed"), [])
 
     @TRANSACTIONS_NEED_3_5
-    @testing.combinations(("construct",), ("text",), ("qualified_text",), argnames="form")
+    @testing.combinations(
+        ("construct",), ("hinted_construct",), ("text",), ("qualified_text",), ("hinted_text",), ("catalog_text",),
+        argnames="form",
+    )
     def test_delete_on_a_duplicate_key_table_is_refused(self, form):
         self._insert_logged_rows()
         logged = self.tables.txn_logged
         with expect_raises_message(exc.InvalidRequestError, "at once, outside the transaction"):
             with self._read_committed_engine().begin() as conn:
+                database = config.db.url.database
                 if form == "construct":
                     conn.execute(delete(logged).where(logged.c.id == 2))
+                elif form == "hinted_construct":
+                    conn.execute(delete(logged).where(logged.c.id == 2).prefix_with("/*+ SET_VAR(query_timeout=10) */"))
                 elif form == "text":
                     conn.exec_driver_sql("DELETE FROM txn_logged WHERE id = 2")
+                elif form == "qualified_text":
+                    conn.exec_driver_sql(f"DELETE FROM `{database}`.`txn_logged` WHERE id = 2")
+                elif form == "hinted_text":
+                    conn.exec_driver_sql("DELETE /*+ SET_VAR(query_timeout=10) */ FROM txn_logged WHERE id = 2")
                 else:
-                    conn.exec_driver_sql(f"DELETE FROM `{config.db.url.database}`.`txn_logged` WHERE id = 2")
+                    conn.exec_driver_sql(f"DELETE FROM default_catalog.`{database}`.txn_logged WHERE id = 2")
         eq_(self._ids("txn_logged"), [1, 2])
 
     def test_delete_on_a_duplicate_key_table_under_autocommit_runs(self):
@@ -175,6 +185,90 @@ class TransactionTest(fixtures.TablesTest):
                 conn.execute(delete(keyed).where(keyed.c.id == 2))
                 raise _RollBack()
         eq_(self._ids("txn_keyed"), [1, 2])
+
+    @TRANSACTIONS_NEED_3_5
+    def test_read_committed_rolls_back_an_executemany(self):
+        with expect_raises(_RollBack):
+            with self._read_committed_engine().begin() as conn:
+                conn.execute(insert(self.tables.txn_keyed), [{"id": i, "v": i} for i in range(1, 6)])
+                raise _RollBack()
+        eq_(self._ids("txn_keyed"), [])
+
+    @TRANSACTIONS_NEED_3_5
+    def test_commented_text_dml_is_transactional(self):
+        with expect_raises(_RollBack):
+            with self._read_committed_engine().begin() as conn:
+                conn.exec_driver_sql("/* note */ INSERT INTO txn_keyed VALUES (1, 1)")
+                raise _RollBack()
+        eq_(self._ids("txn_keyed"), [])
+
+    @TRANSACTIONS_NEED_3_5
+    @KEYED_DELETE_IN_TRANSACTION_NEEDS_4_1
+    def test_an_update_with_a_cte_is_transactional(self):
+        keyed = self.tables.txn_keyed
+        with config.db.begin() as conn:
+            conn.execute(insert(keyed), {"id": 1, "v": 1})
+        source = select(literal(100).label("v")).cte("source")
+        with expect_raises(_RollBack):
+            with self._read_committed_engine().begin() as conn:
+                conn.execute(
+                    update(keyed).where(keyed.c.id == 1).values(v=select(source.c.v).scalar_subquery()).add_cte(source)
+                )
+                raise _RollBack()
+        with config.db.connect() as conn:
+            eq_(conn.execute(select(keyed.c.v)).all(), [(1,)])
+
+    @TRANSACTIONS_NEED_3_5
+    def test_text_ddl_commits_the_open_transaction(self):
+        try:
+            with expect_raises(_RollBack):
+                with self._read_committed_engine().begin() as conn:
+                    conn.execute(insert(self.tables.txn_keyed), {"id": 1, "v": 1})
+                    conn.exec_driver_sql(
+                        "CREATE TABLE txn_text_created (id INT) DISTRIBUTED BY HASH(id) BUCKETS 1 "
+                        "PROPERTIES ('replication_num' = '1')"
+                    )
+                    raise _RollBack()
+            eq_(self._ids("txn_keyed"), [1])
+        finally:
+            with config.db.begin() as conn:
+                conn.exec_driver_sql("DROP TABLE IF EXISTS txn_text_created")
+
+    @TRANSACTIONS_NEED_3_5
+    def test_a_text_commit_ends_the_transaction_and_the_next_dml_opens_another(self):
+        keyed = self.tables.txn_keyed
+        with expect_raises(_RollBack):
+            with self._read_committed_engine().begin() as conn:
+                conn.execute(insert(keyed), {"id": 1, "v": 1})
+                conn.exec_driver_sql("COMMIT")
+                conn.execute(insert(keyed), {"id": 2, "v": 2})
+                raise _RollBack()
+        eq_(self._ids("txn_keyed"), [1])
+
+    @TRANSACTIONS_NEED_3_5
+    def test_a_delete_without_where_is_refused(self):
+        self._insert_logged_rows()
+        with expect_raises_message(exc.InvalidRequestError, "compiles to TRUNCATE TABLE"):
+            with self._read_committed_engine().begin() as conn:
+                conn.execute(delete(self.tables.txn_logged))
+        eq_(self._ids("txn_logged"), [1, 2])
+
+    @TRANSACTIONS_NEED_3_5
+    def test_a_raw_cursor_transaction_is_rolled_back_when_the_connection_returns(self):
+        engine = engines.testing_engine(options={"pool_size": 1, "max_overflow": 0})
+        with engine.connect() as conn:
+            cursor = conn.connection.cursor()
+            cursor.execute("BEGIN WORK")
+            cursor.execute("INSERT INTO txn_keyed VALUES (1, 1)")
+        with engine.begin() as conn:
+            conn.execute(insert(self.tables.txn_keyed), {"id": 2, "v": 2})
+        eq_(self._ids("txn_keyed"), [2])
+
+    @testing.only_if("starrocks<3.5", "StarRocks has transactions from 3.5")
+    def test_a_text_begin_is_refused_before_3_5(self):
+        with config.db.connect() as conn:
+            with expect_raises_message(exc.InvalidRequestError, "needs StarRocks 3.5 or later"):
+                conn.exec_driver_sql("BEGIN WORK")
 
     @testing.only_if("starrocks<3.5", "StarRocks has transactions from 3.5")
     def test_read_committed_dml_is_refused_before_3_5(self):
