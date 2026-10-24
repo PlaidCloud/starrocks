@@ -154,8 +154,8 @@ class StarRocksImpl(MySQLImpl):
         Without ``KEY``, StarRocks takes a modified key column of a DUPLICATE or UNIQUE KEY table for a value
         column and fails with "No key column left"; without its aggregate type, a value column of an AGGREGATE KEY
         table fails with "Can not change aggregation type". Neither shows in the migration, so it is read from
-        the database. Offline (``--sql``), or on anything but a live connection, there is no database to read, and
-        the statement stays as it is.
+        the database, matching the column's name without regard to case, as StarRocks does. Offline (``--sql``), or
+        on anything but a live connection, there is no database to read, and the statement stays as it is.
         """
         if self.as_sql or not isinstance(self.connection, Connection) or construct.type_ is None:
             return
@@ -163,7 +163,7 @@ class StarRocksImpl(MySQLImpl):
         names = {"table": construct.table_name, "column": construct.column_name, "schema": construct.schema}
         column_key = self._scalar(
             f"SELECT COLUMN_KEY FROM information_schema.columns WHERE {schema_condition} "
-            "AND TABLE_NAME = :table AND COLUMN_NAME = :column",
+            "AND TABLE_NAME = :table AND LOWER(COLUMN_NAME) = LOWER(:column)",
             names,
         )
         if column_key in self._KEY_COLUMN_KINDS:
@@ -178,7 +178,7 @@ class StarRocksImpl(MySQLImpl):
                 self.dialect.identifier_preparer.quote(name) for name in (construct.schema, construct.table_name) if name
             )
             for row in self.connection.exec_driver_sql(f"SHOW FULL COLUMNS FROM {full_name}").mappings():
-                if row["Field"] == construct.column_name and row["Extra"]:
+                if row["Field"].lower() == construct.column_name.lower() and row["Extra"]:
                     setattr(construct, KEY_OR_AGGREGATE_ATTRIBUTE, row["Extra"].upper())
 
     def _scalar(self, query: str, parameters: Mapping[str, Any]) -> Any:
