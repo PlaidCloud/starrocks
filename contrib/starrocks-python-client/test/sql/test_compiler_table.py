@@ -558,3 +558,64 @@ class CreateTablePropertyQuotingTest(fixtures.TestBase, AssertsCompiledSQL):
             f'    "colocate_with"={rendered_value}'
             ")",
         )
+
+
+class InferredPrimaryKeyCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    """A table with ``primary_key=True`` columns and no ``starrocks_*_key`` is created as a PRIMARY KEY table."""
+
+    __dialect__ = StarRocksDialect()
+
+    def test_single_column(self):
+        tbl = Table("pk_inferred", MetaData(), Column("id", Integer, primary_key=True), Column("v", String(10)))
+        self.assert_compile(
+            CreateTable(tbl),
+            "CREATE TABLE pk_inferred ("
+            "    id INTEGER NOT NULL, "
+            "    v VARCHAR(10)"
+            ")"
+            "PRIMARY KEY (id)",
+        )
+
+    def test_composite_key_in_column_order(self):
+        tbl = Table(
+            "pk_composite",
+            MetaData(),
+            Column("tenant", Integer, primary_key=True),
+            Column("id", Integer, primary_key=True),
+            Column("v", String(10)),
+        )
+        self.assert_compile(
+            CreateTable(tbl),
+            "CREATE TABLE pk_composite ("
+            "    tenant INTEGER NOT NULL, "
+            "    id INTEGER NOT NULL, "
+            "    v VARCHAR(10)"
+            ")"
+            "PRIMARY KEY (tenant, id)",
+        )
+
+    def test_key_columns_not_first_raise(self):
+        tbl = Table("pk_late", MetaData(), Column("v", String(10)), Column("id", Integer, primary_key=True))
+        with expect_raises_message(exc.CompileError, "needs a PRIMARY KEY table's key columns to come first"):
+            CreateTable(tbl).compile(dialect=self.__dialect__)
+
+    def test_named_key_model_wins(self):
+        tbl = Table(
+            "pk_duplicate",
+            MetaData(),
+            Column("id", Integer, primary_key=True),
+            Column("v", String(10)),
+            starrocks_duplicate_key="id",
+        )
+        self.assert_compile(
+            CreateTable(tbl),
+            "CREATE TABLE pk_duplicate ("
+            "    id INTEGER NOT NULL, "
+            "    v VARCHAR(10)"
+            ")"
+            "DUPLICATE KEY (id)",
+        )
+
+    def test_no_primary_key_columns_leave_the_key_to_starrocks(self):
+        tbl = Table("no_pk", MetaData(), Column("id", Integer), Column("v", String(10)))
+        self.assert_compile(CreateTable(tbl), "CREATE TABLE no_pk (" "    id INTEGER, " "    v VARCHAR(10)" ")")

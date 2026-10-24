@@ -90,3 +90,35 @@ class UnalterableChangesTest(fixtures.TestBase):
         finally:
             connection.exec_driver_sql("DROP TABLE unalterable_part")
             connection.exec_driver_sql("DROP TABLE unalterable_plain")
+
+
+class InferredPrimaryKeyTest(fixtures.TestBase):
+    """``primary_key=True`` without ``starrocks_*_key`` means a PRIMARY KEY table, to CREATE TABLE and autogenerate."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @staticmethod
+    def _model(metadata):
+        return Table("inferred_pk", metadata, Column("id", INTEGER, primary_key=True), Column("v", INTEGER))
+
+    @testing.requires.sqlalchemy_2
+    def test_created_as_primary_key_table_with_no_diff(self, connection, metadata):
+        self._model(metadata)
+        metadata.create_all(connection)
+
+        ddl = connection.exec_driver_sql("SHOW CREATE TABLE inferred_pk").fetchone()[1]
+        assert "PRIMARY KEY(`id`)" in ddl
+        assert OmittedAttributesTest._diffs(connection, metadata, "inferred_pk") == []
+
+    @testing.requires.sqlalchemy_2
+    def test_existing_duplicate_key_table_is_reported_not_recreated(self, connection, caplog):
+        """A table an older dialect created as DUPLICATE KEY cannot become a PRIMARY KEY table by ALTER."""
+        connection.exec_driver_sql("CREATE TABLE inferred_pk (id INT NOT NULL, v INT) DUPLICATE KEY(id, v)")
+        try:
+            metadata = MetaData()
+            self._model(metadata)
+            assert OmittedAttributesTest._diffs(connection, metadata, "inferred_pk") == []
+            assert "different key types: DUPLICATE KEY to PRIMARY KEY" in caplog.text
+        finally:
+            connection.exec_driver_sql("DROP TABLE inferred_pk")

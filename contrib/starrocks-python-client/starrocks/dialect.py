@@ -573,7 +573,8 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
                 break  # Found the key, no need to check for others
 
         if not key_str:
-            return  # No key defined, nothing to validate
+            self._validate_inferred_primary_key(table)
+            return
 
         key_column_names = [k.strip() for k in key_str.split(',')]
         table_column_names = {c.name for c in table.columns}
@@ -588,6 +589,17 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         # 2. Specific Check: For AGGREGATE KEY tables, validate column order.
         if key_type == TableType.AGGREGATE_KEY:
             self._validate_aggregate_key_order(table, key_column_names)
+
+    @staticmethod
+    def _validate_inferred_primary_key(table: sa_schema.Table) -> None:
+        """Refuse a primary key that cannot become the table's PRIMARY KEY: StarRocks needs those columns first."""
+        key_columns = utils.inferred_primary_key_columns(table)
+        if key_columns and [column.name for column in table.columns][: len(key_columns)] != key_columns:
+            raise exc.CompileError(
+                f"Table {table.name!r} is created as a PRIMARY KEY table on {', '.join(key_columns)}, and StarRocks "
+                "needs a PRIMARY KEY table's key columns to come first; move them to the start of the table, or "
+                "name another key model such as starrocks_duplicate_key"
+            )
 
     def _validate_aggregate_key_order(self, table: sa_schema.Table, key_column_names: List[str]) -> None:
         """
@@ -765,7 +777,8 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             opts: The table options.
 
         Returns:
-            The table key description. like "PRIMARY KEY (id, name)"
+            The table key description. like "PRIMARY KEY (id, name)". A table that names no key model but has
+            ``primary_key=True`` columns gets a PRIMARY KEY on them.
         """
         # Key / Table Type (Primary key, Duplicate key, Aggregate key, Unique key)
         key_type = None
@@ -787,6 +800,8 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
                         raise exc.CompileError(f"Primary key columns doesn't equal to the table KEY columns. "
                                             f"primary_keys: {primary_keys}, SR's key_columns: ({key_columns_str})")
                 key_desc = f"{key_type} ({key_columns_str})"
+        if key_desc is None and primary_keys:
+            key_desc = f"{TableType.PRIMARY_KEY} ({', '.join(self.preparer.quote(name) for name in primary_keys)})"
         return key_desc
 
 

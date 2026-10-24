@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, Union
 from sqlalchemy import schema as sa_schema
 from sqlalchemy.exc import StatementError
 
-from starrocks.common.params import DialectName
+from starrocks.common.params import DialectName, TableInfoKey
 from starrocks.common.types import TableDistribution
 from starrocks.engine.interfaces import ReflectedDistributionInfo, ReflectedPartitionInfo, ReflectedTableKeyInfo
 
@@ -94,6 +94,19 @@ def extract_dialect_options_as_case_insensitive(
     """
     raw_opts = table.dialect_options.get(DialectName, {})
     return CaseInsensitiveDict({k: v for k, v in raw_opts.items() if v is not None})
+
+
+def inferred_primary_key_columns(table: sa_schema.Table) -> Optional[List[str]]:
+    """Return the key columns of a table that marks a primary key but names no StarRocks key model.
+
+    Such a table, with ``primary_key=True`` columns and no ``starrocks_primary_key`` or other ``starrocks_*_key``,
+    is created as a PRIMARY KEY table on those columns, in their table order, so CREATE TABLE and the autogenerate
+    comparison agree on its key. Returns None when the table names a key model or has no primary key columns.
+    """
+    opts = extract_dialect_options_as_case_insensitive(table)
+    if any(key_kwarg in opts for key_kwarg in TableInfoKey.KEY_KWARG_MAP):
+        return None
+    return [column.name for column in table.columns if column.primary_key] or None
 
 
 def get_dialect_option(

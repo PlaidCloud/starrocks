@@ -1504,6 +1504,8 @@ def compare_starrocks_table(
     # Extract dialect_options for comparison using case-insensitive helper
     conn_table_attributes = extract_dialect_options_as_case_insensitive(conn_table)
     meta_table_attributes = extract_dialect_options_as_case_insensitive(metadata_table)
+    if isinstance(metadata_table, Table) and (inferred_key := utils.inferred_primary_key_columns(metadata_table)):
+        meta_table_attributes[TableInfoKey.PRIMARY_KEY] = ", ".join(inferred_key)
 
     logger.debug(
         "StarRocks-specific attributes comparison for table %r: "
