@@ -165,12 +165,21 @@ class DeleteTargetTest(fixtures.TestBase):
         ("DELETE /*+ SET_VAR(query_timeout=10) */ FROM dup WHERE id = 2", ("dup", None)),
         ("/* note */ DELETE FROM dup WHERE id = 2", ("dup", None)),
         ("DELETE FROM default_catalog.db.dup WHERE id = 2", ("dup", "db")),
+        ("DELETE/*+ SET_VAR(query_timeout=10) */ FROM dup WHERE id = 2", ("dup", None)),
+        ("DELETE -- purge\nFROM dup WHERE id = 2", ("dup", None)),
+        ("DELETE # purge\nFROM /* t */ s . `dup`", ("dup", "s")),
+        ("WITH c AS (SELECT 2 AS id) DELETE FROM dup WHERE id IN (SELECT id FROM c)", ("dup", None)),
         ("SELECT * FROM t", None),
         ("INSERT INTO t VALUES (1)", None),
+        ("WITH c AS (SELECT 1) SELECT * FROM c", None),
         argnames="statement,target",
     )
     def test_target(self, statement, target):
         eq_(StarRocksDialect._delete_target(statement), target)
+
+    def test_a_delete_whose_table_cannot_be_read_is_refused(self):
+        with expect_raises_message(exc.InvalidRequestError, "can't read which table this DELETE deletes from"):
+            StarRocksDialect._delete_target("DELETE FROM (SELECT 1) AS t WHERE 1")
 
     @testing.combinations(
         ("untranslated", None, {}, ("t", None)),

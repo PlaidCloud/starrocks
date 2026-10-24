@@ -154,26 +154,30 @@ class TransactionTest(fixtures.TablesTest):
     @TRANSACTIONS_NEED_3_5
     @testing.combinations(
         ("construct",), ("hinted_construct",), ("text",), ("qualified_text",), ("hinted_text",), ("catalog_text",),
+        ("hint_without_a_space",), ("line_comment",), ("cte",),
         argnames="form",
     )
     def test_delete_on_a_duplicate_key_table_is_refused(self, form):
         self._insert_logged_rows()
         logged = self.tables.txn_logged
+        database = config.db.url.database
+        texts = {
+            "text": "DELETE FROM txn_logged WHERE id = 2",
+            "qualified_text": f"DELETE FROM `{database}`.`txn_logged` WHERE id = 2",
+            "hinted_text": "DELETE /*+ SET_VAR(query_timeout=10) */ FROM txn_logged WHERE id = 2",
+            "catalog_text": f"DELETE FROM default_catalog.`{database}`.txn_logged WHERE id = 2",
+            "hint_without_a_space": "DELETE/*+ SET_VAR(query_timeout=10) */ FROM txn_logged WHERE id = 2",
+            "line_comment": "DELETE -- purge\nFROM txn_logged WHERE id = 2",
+            "cte": "WITH c AS (SELECT 2 AS id) DELETE FROM txn_logged WHERE id IN (SELECT id FROM c)",
+        }
         with expect_raises_message(exc.InvalidRequestError, "at once, outside the transaction"):
             with self._read_committed_engine().begin() as conn:
-                database = config.db.url.database
                 if form == "construct":
                     conn.execute(delete(logged).where(logged.c.id == 2))
                 elif form == "hinted_construct":
                     conn.execute(delete(logged).where(logged.c.id == 2).prefix_with("/*+ SET_VAR(query_timeout=10) */"))
-                elif form == "text":
-                    conn.exec_driver_sql("DELETE FROM txn_logged WHERE id = 2")
-                elif form == "qualified_text":
-                    conn.exec_driver_sql(f"DELETE FROM `{database}`.`txn_logged` WHERE id = 2")
-                elif form == "hinted_text":
-                    conn.exec_driver_sql("DELETE /*+ SET_VAR(query_timeout=10) */ FROM txn_logged WHERE id = 2")
                 else:
-                    conn.exec_driver_sql(f"DELETE FROM default_catalog.`{database}`.txn_logged WHERE id = 2")
+                    conn.exec_driver_sql(texts[form])
         eq_(self._ids("txn_logged"), [1, 2])
 
     @TRANSACTIONS_NEED_3_5

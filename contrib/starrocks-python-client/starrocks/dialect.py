@@ -1933,10 +1933,13 @@ class StarRocksDialect(MySQLDialect_pymysql):
         r"(?:COMMIT|ROLLBACK)\b(?!\s+(?:WORK\s+)?TO\b)", re.IGNORECASE
     )
     _INSERT_INTO_FILES: Final[re.Pattern[str]] = re.compile(r"INSERT\s+INTO\s+FILES\s*\(", re.IGNORECASE)
+    _GAP: Final[str] = r"(?:\s|/\*.*?\*/|(?:--|#)[^\n]*(?:\n|$))"
     _IDENTIFIER: Final[str] = r"(`(?:[^`]|``)+`|\w+)"
+    _QUALIFIED_NAME: Final[str] = (
+        rf"{_IDENTIFIER}(?:{_GAP}*\.{_GAP}*{_IDENTIFIER})?(?:{_GAP}*\.{_GAP}*{_IDENTIFIER})?"
+    )
     _DELETE_TARGET: Final[re.Pattern[str]] = re.compile(
-        rf"DELETE\s+(?:/\*.*?\*/\s*)*FROM\s+{_IDENTIFIER}(?:\s*\.\s*{_IDENTIFIER})?(?:\s*\.\s*{_IDENTIFIER})?",
-        re.IGNORECASE | re.DOTALL,
+        rf"DELETE\b{_GAP}*FROM\b{_GAP}*{_QUALIFIED_NAME}", re.IGNORECASE | re.DOTALL
     )
     _KEYED_MODELS_WITHOUT_PRIMARY_KEY: Final[frozenset[str]] = frozenset({
         TableModel.DUP_KEYS, TableModel.DUP_KEYS2, TableModel.AGG_KEYS, TableModel.AGG_KEYS2,
@@ -2010,16 +2013,21 @@ class StarRocksDialect(MySQLDialect_pymysql):
 
     @classmethod
     def _statement_keyword(cls, statement: str) -> str:
-        """Return the statement's first keyword, upper case, past leading comments.
+        """Return the statement's keyword, upper case: see :meth:`_statement_keyword_token`."""
+        token = cls._statement_keyword_token(statement)
+        return token.group(0).upper() if token else ""
+
+    @classmethod
+    def _statement_keyword_token(cls, statement: str) -> Optional[re.Match[str]]:
+        """Return the token of the statement's first keyword, past leading comments.
 
         For ``WITH``, it is the keyword of the statement the common table expressions belong to: the first
         SELECT, INSERT, UPDATE or DELETE outside parentheses.
         """
         tokens = cls._STATEMENT_TOKEN.finditer(statement, cls._LEADING_COMMENTS.match(statement).end())
         first = next(tokens, None)
-        keyword = first.group(0).upper() if first else ""
-        if keyword != "WITH":
-            return keyword
+        if first is None or first.group(0).upper() != "WITH":
+            return first
         depth = 0
         for token in tokens:
             text = token.group(0)
@@ -2028,8 +2036,8 @@ class StarRocksDialect(MySQLDialect_pymysql):
             elif text == ")":
                 depth -= 1
             elif depth == 0 and text.upper() in cls._DML_KEYWORDS | {"SELECT"}:
-                return text.upper()
-        return keyword
+                return token
+        return first
 
     def _match_transaction_to(
         self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext]
@@ -2170,16 +2178,24 @@ class StarRocksDialect(MySQLDialect_pymysql):
     ) -> Optional[Tuple[str, Optional[str]]]:
         """Return the (name, schema) of the table a DELETE deletes from, or None for other statements.
 
-        A ``delete()`` construct names its table, in the schema the ``schema_translate_map`` gives it; text is read
-        past comments and optimizer hints, and a catalog-qualified ``catalog.database.table`` gives the database as
-        the schema.
+        A ``delete()`` construct names its table, in the schema the ``schema_translate_map`` gives it. Text is read
+        from its DELETE keyword, after a WITH clause too, past comments and optimizer hints before the table, and a
+        catalog-qualified ``catalog.database.table`` gives the database as the schema. A text DELETE whose table
+        can't be read raises InvalidRequestError, since it might escape the transaction unnoticed.
         """
         if context is not None and context.isdelete:
             table = context.compiled.statement.table
             return table.name, cls._schema_as_executed(getattr(table, "schema", None), context)
-        target = cls._DELETE_TARGET.match(statement, cls._LEADING_COMMENTS.match(statement).end())
-        if target is None:
+        keyword = cls._statement_keyword_token(statement)
+        if keyword is None or keyword.group(0).upper() != "DELETE":
             return None
+        target = cls._DELETE_TARGET.match(statement, keyword.start())
+        if target is None:
+            raise exc.InvalidRequestError(
+                "The dialect can't read which table this DELETE deletes from, so it can't tell whether StarRocks "
+                "would apply it outside the transaction; name the table after FROM, or run the DELETE on an "
+                "AUTOCOMMIT connection"
+            )
         names = [cls._unquote_identifier(name) for name in target.groups() if name]
         return names[-1], names[-2] if len(names) > 1 else None
 
