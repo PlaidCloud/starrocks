@@ -29,8 +29,8 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
 
     @property
     def unbounded_varchar(self):
-        """Target database must support VARCHAR with no length"""
-        return exclusions.closed()  # Starrocks does not support unbounded VARCHAR
+        """``String()`` without a length compiles as STRING."""
+        return exclusions.open()
 
     @property
     def temp_table_reflection(self):
@@ -203,8 +203,8 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
 
     @property
     def comment_reflection(self):
-        """Indicates if the database support table comment reflection"""
-        return exclusions.open()  # Does not support column comments before version 4?
+        """Table and column comments are reflected, on 3.3 as on later versions."""
+        return exclusions.open()
 
     @property
     def sane_rowcount(self):
@@ -246,7 +246,7 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
         least seven decimal places when using the generic Float type.
 
         """
-        return exclusions.closed()  #ToDo - I couldn't get the test for this one working, not sure where the issue is - AssertionError: {Decimal('15.7563830')} != {Decimal('15.7563827')}
+        return exclusions.closed()  # FLOAT is 32-bit: 15.7563827 comes back as 15.7563830
 
     @property
     def ctes(self):
@@ -271,7 +271,7 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
     def ctes_on_dml(self):
         """target database supports CTES which consist of INSERT, UPDATE
         or DELETE *within* the CTE, e.g. WITH x AS (UPDATE....)"""
-        return exclusions.open()
+        return exclusions.closed()  # WITH x AS (DELETE ...) is a syntax error
 
     @property
     def enums(self):
@@ -281,3 +281,73 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
     @property
     def unicode_ddl(self):
         return exclusions.open()
+
+    @property
+    def window_functions(self) -> exclusions.compound:
+        """``OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN ...)``"""
+        return exclusions.open()
+
+    @property
+    def intersect(self) -> exclusions.compound:
+        return exclusions.open()
+
+    @property
+    def except_(self) -> exclusions.compound:
+        return exclusions.open()
+
+    @property
+    def nullsordering(self) -> exclusions.compound:
+        """``ORDER BY ... NULLS FIRST`` and ``NULLS LAST``"""
+        return exclusions.open()
+
+    @property
+    def table_value_constructor(self) -> exclusions.compound:
+        """``SELECT * FROM (VALUES (...), (...)) AS t``"""
+        return exclusions.open()
+
+    @property
+    def regexp_match(self) -> exclusions.compound:
+        return exclusions.open()
+
+    @property
+    def regexp_replace(self) -> exclusions.compound:
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_and(self) -> exclusions.compound:
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_or(self) -> exclusions.compound:
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_xor(self) -> exclusions.compound:
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_not(self) -> exclusions.compound:
+        """The shifts stay closed: StarRocks has ``bit_shift_left`` and ``bit_shift_right``, not ``<<`` and ``>>``."""
+        return exclusions.open()
+
+    @property
+    def date_historic(self) -> exclusions.compound:
+        """Dates from year 1 round-trip."""
+        return exclusions.open()
+
+    @property
+    def datetime_historic(self) -> exclusions.compound:
+        return exclusions.open()
+
+    @property
+    def datetime_literals(self) -> exclusions.compound:
+        return exclusions.open()
+
+    @property
+    def computed_columns(self) -> exclusions.compound:
+        """Generated columns work, but StarRocks wants the column type to be the expression's type exactly.
+
+        The suite's tables declare INTEGER columns computed as ``side * side``, which StarRocks types as BIGINT, and
+        it rejects them with "Illegal expression type for Generated Column".
+        """
+        return exclusions.closed()
