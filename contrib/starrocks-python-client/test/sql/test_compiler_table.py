@@ -29,6 +29,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    PrimaryKeyConstraint,
     String,
     Table,
     exc,
@@ -577,6 +578,7 @@ class DoubledPercentSignWarningTest(fixtures.TestBase):
         ),
         ("distribution", lambda pattern: AlterTableDistribution("t", f"HASH(`p{pattern}ct`)")),
         ("order_by", lambda pattern: AlterTableOrder("t", f"`p{pattern}ct`")),
+        ("properties", lambda pattern: AlterTableProperties("t", {"note": f"p{pattern}ct"})),
         ("mv_refresh", lambda pattern: AlterMaterializedView("mv", refresh=f"ASYNC START('{pattern}')")),
         argnames="build_ddl",
         id_="ia",
@@ -647,3 +649,111 @@ class CreateTablePropertyQuotingTest(fixtures.TestBase, AssertsCompiledSQL):
             f'    "colocate_with"={rendered_value}'
             ")",
         )
+
+
+class InferredPrimaryKeyCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    """A table with a primary key and no ``starrocks_*_key`` is a PRIMARY KEY table when its key columns lead it.
+
+    Otherwise it gets no key clause, as before, so StarRocks makes a DUPLICATE KEY table, and the dialect warns.
+    """
+
+    __dialect__ = StarRocksDialect()
+
+    def test_single_column(self):
+        tbl = Table("pk_inferred", MetaData(), Column("id", Integer, primary_key=True), Column("v", String(10)))
+        self.assert_compile(
+            CreateTable(tbl),
+            "CREATE TABLE pk_inferred ("
+            "    id INTEGER NOT NULL, "
+            "    v VARCHAR(10)"
+            ")"
+            "PRIMARY KEY (id)",
+        )
+
+    def test_composite_key_in_column_order(self):
+        tbl = Table(
+            "pk_composite",
+            MetaData(),
+            Column("tenant", Integer, primary_key=True),
+            Column("id", Integer, primary_key=True),
+            Column("v", String(10)),
+        )
+        self.assert_compile(
+            CreateTable(tbl),
+            "CREATE TABLE pk_composite ("
+            "    tenant INTEGER NOT NULL, "
+            "    id INTEGER NOT NULL, "
+            "    v VARCHAR(10)"
+            ")"
+            "PRIMARY KEY (tenant, id)",
+        )
+
+    def test_key_constraint_leading_in_its_order(self):
+        tbl = Table(
+            "pk_constraint",
+            MetaData(),
+            Column("b", Integer),
+            Column("a", Integer),
+            Column("v", String(10)),
+            PrimaryKeyConstraint("b", "a"),
+        )
+        self.assert_compile(
+            CreateTable(tbl),
+            "CREATE TABLE pk_constraint ("
+            "    b INTEGER NOT NULL, "
+            "    a INTEGER NOT NULL, "
+            "    v VARCHAR(10)"
+            ")"
+            "PRIMARY KEY (b, a)",
+        )
+
+    def test_key_columns_not_first_get_no_key_clause(self):
+        tbl = Table("pk_late", MetaData(), Column("v", String(10)), Column("id", Integer, primary_key=True))
+        with expect_warnings(r"Table 'pk_late' has the primary key \(id\) and names no starrocks_\*_key"):
+            self.assert_compile(
+                CreateTable(tbl),
+                "CREATE TABLE pk_late ("
+                "    v VARCHAR(10), "
+                "    id INTEGER NOT NULL"
+                ")",
+            )
+
+    def test_key_declared_in_another_order_than_the_columns_gets_no_key_clause(self):
+        tbl = Table(
+            "pk_order",
+            MetaData(),
+            Column("a", Integer),
+            Column("b", Integer),
+            Column("v", String(10)),
+            PrimaryKeyConstraint("b", "a"),
+        )
+        with expect_warnings(r"Table 'pk_order' has the primary key \(b, a\)"):
+            self.assert_compile(
+                CreateTable(tbl),
+                "CREATE TABLE pk_order ("
+                "    a INTEGER NOT NULL, "
+                "    b INTEGER NOT NULL, "
+                "    v VARCHAR(10)"
+                ")",
+            )
+
+    def test_named_key_model_wins(self):
+        tbl = Table(
+            "pk_duplicate",
+            MetaData(),
+            Column("id", Integer, primary_key=True),
+            Column("v", String(10)),
+            starrocks_duplicate_key="id",
+        )
+        self.assert_compile(
+            CreateTable(tbl),
+            "CREATE TABLE pk_duplicate ("
+            "    id INTEGER NOT NULL, "
+            "    v VARCHAR(10)"
+            ")"
+            "DUPLICATE KEY (id)",
+        )
+
+    def test_no_primary_key_columns_leave_the_key_to_starrocks(self):
+        tbl = Table("no_pk", MetaData(), Column("id", Integer), Column("v", String(10)))
+        self.assert_compile(CreateTable(tbl), "CREATE TABLE no_pk (" "    id INTEGER, " "    v VARCHAR(10)" ")")

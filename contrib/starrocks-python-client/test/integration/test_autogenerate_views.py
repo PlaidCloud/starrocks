@@ -19,7 +19,7 @@ from alembic.autogenerate import api
 from alembic.operations import Operations
 from alembic.operations.ops import AlterTableOp, ModifyTableOps
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import Column, MetaData, Table, text
+from sqlalchemy import Column, MetaData, Table, testing, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.testing import config, engines, fixtures
 
@@ -617,78 +617,164 @@ class AlterViewTest(_EmptyDatabaseAutogenerateBase):
         finally:
             connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
 
-    def test_comment_change(self, connection) -> None:
-        """ALTER: Only comment changed (should generate ALTER with warning)."""
-        view_name = "test_alter_comment"
-        # Create initial view with comment
-        connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
-        connection.execute(text(f"""
-            CREATE VIEW {view_name}
-            COMMENT 'Old comment'
-            AS SELECT 1 AS val
-        """))
-        try:
-            # Define view with new comment
-            target_metadata = MetaData()
-            View(view_name, target_metadata,
-                      definition="SELECT 1 AS val",
-                      comment="New comment")
-            mc = create_migration_context(connection, target_metadata)
+    @staticmethod
+    def _apply_and_reproduce(connection, mc, target_metadata, migration_script):
+        """Apply the upgrade operations, then produce the migration again; it has nothing left to change."""
+        op = Operations(mc)
+        for op_item in migration_script.upgrade_ops.ops:
+            op.invoke(op_item)
+        return api.produce_migrations(create_migration_context(connection, target_metadata), target_metadata)
 
-            # Capture warnings
+    @testing.combinations(
+        ("column_comment", "", [{"name": "a", "comment": "new"}, {"name": "b"}]),
+        ("column_names", "", [{"name": "x"}, {"name": "y"}]),
+        ("column_comment_with_view_comment", "COMMENT 'kept'", [{"name": "a", "comment": "new"}, {"name": "b"}]),
+        ("column_names_with_view_comment", "COMMENT 'kept'", [{"name": "x"}, {"name": "y"}]),
+        argnames="view_comment, columns",
+        id_="iaa",
+    )
+    def test_columns_only_change(self, connection, view_comment, columns) -> None:
+        """ALTER: Columns changed with the same definition, generated and applied, with the comment kept."""
+        view_name = "test_alter_columns_only"
+        connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+        connection.execute(text(f"CREATE VIEW {view_name} (a COMMENT 'old', b) {view_comment} AS SELECT 1 AS a, 2 AS b"))
+        try:
+            target_metadata = MetaData()
+            View(
+                view_name,
+                target_metadata,
+                definition="SELECT 1 AS a, 2 AS b",
+                columns=columns,
+                comment="kept" if view_comment else None,
+            )
+            mc = create_migration_context(connection, target_metadata)
+            migration_script = api.produce_migrations(mc, target_metadata)
+            assert len(migration_script.upgrade_ops.ops) == 1
+            alter_op = migration_script.upgrade_ops.ops[0]
+            assert isinstance(alter_op, AlterViewOp)
+            assert normalize_sql(alter_op.definition) == normalize_sql("SELECT 1 AS a, 2 AS b")
+
+            again = self._apply_and_reproduce(connection, mc, target_metadata, migration_script)
+            assert again.upgrade_ops.ops == []
+        finally:
+            connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+
+    def test_comment_change(self, connection) -> None:
+        """ALTER: Only comment changed, applied by recreating the view, and nothing is left to change."""
+        view_name = "test_alter_comment"
+        connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+        connection.execute(text(f"CREATE VIEW {view_name} COMMENT 'Old comment' AS SELECT 1 AS val"))
+        try:
+            target_metadata = MetaData()
+            View(view_name, target_metadata, definition="SELECT 1 AS val", comment="New comment")
+            mc = create_migration_context(connection, target_metadata)
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
                 migration_script = api.produce_migrations(mc, target_metadata)
+                assert len(w) == 0
 
-                # Verify warning issued
-                assert len(w) > 0
-                assert "does not support altering view comments" in str(w[0].message)
-
-            # Verify ALTER operation generated (for future compatibility)
             assert len(migration_script.upgrade_ops.ops) == 1
             alter_op = migration_script.upgrade_ops.ops[0]
             assert isinstance(alter_op, AlterViewOp)
             assert alter_op.definition is None  # Not changed
             assert alter_op.comment == "New comment"  # Changed
             assert alter_op.security is None  # Not changed
+            assert normalize_sql(alter_op.existing_definition) == normalize_sql("SELECT 1 AS val")
+
+            again = self._apply_and_reproduce(connection, mc, target_metadata, migration_script)
+            assert again.upgrade_ops.ops == []
+
+            downgrade_metadata = MetaData()
+            View(view_name, downgrade_metadata, definition="SELECT 1 AS val", comment="Old comment")
+            mc_downgrade = create_migration_context(connection, downgrade_metadata)
+            for op_item in migration_script.downgrade_ops.ops:
+                Operations(mc_downgrade).invoke(op_item)
+            assert api.produce_migrations(mc_downgrade, downgrade_metadata).upgrade_ops.ops == []
+        finally:
+            connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+
+    def test_definition_change_keeps_the_comment(self, connection) -> None:
+        """ALTER: A new definition keeps the comment, which ALTER VIEW ... AS alone would drop."""
+        view_name = "test_alter_definition_comment"
+        connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+        connection.execute(text(f"CREATE VIEW {view_name} COMMENT 'Kept comment' AS SELECT 1 AS val"))
+        try:
+            target_metadata = MetaData()
+            View(view_name, target_metadata, definition="SELECT 2 AS val", comment="Kept comment")
+            mc = create_migration_context(connection, target_metadata)
+            migration_script = api.produce_migrations(mc, target_metadata)
+            assert len(migration_script.upgrade_ops.ops) == 1
+
+            again = self._apply_and_reproduce(connection, mc, target_metadata, migration_script)
+            assert again.upgrade_ops.ops == []
+        finally:
+            connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+
+    def test_comment_removed(self, connection) -> None:
+        """ALTER: A comment the model no longer has is removed."""
+        view_name = "test_alter_comment_removed"
+        connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+        connection.execute(text(f"CREATE VIEW {view_name} COMMENT 'Gone' AS SELECT 1 AS val"))
+        try:
+            target_metadata = MetaData()
+            View(view_name, target_metadata, definition="SELECT 1 AS val")
+            mc = create_migration_context(connection, target_metadata)
+            migration_script = api.produce_migrations(mc, target_metadata)
+            assert len(migration_script.upgrade_ops.ops) == 1
+
+            again = self._apply_and_reproduce(connection, mc, target_metadata, migration_script)
+            assert again.upgrade_ops.ops == []
         finally:
             connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
 
     @VIEW_SECURITY_NEEDS_3_4_1
     def test_security_change(self, connection):
-        """ALTER: Only security changed (should generate ALTER with warning)."""
+        """ALTER: Only security changed, applied with ALTER VIEW ... SET SECURITY, and nothing is left to change."""
         view_name = "test_alter_security"
-        # Create initial view with security
         connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
-        connection.execute(text(f"""
-            CREATE VIEW {view_name}
-            SECURITY NONE
-            AS SELECT 1 AS val
-        """))
+        connection.execute(text(f"CREATE VIEW {view_name} SECURITY NONE AS SELECT 1 AS val"))
         try:
-            # Define view with different security
             target_metadata = MetaData()
-            View(view_name, target_metadata,
-                      definition="SELECT 1 AS val",
-                      starrocks_security="INVOKER")
+            View(view_name, target_metadata, definition="SELECT 1 AS val", starrocks_security="INVOKER")
             mc = create_migration_context(connection, target_metadata)
-
-            # Capture warnings
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
                 migration_script = api.produce_migrations(mc, target_metadata)
+                assert len(w) == 0
 
-                # Verify warning issued
-                assert len(w) > 0
-                assert "does not support altering view security" in str(w[0].message)
-
-            # Verify ALTER operation generated
             assert len(migration_script.upgrade_ops.ops) == 1
             alter_op = migration_script.upgrade_ops.ops[0]
             assert isinstance(alter_op, AlterViewOp)
             assert alter_op.definition is None  # Not changed
             assert alter_op.comment is None  # Not changed
             assert alter_op.security == "INVOKER"  # Changed
+
+            again = self._apply_and_reproduce(connection, mc, target_metadata, migration_script)
+            assert again.upgrade_ops.ops == []
+
+            downgrade_metadata = MetaData()
+            View(view_name, downgrade_metadata, definition="SELECT 1 AS val", starrocks_security="NONE")
+            mc_downgrade = create_migration_context(connection, downgrade_metadata)
+            for op_item in migration_script.downgrade_ops.ops:
+                Operations(mc_downgrade).invoke(op_item)
+            assert api.produce_migrations(mc_downgrade, downgrade_metadata).upgrade_ops.ops == []
+        finally:
+            connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+
+    @VIEW_SECURITY_NEEDS_3_4_1
+    def test_definition_and_security_change_together(self, connection):
+        """ALTER: A new definition and a new security both apply, and the comment survives."""
+        view_name = "test_alter_definition_security"
+        connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+        connection.execute(text(f"CREATE VIEW {view_name} COMMENT 'c' SECURITY NONE AS SELECT 1 AS val"))
+        try:
+            target_metadata = MetaData()
+            View(view_name, target_metadata, definition="SELECT 2 AS val", comment="c", starrocks_security="INVOKER")
+            mc = create_migration_context(connection, target_metadata)
+            migration_script = api.produce_migrations(mc, target_metadata)
+
+            again = self._apply_and_reproduce(connection, mc, target_metadata, migration_script)
+            assert again.upgrade_ops.ops == []
         finally:
             connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
 

@@ -83,3 +83,20 @@ class ReflectionMVRefreshTest(fixtures.TestBase):
     )
     def test_mv_refresh_clause_fully_extracted(self, refresh_clause, expected):
         assert _reflect_refresh(refresh_clause) == expected
+
+    def test_comments_naming_clauses_are_not_read_as_them(self):
+        """A column comment and the MV comment that say PARTITION BY, REFRESH or AS SELECT, as StarRocks prints them."""
+        parser = StarRocksTableDefinitionParser.__new__(StarRocksTableDefinitionParser)
+        ddl = (
+            'CREATE MATERIALIZED VIEW `mv` (`k` COMMENT "no PARTITION BY k, 12\\" wide", `v`)\n'
+            'COMMENT "was \\"REFRESH ASYNC EVERY (INTERVAL 1 DAY)\\", AS SELECT 1"\n'
+            "DISTRIBUTED BY HASH(`k`) BUCKETS 1 \n"
+            "REFRESH MANUAL\n"
+            'PROPERTIES (\n"replication_num" = "1"\n)\n'
+            "AS SELECT k, v FROM t;"
+        )
+        state = parser._parse_mv_ddl("mv", ddl, schema="db")
+
+        assert str(state.table_options.get(TableInfoKeyWithPrefix.REFRESH)) == "MANUAL"
+        assert TableInfoKeyWithPrefix.PARTITION_BY not in state.table_options
+        assert state.definition == "SELECT k, v FROM t"

@@ -89,6 +89,8 @@ class ReflectionColumnAutoIncrementTest(fixtures.TestBase):
     @testing.combinations(
         ("autoincrement", "id BIGINT NOT NULL AUTO_INCREMENT", True),
         ("no_autoincrement", "id BIGINT NOT NULL", False),
+        ("named_in_the_comment", "id INT NULL COMMENT 'not AUTO_INCREMENT'", False),
+        ("named_in_the_default", "id VARCHAR(20) NULL DEFAULT 'AUTO_INCREMENT'", False),
         argnames="id_column, expected",
         id_="iaa",
     )
@@ -96,3 +98,25 @@ class ReflectionColumnAutoIncrementTest(fixtures.TestBase):
         table_name = table_from_ddl("reflect_columns_ai", id_column)
         id_col = next(c for c in inspect(connection).get_columns(table_name) if c["name"].lower() == "id")
         assert id_col["autoincrement"] is expected
+
+    def test_columns_after_a_comment_holding_a_quote(self, connection):
+        """StarRocks 3.3 leaves the ``"`` of a PRIMARY KEY table's column comment unescaped in SHOW CREATE TABLE."""
+        connection.exec_driver_sql(
+            "CREATE TABLE reflect_columns_quote ("
+            "id BIGINT NOT NULL COMMENT '12\" pizza', "
+            "v BIGINT NOT NULL AUTO_INCREMENT, "
+            "s VARCHAR(10) DEFAULT 'NULL', "
+            "w VARCHAR(10) DEFAULT '  x  ', "
+            "k BIGINT NULL COMMENT 'not \"AUTO_INCREMENT\" here', "
+            "z VARCHAR(10) COMMENT 'closing\"'"
+            ") PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES (\"replication_num\" = \"1\")"
+        )
+        try:
+            columns = {c["name"]: c for c in inspect(connection).get_columns("reflect_columns_quote")}
+        finally:
+            connection.exec_driver_sql("DROP TABLE IF EXISTS reflect_columns_quote")
+
+        assert {name: column["autoincrement"] for name, column in columns.items()} == {
+            "id": False, "v": True, "s": False, "w": False, "k": False, "z": False
+        }
+        assert (columns["s"]["default"], columns["w"]["default"]) == ("'NULL'", "'  x  '")

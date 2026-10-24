@@ -17,8 +17,12 @@
 from unittest.mock import Mock
 
 from alembic.autogenerate.api import AutogenContext
-from sqlalchemy import BIGINT, Column, MetaData, Table, testing
-from sqlalchemy.testing import expect_raises_message, fixtures
+from alembic.operations import Operations
+from alembic.operations.ops import AlterColumnOp
+from alembic.runtime.migration import MigrationContext
+from sqlalchemy import BIGINT, Column, Integer, MetaData, Table, exc, inspect, testing
+from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.assertions import expect_raises_message
 
 from starrocks.alembic.compare import compare_starrocks_column_agg_type, compare_starrocks_column_autoincrement
 from starrocks.common.types import ColumnAggType
@@ -66,22 +70,24 @@ class CompareColumnAggTypeTest(_ReflectedTableFixture, fixtures.TestBase):
             starrocks_distributed_by="HASH(id)",
         )
 
-    def test_compare_agg_type_no_changes(self, connection, reflected_table):
+    def test_compare_agg_type_no_changes(self, connection, reflected_table, caplog):
         conn_table = reflected_table("compare_agg_type_no_changes", AGGREGATE_TABLE_DDL)
         meta_table = self._metadata_table("compare_agg_type_no_changes", ColumnAggType.SUM)
+        caplog.set_level("INFO")
 
         compare_starrocks_column_agg_type(
             self._autogen_context(connection), None, None, conn_table.name, "v", conn_table.c.v, meta_table.c.v
         )
+        assert "aggregation type" not in caplog.text
 
-    def test_compare_agg_type_changes_raises(self, connection, reflected_table):
-        conn_table = reflected_table("compare_agg_type_changes_raises", AGGREGATE_TABLE_DDL)
-        meta_table = self._metadata_table("compare_agg_type_changes_raises", ColumnAggType.REPLACE)
+    def test_compare_agg_type_changes_warns(self, connection, reflected_table, caplog):
+        conn_table = reflected_table("compare_agg_type_changes_warns", AGGREGATE_TABLE_DDL)
+        meta_table = self._metadata_table("compare_agg_type_changes_warns", ColumnAggType.REPLACE)
 
-        with expect_raises_message(NotImplementedError, "does not support changing the aggregation type"):
-            compare_starrocks_column_agg_type(
-                self._autogen_context(connection), None, None, conn_table.name, "v", conn_table.c.v, meta_table.c.v
-            )
+        compare_starrocks_column_agg_type(
+            self._autogen_context(connection), None, None, conn_table.name, "v", conn_table.c.v, meta_table.c.v
+        )
+        assert "does not support changing the aggregation type" in caplog.text
 
 
 class CompareColumnAutoIncrementTest(_ReflectedTableFixture, fixtures.TestBase):
@@ -99,14 +105,57 @@ class CompareColumnAutoIncrementTest(_ReflectedTableFixture, fixtures.TestBase):
             self._autogen_context(connection), None, None, conn_table.name, "id", conn_table.c.id, meta_table.c.id
         )
 
-    def test_compare_autoincrement_no_changes(self, connection, reflected_table):
+    def test_compare_autoincrement_no_changes(self, connection, reflected_table, caplog):
         conn_table = reflected_table(
             "compare_autoincrement_no_changes",
             "CREATE TABLE {name} (id BIGINT NOT NULL AUTO_INCREMENT) DISTRIBUTED BY RANDOM "
             'PROPERTIES("replication_num"="1")',
         )
+        caplog.set_level("INFO")
 
         assert not self._compare_with_autoincrement_metadata(connection, conn_table)
+        assert "cannot add or remove AUTO_INCREMENT" not in caplog.text
+
+    def test_the_alter_of_an_integer_primary_key_carries_no_autoincrement(self, connection, reflected_table):
+        conn_table = reflected_table(
+            "compare_integer_primary_key",
+            "CREATE TABLE {name} (id INT NOT NULL COMMENT 'old', v INT) PRIMARY KEY(id) DISTRIBUTED BY HASH(id) "
+            'PROPERTIES("replication_num"="1")',
+        )
+        meta_table = Table(
+            conn_table.name, MetaData(), Column("id", Integer, primary_key=True, comment="new"), Column("v", Integer)
+        )
+        alter_column_op = AlterColumnOp(conn_table.name, "id", modify_comment="new", autoincrement=True)
+        compare_starrocks_column_autoincrement(
+            self._autogen_context(connection), alter_column_op, None, conn_table.name, "id",
+            conn_table.c.id, meta_table.c.id,
+        )
+        assert "autoincrement" not in alter_column_op.kw
+
+    @testing.skip_if("starrocks<4.1", "StarRocks 3.3 and 3.5 refuse any MODIFY COLUMN of an AUTO_INCREMENT column")
+    def test_an_alter_without_existing_autoincrement_reads_it_from_the_database(self, connection, reflected_table):
+        conn_table = reflected_table(
+            "alter_reads_autoincrement",
+            "CREATE TABLE {name} (k INT, id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'old') DUPLICATE KEY(k) "
+            'DISTRIBUTED BY RANDOM PROPERTIES("replication_num"="1")',
+        )
+        Operations(MigrationContext.configure(connection)).alter_column(
+            conn_table.name, "id", comment="new", existing_type=BIGINT(), existing_nullable=False, autoincrement=True
+        )
+        columns = {column["name"]: column for column in inspect(connection).get_columns(conn_table.name)}
+        assert (columns["id"]["comment"], columns["id"]["autoincrement"]) == ("new", True)
+
+    def test_an_alter_adding_autoincrement_is_refused(self, connection, reflected_table):
+        conn_table = reflected_table(
+            "alter_adds_autoincrement",
+            "CREATE TABLE {name} (k INT, id BIGINT NOT NULL COMMENT 'old') DUPLICATE KEY(k) "
+            'DISTRIBUTED BY RANDOM PROPERTIES("replication_num"="1")',
+        )
+        with expect_raises_message(exc.CompileError, "cannot add AUTO_INCREMENT"):
+            Operations(MigrationContext.configure(connection)).alter_column(
+                conn_table.name, "id", comment="new", existing_type=BIGINT(), existing_nullable=False,
+                autoincrement=True,
+            )
 
     def test_compare_autoincrement_changes_warns(self, connection, reflected_table, caplog):
         """A column without AUTO_INCREMENT against metadata asking for it: no op, but a warning."""
@@ -118,5 +167,5 @@ class CompareColumnAutoIncrementTest(_ReflectedTableFixture, fixtures.TestBase):
 
         assert not self._compare_with_autoincrement_metadata(connection, conn_table)
         assert any(
-            "Detected AUTO_INCREMENT change" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records
+            "cannot add or remove AUTO_INCREMENT" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records
         )

@@ -14,6 +14,7 @@
 
 from functools import wraps
 import logging
+import re
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 import uuid
 import warnings
@@ -21,11 +22,23 @@ import warnings
 from alembic.autogenerate import comparators
 from alembic.autogenerate.api import AutogenContext
 from alembic.ddl import DefaultImpl
-from alembic.operations.ops import AlterColumnOp, AlterTableOp, UpgradeOps
-from sqlalchemy import Column
+from alembic.operations.ops import (
+    AlterColumnOp,
+    AlterTableOp,
+    CreateTableOp,
+    DropColumnOp,
+    DropTableOp,
+    MigrateOperation,
+    ModifyTableOps,
+    RenameTableOp,
+    UpgradeOps,
+)
+from sqlalchemy import Column, __version__ as _sqlalchemy_version
+from sqlalchemy.engine import Connection
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.sql import quoted_name, schema as sa_schema, sqltypes
+from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.sql.schema import Table
 from sqlalchemy.util import OrderedSet
 
@@ -50,22 +63,31 @@ from starrocks.common.params import (
     InvalidTableProperty,
     SRKwargsPrefix,
     TableInfoKey,
+    TableInfoKeyWithPrefix,
     TableKind,
     TableObjectInfoKey,
     TablePropertyForFuturePartitions,
+    UnalterableMaterializedViewProperty,
+    UnalterableTableProperty,
 )
+from starrocks.common.types import TableType
 from starrocks.common.utils import (
     CaseInsensitiveDict,
     TableAttributeNormalizer,
     extract_dialect_options_as_case_insensitive,
 )
 from starrocks.datatype import ARRAY, BOOLEAN, MAP, STRING, STRUCT, TINYINT, VARCHAR
+from starrocks.dialect import stored_sql_text
 from starrocks.engine.interfaces import ReflectedPartitionInfo, ReflectedTableKeyInfo
 from starrocks.reflection import StarRocksTableDefinitionParser
-from starrocks.sql.schema import MaterializedView, View
+from starrocks.sql.schema import MaterializedView, View, tables_read_by_query
 
 
 logger = logging.getLogger(__name__)
+
+
+class UnalterableChange(NotImplementedError):
+    """A difference between metadata and database that StarRocks has no ALTER statement for."""
 
 
 INTEGER_VISIT_NAMES_WITH_DISPLAY_WIDTH = {"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "LARGEINT"}
@@ -226,7 +248,19 @@ def compare_complex_type(impl: DefaultImpl, inspector_type: sqltypes.TypeEngine,
     return True
 
 
-def comparators_dispatch_for_starrocks(dispatch_type: str):
+_SQLALCHEMY_2 = int(_sqlalchemy_version.split(".")[0]) >= 2
+
+try:
+    from alembic.util import DispatchPriority
+
+    _LAST_PRIORITY: Dict[str, Any] = {"priority": DispatchPriority.LAST}
+except ImportError:
+    _LAST_PRIORITY = {}
+
+
+def comparators_dispatch_for_starrocks(
+    dispatch_type: str, run_last: bool = False
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """
     StarRocks-specific dispatch decorator.
 
@@ -234,6 +268,9 @@ def comparators_dispatch_for_starrocks(dispatch_type: str):
 
     Args:
         dispatch_type: Alembic dispatch type ("table", "column", "view", etc.)
+        run_last: Run after Alembic's own comparators of the type, which Alembic 1.18 and later runs
+            in batches by priority, with its server default comparison in the last one. Earlier
+            versions run them in the order registered, so this changes nothing there.
 
     Usage:
         @starrocks_dispatch_for("table")
@@ -261,7 +298,7 @@ def comparators_dispatch_for_starrocks(dispatch_type: str):
             return func(*args, **kwargs)
 
         # Register to Alembic dispatch system
-        return comparators.dispatch_for(dispatch_type)(wrapper)
+        return comparators.dispatch_for(dispatch_type, **(_LAST_PRIORITY if run_last else {}))(wrapper)
 
     return decorator
 
@@ -328,7 +365,26 @@ def check_similar_string_and_warn(
         )
 
 
-@comparators_dispatch_for_starrocks("schema")
+def _left_alone_before_sqlalchemy_2(object_names: Set[Tuple[Optional[str], str]], kind: str) -> bool:
+    """Return whether autogenerate leaves the database's views or materialized views alone, as on SQLAlchemy 1.4.
+
+    ``View`` and ``MaterializedView`` need SQLAlchemy 2.0, so a 1.4 model has none, and comparing would reflect
+    each one into an object 1.4 cannot build. The objects are left alone, and a warning names them.
+    """
+    if _SQLALCHEMY_2:
+        return False
+    if object_names:
+        logger.warning(
+            "SQLAlchemy 1.4 cannot build a %s, so autogenerate leaves the database's alone: %s",
+            kind,
+            ", ".join(utils.gen_simple_qualified_name(name, schema) for schema, name in sorted(
+                object_names, key=lambda key: (key[0] or "", key[1])
+            )),
+        )
+    return True
+
+
+@comparators_dispatch_for_starrocks("schema", run_last=True)
 def _autogen_for_views(
     autogen_context: AutogenContext,
     upgrade_ops: UpgradeOps,
@@ -382,6 +438,8 @@ def _autogen_for_views(
                 UserWarning,
             )
 
+    if _left_alone_before_sqlalchemy_2(conn_view_names, "view"):
+        return
     _compare_views(
         conn_view_names,
         metadata_view_names,
@@ -540,13 +598,16 @@ def compare_view(
         schema=resolved_schema,
         temp_view_schema=temp_view_schema,
     )
-    comment_changed = _compare_view_comment(
-        alter_view_op, view_fqn, conn_view, metadata_view
-    )
+    comment_changed = _compare_view_comment(view_fqn, conn_view, metadata_view)
     security_changed = _compare_view_security(
         alter_view_op, view_fqn, conn_view, metadata_view,
         conn_view_attributes, meta_view_attributes
     )
+
+    if definition_changed or comment_changed:
+        _carry_view_content_for_replace(
+            alter_view_op, conn_view, metadata_view, conn_view_attributes.get(TableInfoKey.SECURITY)
+        )
 
     # If any attribute has changed, append the operation
     if definition_changed or comment_changed or security_changed:
@@ -555,13 +616,38 @@ def compare_view(
         # Log which attributes changed
         changed_attrs = []
         if definition_changed:
-            changed_attrs.append("definition")
+            changed_attrs.append("definition or columns")
         if comment_changed:
             changed_attrs.append("comment")
         if security_changed:
             changed_attrs.append("security")
 
         logger.debug(f"Detected changed view attributes ({', '.join(changed_attrs)}) on {view_fqn!r}")
+
+def _carry_view_content_for_replace(
+    alter_view_op: AlterViewOp, conn_view: View, metadata_view: View, conn_security: Optional[str]
+) -> None:
+    """Put on the op what the migration needs to recreate the view and to undo that.
+
+    ALTER VIEW ... AS drops the view's comment and nothing alters a comment alone, so a change to the
+    definition, the columns or the comment is applied as CREATE OR REPLACE VIEW with the full content. The
+    comment goes on the op whenever either side has one, and the database's definition and columns go on it
+    so that a comment-only change, and the downgrade, still have a definition to recreate the view with. A
+    security other than the default goes on it too, so a view the migration drops and creates again, as
+    :func:`order_view_and_mv_ops` may, keeps it.
+    """
+    from starrocks.sql.schema import extract_view_columns
+
+    if conn_view.comment or metadata_view.comment:
+        alter_view_op.comment = metadata_view.comment
+        alter_view_op.existing_comment = conn_view.comment
+    if alter_view_op.existing_definition is None:
+        alter_view_op.existing_definition = conn_view.info.get(TableObjectInfoKey.DEFINITION)
+        alter_view_op.existing_columns = extract_view_columns(conn_view)
+    conn_security = TableAttributeNormalizer._simple_normalize(conn_security)
+    if alter_view_op.existing_security is None and conn_security not in (None, ReflectionViewDefaults.security()):
+        alter_view_op.existing_security = conn_security
+
 
 def _configured_temp_view_schema(autogen_context) -> Optional[str]:
     """Return the schema configured by user, or ``None`` when it is not set"""
@@ -638,8 +724,8 @@ def _compare_view_definition_and_columns(
     """
     Compare view definition and columns, and update AlterViewOp if changed.
 
-    Definition and columns are compared together because in StarRocks,
-    columns can only be changed by changing the definition (SELECT statement).
+    Definition and columns are compared together because StarRocks changes the columns of a view by redefining
+    it, with ALTER VIEW (columns) AS or CREATE OR REPLACE VIEW. A column-only change keeps the definition.
 
     Args:
         alter_view_op: AlterViewOp object to update
@@ -648,7 +734,7 @@ def _compare_view_definition_and_columns(
         metadata_view: View defined in metadata
 
     Returns:
-        True if definition changed, False otherwise
+        True if the definition or the columns changed, False otherwise
     """
     from starrocks.sql.schema import extract_view_columns
 
@@ -712,21 +798,13 @@ def _compare_view_definition_and_columns(
             meta_cols,
         )
 
-    # StarRocks limitation: Columns can only be changed together with definition
-    if columns_changed and not definition_changed:
-        raise NotImplementedError(
-            f"Detected COLUMN change on view {view_fqn!r}, while definition is unchanged. "
-            f"But StarRocks does not support altering view columns independently. "
-            f"You must change the definition (SELECT statement) together with columns, "
-            f"or use DROP + CREATE to apply this change.",
-        )
-
-    # Set definition and columns if definition changed
-    if definition_changed:
+    if definition_changed or columns_changed:
         alter_view_op.definition = meta_definition
         alter_view_op.columns = extract_view_columns(metadata_view)
         alter_view_op.existing_definition = conn_definition
         alter_view_op.existing_columns = extract_view_columns(conn_view)
+
+    if definition_changed:
         logger.info(f"Detected DEFINITION change on view {view_fqn!r}, "
                     f"from '{conn_def_norm}' (in database, normalized) to '{meta_def_norm}' (in metadata, normalized).")
         check_similar_string_and_warn(
@@ -738,20 +816,24 @@ def _compare_view_definition_and_columns(
             object_label="View",
         )
 
-    return definition_changed
+    if columns_changed and not definition_changed:
+        logger.info(f"Detected COLUMN change on view {view_fqn!r}, while its definition is unchanged.")
+
+    return definition_changed or columns_changed
 
 
 def _compare_view_comment(
-    alter_view_op: AlterViewOp,
     view_fqn: str,
     conn_view: View,
     metadata_view: View,
 ) -> bool:
     """
-    Compare view comment and update AlterViewOp if changed.
+    Compare view comment.
+
+    StarRocks has no ALTER for a view's comment, so a change is applied by recreating the view, see
+    `_carry_view_content_for_replace`.
 
     Args:
-        alter_view_op: AlterViewOp object to update
         view_fqn: Fully qualified view name for logging
         conn_view: View reflected from database
         metadata_view: View defined in metadata
@@ -766,21 +848,9 @@ def _compare_view_comment(
 
     comment_changed = conn_comment != meta_comment
 
-    # logger.debug("compare_view_comment: %s, comment_changed=%s", view_fqn, comment_changed)
     if comment_changed:
-        # logger.debug("Comment change for %s Database: %r, Metadata: %r", view_fqn, conn_comment, meta_comment)
-
-        # Warn about comment changes (not supported via ALTER VIEW)
-        warnings.warn(
-            f"Detected COMMENT change on view {view_fqn!r}, from '{conn_comment}' (in database) to '{meta_comment}' (in metadata). "
-            f"But StarRocks does not support altering view comments via ALTER VIEW. "
-            f"Consider using DROP + CREATE to apply this change if you want to change the comment.",
-            UserWarning,
-        )
-
-        # Set comment in AlterViewOp for future compatibility
-        alter_view_op.comment = metadata_view.comment
-        alter_view_op.existing_comment = conn_view.comment
+        logger.info(f"Detected COMMENT change on view {view_fqn!r}, "
+                    f"from {conn_comment!r} (in database) to {meta_comment!r} (in metadata).")
 
     return comment_changed
 
@@ -795,6 +865,9 @@ def _compare_view_security(
 ) -> bool:
     """
     Compare view security attribute and update AlterViewOp if changed.
+
+    A view whose metadata states no ``starrocks_security`` keeps the security it has in the database, as other
+    attributes the metadata omits do.
 
     Args:
         alter_view_op: AlterViewOp object to update
@@ -815,24 +888,15 @@ def _compare_view_security(
         meta_view_attributes.get(TableInfoKey.SECURITY)
     )
     logger.debug("Compare view security: conn_security=%s, meta_security=%s", conn_security, meta_security)
+    if meta_security is None:
+        return False
 
     conn_security = (conn_security or ReflectionViewDefaults.security())
-    meta_security = (meta_security or ReflectionViewDefaults.security())
     security_changed = conn_security != meta_security
 
-    # logger.debug("compare_view_security: %s, security_changed=%s", view_fqn, security_changed,)
     if security_changed:
-        # logger.debug("Security change for %s Database: %r, Metadata: %r", view_fqn, conn_security, meta_security)
-
-        # Warn about security changes (not supported via ALTER VIEW)
-        warnings.warn(
-            f"Detected SECURITY change on view {view_fqn!r}, from '{conn_security}' (in database) to '{meta_security}' (in metadata).     "
-            f"But StarRocks does not support altering view security via ALTER VIEW. "
-            f"Consider using DROP + CREATE to apply this change if you want to change the security.",
-            UserWarning,
-        )
-
-        # Set security in AlterViewOp for future compatibility
+        logger.info(f"Detected SECURITY change on view {view_fqn!r}, "
+                    f"from {conn_security!r} (in database) to {meta_security!r} (in metadata).")
         alter_view_op.security = meta_security
         alter_view_op.existing_security = conn_security
 
@@ -903,7 +967,7 @@ def _compare_view_columns(conn_view: View, metadata_view: View) -> bool:
 # ==============================================================================
 # Materialized View Comparison
 # ==============================================================================
-@comparators_dispatch_for_starrocks("schema")
+@comparators_dispatch_for_starrocks("schema", run_last=True)
 def _autogen_for_mvs(
     autogen_context: AutogenContext,
     upgrade_ops: UpgradeOps,
@@ -958,6 +1022,8 @@ def _autogen_for_mvs(
                 UserWarning,
             )
 
+    if _left_alone_before_sqlalchemy_2(conn_mv_names, "materialized view"):
+        return
     _compare_mvs(
         conn_mv_names,
         metadata_mv_names,
@@ -1078,23 +1144,30 @@ def _compare_mv_definition(
     mv_name: str,
     conn_mv: Union[MaterializedView, Table],
     metadata_mv: Union[MaterializedView, Table],
-    conn=None,
+    conn: Optional[Connection] = None,
     temp_view_schema: Optional[str] = None,
+    server_version: Optional[Tuple[int, ...]] = None,
+    revision_creates: Optional[Set[Tuple[Optional[str], str]]] = None,
+    default_schema: Optional[str] = None,
 ) -> None:
     """
-    Compare MV definition and raise error if changed.
+    Compare MV definition, raising UnalterableChange if it changed.
 
-    Note: StarRocks does not support altering MV definition, so this will raise an error
-    if a change is detected.
+    StarRocks does not support altering an MV definition, so the caller recreates the MV on a change. With a
+    connection, the definitions are compared as StarRocks canonicalizes them through temporary views. When it cannot,
+    only the in-process normalizer compares them, and a difference it sees is a change only as
+    :func:`_normalizer_difference_is_a_change` decides; otherwise it is warned about, and no operation is generated.
+    ``revision_creates`` holds the ``(schema, name)`` keys of the objects the revision creates.
     """
     # Always extract definition from table.info to support metadata defined as plain Table
     conn_def_raw = getattr(conn_mv, "definition", None) or conn_mv.info.get(TableObjectInfoKey.DEFINITION, "")
     meta_def_raw = getattr(metadata_mv, "definition", None) or metadata_mv.info.get(TableObjectInfoKey.DEFINITION, "")
     logger.debug("Compare mv definition: conn_def_raw=%s, meta_def_raw=%s", conn_def_raw, meta_def_raw)
 
+    starrocks_could_not_compare = False
+    host_schema = temp_view_schema or schema
     # Preferred path: canonicalize both sides through temporary VIEWs.
     if conn is not None and schema is not None:  # schema is already resolved by _compare_mv
-        host_schema = temp_view_schema or schema
         canonical_conn = _get_canonical_sql_via_temp_view(conn, host_schema, conn_def_raw)
         canonical_meta = _get_canonical_sql_via_temp_view(conn, host_schema, meta_def_raw)
         if canonical_conn is not None and canonical_meta is not None:
@@ -1102,6 +1175,7 @@ def _compare_mv_definition(
             meta_def_norm = TableAttributeNormalizer.normalize_sql(canonical_meta)
             logger.debug("MV definition comparison via temp-view canonicalization.")
         else:
+            starrocks_could_not_compare = True
             logger.debug("Temp-view canonicalization failed for MV %r; falling back to AST/regex normalizer.", mv_name)
             conn_def_norm, meta_def_norm = _normalize_definitions_for_compare(conn_def_raw, meta_def_raw)
     else:
@@ -1118,12 +1192,56 @@ def _compare_mv_definition(
             object_label="Materialized view",
         )
         mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
-        raise NotImplementedError(
+        if starrocks_could_not_compare and not _normalizer_difference_is_a_change(
+            meta_def_raw, schema, server_version, revision_creates or set(), default_schema
+        ):
+            _warn_mv_definition_not_compared(mv_fqn, host_schema)
+            return
+        raise UnalterableChange(
             f"Detected DEFINITION change on materialized view {mv_fqn!r}, "
             f"from {conn_def_norm!r} (in database, normalized) to {meta_def_norm!r} (in metadata, normalized). "
-            f"StarRocks does not support altering MV definition. "
-            f"You need to manually DROP and CREATE the materialized view."
+            f"StarRocks does not support altering MV definition."
         )
+
+
+_DEFINITIONS_STORED_AS_WRITTEN_FROM: Tuple[int, ...] = (4, 0, 6)
+"""The first StarRocks version that stores a view or MV definition as written, rather than rewritten."""
+
+
+def _normalizer_difference_is_a_change(
+    model_definition: str,
+    schema: Optional[str],
+    server_version: Optional[Tuple[int, ...]],
+    revision_creates: Set[Tuple[Optional[str], str]],
+    default_schema: Optional[str],
+) -> bool:
+    """Whether a definition difference only the in-process normalizer sees is a change to apply.
+
+    From 4.0.6 StarRocks stores a definition as written, so the normalizer compares like with like. Before, it stores
+    a rewritten one, with table-qualified columns that the normalizer keeps, so it would see a change in every MV on
+    every run. There the difference counts only when the model's definition reads an object the same revision
+    creates: the temporary view failed because that object does not exist yet, so the definition did change.
+    """
+    if server_version and tuple(server_version) >= _DEFINITIONS_STORED_AS_WRITTEN_FROM:
+        return True
+    return _definition_reads_any(model_definition, schema, revision_creates, default_schema)
+
+
+def _warn_mv_definition_not_compared(mv_fqn: str, host_schema: Optional[str]) -> None:
+    """Warn that an MV's definition could not be compared through StarRocks, so it is not recreated.
+
+    The temporary view needs ``CREATE VIEW`` on its schema and ``SELECT`` and ``DROP`` on the views there, and every
+    object the definitions read; see :func:`_get_canonical_sql_via_temp_view`.
+    """
+    logger.warning(
+        "Materialized view %r: its definition in the model differs from the database's as the dialect's own "
+        "normalizer reads them, but StarRocks could not canonicalize them through a temporary view in schema %r, so "
+        "they cannot be compared, and no operation is generated for it. Grant the migration user CREATE VIEW on "
+        "that schema, and SELECT and DROP on its views, or set %s to a schema where it has them; the comparison also "
+        "fails while something the definition reads, such as a column the revision adds, does not exist yet. If the "
+        "definition did change, autogenerate again once it exists, or drop and create the materialized view by hand.",
+        mv_fqn, host_schema, TEMP_VIEW_SCHEMA_OPT,
+    )
 
 
 def _compare_mv_comment(
@@ -1134,10 +1252,9 @@ def _compare_mv_comment(
     metadata_mv: Union[MaterializedView, Table]
 ) -> None:
     """
-    Compare MV comment and raise error if changed.
+    Compare MV comment, raising UnalterableChange if it changed.
 
-    Note: StarRocks does not support altering MV comment, so this will raise an error
-    if a change is detected.
+    StarRocks cannot alter a materialized view's comment, so the caller recreates the materialized view.
     """
     conn_comment = (conn_mv.comment or "").strip()
     meta_comment = (metadata_mv.comment or "").strip()
@@ -1145,11 +1262,75 @@ def _compare_mv_comment(
 
     if conn_comment != meta_comment:
         mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
-        raise NotImplementedError(
+        raise UnalterableChange(
             f"Detected COMMENT change on materialized view {mv_fqn!r}, "
             f"from {conn_comment!r} to {meta_comment!r}. "
-            f"StarRocks does not support altering MV comment. "
-            f"You need to manually DROP and CREATE the materialized view."
+            f"StarRocks does not support altering MV comment."
+        )
+
+
+def _split_refresh_moment(refresh: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Split a refresh string into its stated moment (IMMEDIATE, DEFERRED or None) and the rest.
+
+    The result is upper-cased with whitespace collapsed; the scheme keeps whatever follows the moment.
+    """
+    if refresh is None:
+        return None, None
+    normalized = " ".join(str(refresh).split()).upper()
+    for moment in ("IMMEDIATE", "DEFERRED"):
+        if normalized.startswith(moment + " "):
+            return moment, normalized[len(moment) + 1:]
+    return None, normalized
+
+
+def _normalize_refresh_scheme(refresh: Optional[str]) -> Optional[str]:
+    """Normalize the scheme of a refresh string for comparison, leaving out its IMMEDIATE or DEFERRED moment.
+
+    SHOW CREATE spells a periodic refresh SCHEDULE since 4.1.1 where the model says ASYNC, quotes START("...")
+    with double quotes where the model uses single quotes, writes ``EVERY(`` where the model may write
+    ``EVERY (``, so whitespace around parentheses does not count, and gives a START time in full, as
+    ``2026-10-25 00:00:00`` for a model's ``2026-10-25``.
+    """
+    _, scheme = _split_refresh_moment(refresh)
+    if scheme is None:
+        return None
+    if scheme.startswith("SCHEDULE"):
+        scheme = "ASYNC" + scheme[len("SCHEDULE"):]
+    scheme = re.sub(r"\s*([()])\s*", r"\1", " ".join(scheme.split())).replace('"', "'")
+    return _REFRESH_START.sub(_full_refresh_start, scheme)
+
+
+_REFRESH_START: re.Pattern[str] = re.compile(r"START\('(\d{4}-\d{2}-\d{2})(?: (\d{2}:\d{2})(:\d{2})?)?'\)")
+
+
+def _full_refresh_start(match: re.Match[str]) -> str:
+    """Write a refresh START time as StarRocks keeps it: a date gets midnight, and a time without seconds ``:00``."""
+    date, hours_and_minutes, seconds = match.groups()
+    return f"START('{date} {hours_and_minutes or '00:00'}{seconds or ':00'}')"
+
+
+def _compare_mv_refresh_moment(
+    schema: Optional[str],
+    mv_name: str,
+    conn_mv_attributes: Dict[str, Any],
+    meta_mv_attributes: Dict[str, Any],
+) -> None:
+    """Raise UnalterableChange when the model states a refresh moment the database does not have.
+
+    Only the model's stated moment counts. IMMEDIATE is the default and SHOW CREATE never renders it, so an absent
+    moment in the database means IMMEDIATE, and ALTER MATERIALIZED VIEW ... REFRESH keeps whatever moment the view
+    was created with, so a different moment needs the view recreated.
+    """
+    meta_moment, _ = _split_refresh_moment(meta_mv_attributes.get(TableInfoKey.REFRESH))
+    if meta_moment is None:
+        return
+    conn_moment, _ = _split_refresh_moment(conn_mv_attributes.get(TableInfoKey.REFRESH))
+    if (conn_moment or "IMMEDIATE") != meta_moment:
+        mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
+        raise UnalterableChange(
+            f"Detected REFRESH moment change on materialized view {mv_fqn!r}, "
+            f"from {conn_moment or 'IMMEDIATE'} to {meta_moment}. "
+            f"StarRocks does not support altering the refresh moment of a materialized view."
         )
 
 
@@ -1161,34 +1342,20 @@ def _compare_mv_refresh(
     meta_mv_attributes: Dict[str, Any]
 ) -> None:
     """
-    Compare MV refresh attributes and add AlterMaterializedViewOp if changed.
+    Compare MV refresh schemes and add AlterMaterializedViewOp if changed.
 
-    This is a mutable attribute that can be altered using ALTER MATERIALIZED VIEW.
+    This is a mutable attribute that can be altered using ALTER MATERIALIZED VIEW. The refresh moment
+    (IMMEDIATE or DEFERRED) is not part of the comparison, see `_compare_mv_refresh_moment`. A model that states no
+    refresh, which an MV with a distribution may omit, leaves the database's alone.
     """
-    def _normalize_refresh_string(val: Optional[str]) -> Optional[str]:
-        if val is None:
-            return None
-        # Collapse whitespace and compare case-insensitively
-        normalized = " ".join(str(val).split()).upper()
-        # IMMEDIATE is not rendered in SHOW CREATE, so drop
-        if normalized.startswith("IMMEDIATE "):
-            normalized = normalized[len("IMMEDIATE "):]
-        # SCHEDULE keyword replaced ASYNC 4.1.1, replace with ASYNC for backwards compatibility 
-        for moment_prefix in ("", "DEFERRED "):
-            keyword = moment_prefix + "SCHEDULE"
-            if normalized.startswith(keyword):
-                normalized = moment_prefix + "ASYNC" + normalized[len(keyword):]
-                break
-        # Normalize START("...") (SHOW CREATE) vs START('...') (metadata) quote styles.
-        normalized = normalized.replace('"', "'")
-        return normalized
-
     conn_refresh_raw = conn_mv_attributes.get(TableInfoKey.REFRESH)
     meta_refresh_raw = meta_mv_attributes.get(TableInfoKey.REFRESH)
     logger.debug("Compare mv refresh: conn_refresh_raw=%s, meta_refresh_raw=%s", conn_refresh_raw, meta_refresh_raw)
+    if meta_refresh_raw is None:
+        return
 
-    conn_refresh = _normalize_refresh_string(conn_refresh_raw)
-    meta_refresh = _normalize_refresh_string(meta_refresh_raw)
+    conn_refresh = _normalize_refresh_scheme(conn_refresh_raw)
+    meta_refresh = _normalize_refresh_scheme(meta_refresh_raw)
 
     if conn_refresh != meta_refresh:
 
@@ -1199,7 +1366,7 @@ def _compare_mv_refresh(
                 schema=schema,
                 refresh=str(meta_refresh_raw),
                 properties=None,
-                existing_refresh=str(conn_refresh_raw),
+                existing_refresh=str(conn_refresh_raw) if conn_refresh_raw is not None else None,
                 existing_properties=None,
             )
         )
@@ -1222,13 +1389,17 @@ def _compare_mv_properties(
     """
     Compare MV properties and add AlterMaterializedViewOp if changed.
 
-    This is a mutable attribute that can be altered using ALTER MATERIALIZED VIEW.
+    This is a mutable attribute that can be altered using ALTER MATERIALIZED VIEW, except for the properties of
+    :class:`UnalterableMaterializedViewProperty`, which are left out with a warning.
     """
     properties_to_set, properties_for_reverse = _compare_table_properties_impl(
         schema, mv_name, conn_mv_attributes, meta_mv_attributes, run_mode,
         default_cls=ReflectionMVDefaults, object_label="Materialized view", add_default_prefix=False)
+    mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
+    _leave_out_properties_starrocks_cannot_set(
+        properties_to_set, properties_for_reverse, "Materialized view", mv_fqn, UnalterableMaterializedViewProperty.reason
+    )
     if properties_to_set:
-        mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
         ops_list.append(
             AlterMaterializedViewOp(
                 view_name=mv_name,
@@ -1259,9 +1430,9 @@ def _compare_mv(
     - Immutable attributes (require DROP + CREATE): definition, partition_by,
       distributed_by, order_by, comment
 
-    Note: For immutable attributes, this will raise NotImplementedError if changes are detected,
-    as StarRocks does not support altering these attributes.
-    It will generate multiple AlterOps if there are several different attribute changes.
+    The immutable attributes are compared first. A change to any of them is applied by dropping the materialized
+    view and creating it again, since its data is derived from its base tables; the mutable attributes then need no
+    ALTER. Otherwise it generates one AlterOp per changed mutable attribute.
     """
     # Handle MV creation and deletion scenarios (should not happen here)
     if conn_mv is None or metadata_mv is None:
@@ -1290,51 +1461,67 @@ def _compare_mv(
     ops_before = len(upgrade_ops.ops)
 
     # Compare each MV attribute using dedicated functions
-    # Order: immutable attributes first (will raise error if changed), then mutable attributes
-    # Immutable attributes (will raise NotImplementedError if changed):
     resolved_schema = schema or autogen_context.dialect.default_schema_name
     temp_view_schema = _configured_temp_view_schema(autogen_context) or resolved_schema
-    _compare_mv_definition(upgrade_ops.ops, resolved_schema, mv_name, conn_mv, metadata_mv,
-                           conn=autogen_context.connection, temp_view_schema=temp_view_schema)
-    _compare_table_partition(
-        upgrade_ops.ops,
-        schema,
-        mv_name,
-        conn_mv_attributes,
-        meta_mv_attributes,
-        default_value_override=ReflectionMVDefaults.partition_by(),
-        support_change_override=AlterMVEnablement.PARTITION_BY,
-        ddl_object="MATERIALIZED VIEW",
-        object_label="Materialized view",
-    )
-    _compare_table_distribution(
-        upgrade_ops.ops,
-        schema,
-        mv_name,
-        conn_mv_attributes,
-        meta_mv_attributes,
-        default_value_override=ReflectionMVDefaults.distribution_type(),
-        support_change_override=AlterMVEnablement.DISTRIBUTED_BY,
-        ddl_object="MATERIALIZED VIEW",
-        object_label="Materialized view",
-        skip_when_meta_unset=True,
-    )
-    _compare_table_order_by(
-        upgrade_ops.ops,
-        schema,
-        mv_name,
-        conn_mv_attributes,
-        meta_mv_attributes,
-        default_value_override=ReflectionMVDefaults.order_by(),
-        support_change_override=AlterMVEnablement.ORDER_BY,
-        ddl_object="MATERIALIZED VIEW",
-        object_label="Materialized view",
-    )
-    _compare_mv_comment(upgrade_ops.ops, schema, mv_name, conn_mv, metadata_mv)
+    unalterable_changes = _collect_unalterable_changes([
+        lambda: _compare_mv_definition(
+            upgrade_ops.ops,
+            resolved_schema,
+            mv_name,
+            conn_mv,
+            metadata_mv,
+            conn=autogen_context.connection,
+            temp_view_schema=temp_view_schema,
+            server_version=autogen_context.dialect.server_version_info,
+            revision_creates=_objects_the_revision_creates(
+                upgrade_ops.ops, autogen_context.dialect.default_schema_name
+            ),
+            default_schema=autogen_context.dialect.default_schema_name,
+        ),
+        lambda: _compare_table_partition(
+            upgrade_ops.ops,
+            schema,
+            mv_name,
+            conn_mv_attributes,
+            meta_mv_attributes,
+            default_value_override=ReflectionMVDefaults.partition_by(),
+            support_change_override=AlterMVEnablement.PARTITION_BY,
+            ddl_object="MATERIALIZED VIEW",
+            object_label="Materialized view",
+        ),
+        lambda: _compare_table_distribution(
+            upgrade_ops.ops,
+            schema,
+            mv_name,
+            conn_mv_attributes,
+            meta_mv_attributes,
+            default_value_override=ReflectionMVDefaults.distribution_type(),
+            support_change_override=AlterMVEnablement.DISTRIBUTED_BY,
+            ddl_object="MATERIALIZED VIEW",
+            object_label="Materialized view",
+            skip_when_meta_unset=True,
+        ),
+        lambda: _compare_table_order_by(
+            upgrade_ops.ops,
+            schema,
+            mv_name,
+            conn_mv_attributes,
+            meta_mv_attributes,
+            default_value_override=ReflectionMVDefaults.order_by(),
+            support_change_override=AlterMVEnablement.ORDER_BY,
+            ddl_object="MATERIALIZED VIEW",
+            object_label="Materialized view",
+        ),
+        lambda: _compare_mv_comment(upgrade_ops.ops, schema, mv_name, conn_mv, metadata_mv),
+        lambda: _compare_mv_refresh_moment(schema, mv_name, conn_mv_attributes, meta_mv_attributes),
+    ])
+    run_mode = autogen_context.dialect.run_mode
+    if unalterable_changes:
+        _recreate_materialized_view(upgrade_ops, schema, mv_name, conn_mv, metadata_mv, unalterable_changes, run_mode)
+        return
 
     # Mutable attributes (will generate AlterMaterializedViewOp if changed):
     _compare_mv_refresh(upgrade_ops.ops, schema, mv_name, conn_mv_attributes, meta_mv_attributes)
-    run_mode = autogen_context.dialect.run_mode
     _compare_mv_properties(upgrade_ops.ops, schema, mv_name, conn_mv_attributes, meta_mv_attributes, run_mode)
 
     # Log summary if any operations were generated
@@ -1343,6 +1530,98 @@ def _compare_mv(
         mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
         num_changes = ops_after - ops_before
         logger.debug("Materialized view %r comparison complete: %d ALTER operation(s) generated", mv_fqn, num_changes)
+
+def _collect_unalterable_changes(comparisons: List[Callable[[], None]]) -> List[str]:
+    """Run each attribute comparison and return the messages of the changes StarRocks cannot ALTER."""
+    changes = []
+    for compare_attribute in comparisons:
+        try:
+            compare_attribute()
+        except UnalterableChange as change:
+            changes.append(str(change))
+    return changes
+
+
+def _recreate_materialized_view(
+    upgrade_ops: UpgradeOps,
+    schema: Optional[str],
+    mv_name: str,
+    conn_mv: Union[MaterializedView, Table],
+    metadata_mv: Union[MaterializedView, Table],
+    changes: List[str],
+    run_mode: str,
+) -> None:
+    """Apply changes ALTER MATERIALIZED VIEW cannot express by dropping the materialized view and creating it again.
+
+    Its data is derived from its base tables, so recreating it applies the model as written; StarRocks then fills it
+    again according to its refresh scheme. What the model leaves out and an ALTER would have left alone is kept from
+    the database: see :func:`_keep_what_the_model_leaves_out`. The drop keeps the database's definition, so the
+    downgrade restores it.
+    """
+    mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
+    create_op = CreateMaterializedViewOp.from_materialized_view(metadata_mv)
+    kept, dropped = _keep_what_the_model_leaves_out(
+        create_op, CreateMaterializedViewOp.from_materialized_view(conn_mv), run_mode
+    )
+    logger.warning(
+        "Materialized view %r changed in ways ALTER MATERIALIZED VIEW cannot express, so the migration drops it and "
+        "creates it again, and StarRocks refills it as it refreshes. %s%s%s",
+        mv_fqn,
+        " ".join(changes),
+        f" The new one keeps the database's {', '.join(kept)}, which the model leaves out." if kept else "",
+        f" It loses the database's properties {dropped!r}, which StarRocks takes only for a partitioned materialized "
+        "view." if dropped else "",
+    )
+    upgrade_ops.ops.append(DropMaterializedViewOp.from_materialized_view(conn_mv))
+    upgrade_ops.ops.append(create_op)
+
+
+_PARTITIONED_MV_ONLY_PROPERTIES: frozenset = frozenset({'partition_refresh_number', 'partition_ttl', 'partition_ttl_number'})
+"""MV properties CREATE MATERIALIZED VIEW refuses for an MV with no PARTITION BY, on StarRocks 3.3.22 and 4.1.6."""
+
+
+def _keep_what_the_model_leaves_out(
+    create_op: CreateMaterializedViewOp, database_op: CreateMaterializedViewOp, run_mode: str
+) -> Tuple[List[str], Dict[str, str]]:
+    """Give a recreated materialized view the database's refresh and the properties the model leaves out.
+
+    A model that states no refresh leaves the refresh alone, so the new MV keeps the database's rather than
+    becoming MANUAL, or, with no distribution either, a synchronous MV the dialect refuses after the DROP has run.
+    A property the model leaves out keeps the database's value, as an ALTER would leave it, unless that value is
+    the default of :meth:`ReflectionMVDefaults.properties`, which the new MV gets anyway. A property of
+    ``_PARTITIONED_MV_ONLY_PROPERTIES`` cannot be kept for a new MV with no PARTITION BY: CREATE MATERIALIZED VIEW
+    would refuse it after the DROP has run. Returns what was kept, and the properties that could not be.
+    """
+    kept: List[str] = []
+    refresh = database_op.kwargs.get(TableInfoKeyWithPrefix.REFRESH)
+    if not create_op.kwargs.get(TableInfoKeyWithPrefix.REFRESH) and refresh:
+        create_op.kwargs[TableInfoKeyWithPrefix.REFRESH] = refresh
+        kept.append(f"refresh {str(refresh)!r}")
+    model_properties = dict(create_op.kwargs.get(TableInfoKeyWithPrefix.PROPERTIES) or {})
+    stated = {key.lower() for key in model_properties}
+    defaults = ReflectionMVDefaults.properties(run_mode)
+    partitioned = bool(create_op.kwargs.get(TableInfoKeyWithPrefix.PARTITION_BY))
+    carried: Dict[str, str] = {}
+    dropped: Dict[str, str] = {}
+    for key, value in (database_op.kwargs.get(TableInfoKeyWithPrefix.PROPERTIES) or {}).items():
+        lowered = key.lower()
+        if lowered in stated or _is_mv_default_property_value(lowered, value, defaults):
+            continue
+        if lowered in _PARTITIONED_MV_ONLY_PROPERTIES and not partitioned:
+            dropped[key] = value
+        else:
+            carried[key] = value
+    if carried:
+        create_op.kwargs[TableInfoKeyWithPrefix.PROPERTIES] = {**model_properties, **carried}
+        kept.append(f"properties {carried!r}")
+    return kept, dropped
+
+
+def _is_mv_default_property_value(key: str, value: Any, defaults: Dict[str, str]) -> bool:
+    """Whether ``value`` is the default StarRocks gives MV property ``key`` (lowercase), in any case."""
+    default = defaults.get(key)
+    return default is not None and str(value).strip().lower() == str(default).strip().lower()
+
 
 @comparators_dispatch_for_starrocks("table")
 def check_table_kind_for_view_mv(
@@ -1392,10 +1671,222 @@ def check_table_kind_for_view_mv(
 
 
 # ==============================================================================
+# Order of view and materialized view operations
+# ==============================================================================
+_ObjectKey = Tuple[Optional[str], str]
+_VIEW_AND_MV_OPS: Tuple[type, ...] = (CreateViewOp, DropViewOp, AlterViewOp, AlterMaterializedViewOp)
+
+
+@comparators_dispatch_for_starrocks("schema", run_last=True)
+def order_view_and_mv_ops(
+    autogen_context: AutogenContext,
+    upgrade_ops: UpgradeOps,
+    schemas: Union[Set[None], Set[Optional[str]]],
+) -> None:
+    """Place view and materialized view operations around the table operations, so both directions of a revision run.
+
+    Alembic writes the downgrade as the upgrade reversed. So the upgrade drops views and materialized views first,
+    each before what it reads, then runs the table operations, then creates and alters views and materialized
+    views, each after what it reads; the downgrade then creates the dropped ones after the tables they read are
+    back, and drops the created ones before those tables go. An ALTER VIEW whose old definition reads what the
+    revision drops or changes could not be undone before that is restored, so it becomes a drop before the table
+    operations and a create after them: see :func:`_view_alters_to_split`. Names break ties, so the order is the
+    same on every run. This comparator is registered after the view and materialized view ones, so it runs last.
+    """
+    view_ops = [op for op in upgrade_ops.ops if isinstance(op, _VIEW_AND_MV_OPS)]
+    if not view_ops:
+        return
+    default_schema = autogen_context.dialect.default_schema_name
+    table_ops = [op for op in upgrade_ops.ops if not isinstance(op, _VIEW_AND_MV_OPS)]
+    alters_to_split = _view_alters_to_split(view_ops, _tables_losing_names(table_ops, default_schema), default_schema)
+    drops: List[MigrateOperation] = []
+    creates: List[MigrateOperation] = []
+    for op in view_ops:
+        if isinstance(op, DropViewOp):
+            drops.append(op)
+        elif op in alters_to_split:
+            drops.append(_drop_half_of_view_alter(op))
+            creates.append(_create_half_of_view_alter(op))
+        else:
+            creates.append(op)
+    upgrade_ops.ops[:] = (
+        _in_dependency_order(drops, default_schema, readers_first=True)
+        + table_ops
+        + _in_dependency_order(creates, default_schema, readers_first=False)
+    )
+
+
+def _object_key(schema: Optional[str], name: str, default_schema: Optional[str]) -> _ObjectKey:
+    """Return the lower-cased ``(schema, name)`` of an object, with None for the default schema."""
+    normalized_schema = schema.lower() if schema else None
+    if default_schema and normalized_schema == default_schema.lower():
+        normalized_schema = None
+    return normalized_schema, name.lower()
+
+
+def _tables_losing_names(table_ops: List[MigrateOperation], default_schema: Optional[str]) -> Set[_ObjectKey]:
+    """Return the tables the operations drop or rename, or drop or rename a column of."""
+    keys: Set[_ObjectKey] = set()
+    for op in table_ops:
+        if isinstance(op, (DropTableOp, RenameTableOp)):
+            keys.add(_object_key(op.schema, op.table_name, default_schema))
+        elif isinstance(op, ModifyTableOps) and any(
+            isinstance(column_op, DropColumnOp)
+            or (isinstance(column_op, AlterColumnOp) and column_op.modify_name is not None)
+            for column_op in op.ops
+        ):
+            keys.add(_object_key(op.schema, op.table_name, default_schema))
+    return keys
+
+
+def _objects_the_revision_creates(operations: List[MigrateOperation], default_schema: Optional[str]) -> Set[_ObjectKey]:
+    """Return the tables, views and materialized views the operations create.
+
+    Autogenerate compares tables before views and materialized views, and adds new materialized views before it
+    compares the existing ones, so when an existing materialized view is compared the creates are already there.
+    """
+    keys: Set[_ObjectKey] = set()
+    for op in operations:
+        if isinstance(op, CreateTableOp):
+            keys.add(_object_key(op.schema, op.table_name, default_schema))
+        elif isinstance(op, CreateViewOp):
+            keys.add(_object_key(op.schema, op.view_name, default_schema))
+    return keys
+
+
+def _view_alters_to_split(
+    view_ops: List[MigrateOperation], tables_losing_names: Set[_ObjectKey], default_schema: Optional[str]
+) -> List[AlterViewOp]:
+    """Return the ALTER VIEWs whose old definition reads what the revision drops or changes.
+
+    That is a table of ``tables_losing_names``, a view or materialized view the revision drops, including the drop
+    half of a materialized view it recreates, or a view whose own alter is split. The downgrade could not alter
+    such a view back before what it reads is restored, so each one is split into a drop and a create.
+    """
+    lost = set(tables_losing_names) | {
+        _object_key(op.schema, op.view_name, default_schema) for op in view_ops if isinstance(op, DropViewOp)
+    }
+    pending = [op for op in view_ops if isinstance(op, AlterViewOp)]
+    split: List[AlterViewOp] = []
+    while newly_split := [
+        op for op in pending if _definition_reads_any(op.existing_definition, op.schema, lost, default_schema)
+    ]:
+        split.extend(newly_split)
+        pending = [op for op in pending if op not in newly_split]
+        lost.update(_object_key(op.schema, op.view_name, default_schema) for op in newly_split)
+    return split
+
+
+def _keys_read_by(definition: Optional[str], schema: Optional[str], default_schema: Optional[str]) -> Set[_ObjectKey]:
+    """Return every object key a definition's table references could name.
+
+    An unqualified name may be in the view's own schema or in the default one.
+    """
+    if not definition:
+        return set()
+    keys: Set[_ObjectKey] = set()
+    for reference_schema, name in tables_read_by_query(str(definition)):
+        if reference_schema is not None:
+            keys.add(_object_key(reference_schema, name, default_schema))
+        else:
+            keys.add(_object_key(schema, name, default_schema))
+            keys.add((None, name))
+    return keys
+
+
+def _definition_reads_any(
+    definition: Optional[str], schema: Optional[str], keys: Set[_ObjectKey], default_schema: Optional[str]
+) -> bool:
+    return not _keys_read_by(definition, schema, default_schema).isdisjoint(keys)
+
+
+def _definition_of(op: MigrateOperation) -> Optional[str]:
+    """Return the definition whose reads order the operation: the new one, or the database's for a drop."""
+    if isinstance(op, CreateViewOp):
+        return op.definition
+    if isinstance(op, AlterViewOp):
+        return op.definition or op.existing_definition
+    if isinstance(op, DropViewOp):
+        return op.existing_definition
+    return None
+
+
+def _in_dependency_order(
+    ops: List[MigrateOperation], default_schema: Optional[str], readers_first: bool
+) -> List[MigrateOperation]:
+    """Return the view and materialized view operations so each comes after what it reads, or before it.
+
+    Among operations whose order is free, the one named first by ``(schema, name)`` comes first. A cycle, which
+    StarRocks would refuse anyway, keeps the remaining operations in name order.
+    """
+    pending = sorted(ops, key=lambda op: (op.schema or "", op.view_name))
+    keys = [_object_key(op.schema, op.view_name, default_schema) for op in pending]
+    must_follow = {
+        index: {
+            other for other, key in enumerate(keys)
+            if other != index and key in _keys_read_by(_definition_of(op), op.schema, default_schema)
+        }
+        for index, op in enumerate(pending)
+    }
+    if readers_first:
+        readers = {index: {other for other in must_follow if index in must_follow[other]} for index in must_follow}
+        must_follow = readers
+    ordered: List[int] = []
+    while len(ordered) < len(pending):
+        ready = [index for index in range(len(pending)) if index not in ordered and must_follow[index] <= set(ordered)]
+        if not ready:
+            remaining = [index for index in range(len(pending)) if index not in ordered]
+            logger.warning(
+                "The views and materialized views %s read each other in a cycle; they are kept in name order.",
+                [pending[index].view_name for index in remaining],
+            )
+            ordered.extend(remaining)
+            break
+        ordered.append(ready[0])
+    return [pending[index] for index in ordered]
+
+
+def _drop_half_of_view_alter(op: AlterViewOp) -> DropViewOp:
+    """Return the drop of the view as the database has it, so the downgrade creates it again after its tables."""
+    return DropViewOp(
+        op.view_name,
+        schema=op.schema,
+        existing_definition=op.existing_definition,
+        existing_columns=op.existing_columns,
+        existing_comment=op.existing_comment,
+        starrocks_security=op.existing_security,
+    )
+
+
+def _create_half_of_view_alter(op: AlterViewOp) -> CreateViewOp:
+    """Return the create of the view as the model has it, with what the alter leaves unchanged from the database."""
+    return CreateViewOp(
+        op.view_name,
+        op.definition or op.existing_definition,
+        schema=op.schema,
+        columns=op.columns if op.definition else op.existing_columns,
+        comment=op.comment,
+        starrocks_security=op.security if op.security is not None else op.existing_security,
+    )
+
+
+# ==============================================================================
 # Table Comparison
 # Only starrocks-specific table attributes are compared.
 # Other table attributes are compared using generic comparison logic in Alembic.
 # ==============================================================================
+def _skip_unalterable_change(compare_attribute: Callable[[], None]) -> None:
+    """Run one table attribute comparison, turning a change StarRocks cannot ALTER into a warning.
+
+    Autogenerate then still writes the operations for the table's other attributes and for every other table,
+    instead of aborting the whole run; the warning says what has to be changed by hand.
+    """
+    try:
+        compare_attribute()
+    except UnalterableChange as change:
+        logger.warning("%s No operation is generated for it; apply this change by hand.", change)
+
+
 @comparators_dispatch_for_starrocks("table")
 def compare_starrocks_table(
     autogen_context: AutogenContext,
@@ -1416,8 +1907,9 @@ def compare_starrocks_table(
         conn_table: Table object in the database, already reflected from the database
         metadata_table: Table object in the metadata
 
+    A change StarRocks cannot ALTER, such as a new key type or partitioning, is logged as a warning and skipped.
+
     Raises:
-        NotImplementedError: If a change is detected that is not supported in StarRocks.
         ValueError: If comparing View/MaterializedView objects (should use include_object_for_view_mv).
     """
     # Handle table creation and deletion scenarios
@@ -1440,6 +1932,7 @@ def compare_starrocks_table(
     # Extract dialect_options for comparison using case-insensitive helper
     conn_table_attributes = extract_dialect_options_as_case_insensitive(conn_table)
     meta_table_attributes = extract_dialect_options_as_case_insensitive(metadata_table)
+    _add_inferred_primary_key_against_primary_key_table(metadata_table, conn_table_attributes, meta_table_attributes)
 
     logger.debug(
         "StarRocks-specific attributes comparison for table %r: "
@@ -1470,13 +1963,15 @@ def compare_starrocks_table(
     # Track the number of operations before comparison
     ops_before = len(upgrade_ops.ops)
 
-    _compare_table_engine(upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes)
-    _compare_table_key(upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes)
+    attributes = (upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes)
+    _skip_unalterable_change(lambda: _compare_table_engine(*attributes))
+    _skip_unalterable_change(lambda: _compare_table_key(*attributes))
     # Note: COMMENT comparison is handled by Alembic's built-in _compare_table_comment
-    _compare_table_partition(upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes)
-    _compare_table_distribution(upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes)
-    _compare_table_order_by(upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes)
-    _compare_table_properties(upgrade_ops.ops, schema, table, conn_table_attributes, meta_table_attributes, run_mode)
+    _skip_unalterable_change(lambda: _compare_table_partition(*attributes))
+    _skip_unalterable_change(lambda: _compare_table_distribution(*attributes))
+    _skip_unalterable_change(lambda: _compare_table_order_by(*attributes))
+    server_version = autogen_context.dialect.server_version_info
+    _skip_unalterable_change(lambda: _compare_table_properties(*attributes, run_mode, server_version))
 
     # Log summary if any operations were generated
     ops_after = len(upgrade_ops.ops)
@@ -1486,6 +1981,24 @@ def compare_starrocks_table(
         logger.debug("Table %r comparison complete: %d ALTER operation(s) generated", table_fqn, num_changes)
 
     return False
+
+
+def _add_inferred_primary_key_against_primary_key_table(
+    metadata_table: Table, conn_table_attributes: Dict[str, Any], meta_table_attributes: Dict[str, Any]
+) -> None:
+    """Compare the PRIMARY KEY a model only implies, with ``primary_key=True`` columns, against a PRIMARY KEY table.
+
+    CREATE TABLE makes such a model a PRIMARY KEY table (see :func:`utils.inferred_primary_key_columns`), so against
+    a PRIMARY KEY table its key is compared as if the model named it. Against any other key model, such as the
+    DUPLICATE KEY table earlier versions of the dialect created from the same model, the model names no key, and
+    the key is left as the database has it, as for other attributes the model omits.
+    """
+    conn_key = _get_table_key_type(conn_table_attributes)
+    if not isinstance(metadata_table, Table) or conn_key is None or conn_key.type != TableType.PRIMARY_KEY:
+        return
+    if inferred_key := utils.inferred_primary_key_columns(metadata_table):
+        meta_table_attributes[TableInfoKey.PRIMARY_KEY] = ", ".join(inferred_key)
+
 
 def _compare_table_engine(
     ops_list: List[AlterTableOp],
@@ -1562,7 +2075,7 @@ def _compare_table_key(
         if meta_key is None:
             meta_key = ReflectionTableDefaults.reflected_key_info()
         if conn_key.type != meta_key.type:
-            raise NotImplementedError(
+            raise UnalterableChange(
                 f"Table '{table_name}' has different key types: {conn_key.type} to {meta_key.type}, "
                 "but it's not supported to change the key type."
             )
@@ -1993,9 +2506,15 @@ def _compare_table_properties_impl(
                 f"please modify it by removing the 'default.' prefix."
             )
 
-        # Determine the value for the downgrade (reverse) operation.
         target_val_downgrade = conn_str if conn_str is not None else default_str
-        properties_for_reverse[prop_key] = target_val_downgrade
+        if target_val_downgrade is None:
+            logger.warning(
+                f"{object_label} '{full_name}': The database reports no value for property '{key}', and it has no "
+                f"default defined in {default_cls.__name__}, so the downgrade cannot restore it and leaves it as the "
+                f"upgrade sets it."
+            )
+        else:
+            properties_for_reverse[prop_key] = target_val_downgrade
 
     return properties_to_set, properties_for_reverse
 
@@ -2007,10 +2526,19 @@ def _compare_table_properties(
     conn_table_attributes: Dict[str, Any],
     meta_table_attributes: Dict[str, Any],
     run_mode: str,
+    server_version: Optional[Tuple[int, ...]] = None,
 ) -> None:
+    """Add an AlterTablePropertiesOp for the changed properties StarRocks can SET on this cluster."""
     properties_to_set, properties_for_reverse = _compare_table_properties_impl(
         schema, table_name, conn_table_attributes, meta_table_attributes, run_mode,
         default_cls=ReflectionTableDefaults, object_label="Table")
+    _leave_out_properties_starrocks_cannot_set(
+        properties_to_set,
+        properties_for_reverse,
+        "Table",
+        utils.gen_simple_qualified_name(table_name, schema),
+        lambda key: UnalterableTableProperty.reason(key, run_mode, server_version),
+    )
     if properties_to_set:
         table_fqn = utils.gen_simple_qualified_name(table_name, schema)
         ops_list.append(
@@ -2022,6 +2550,31 @@ def _compare_table_properties(
             )
         )
         logger.debug(f"Detected PROPERTIES change on table {table_fqn!r}.")
+
+
+def _leave_out_properties_starrocks_cannot_set(
+    properties_to_set: Dict[str, str],
+    properties_for_reverse: Dict[str, str],
+    object_label: str,
+    object_fqn: str,
+    refusal_reason: Callable[[str], Optional[str]],
+) -> None:
+    """Remove from both directions, with a warning, each property StarRocks refuses to SET on this object.
+
+    ``refusal_reason`` gives why StarRocks refuses a property (lowercase), or None; see
+    :class:`UnalterableTableProperty` and :class:`UnalterableMaterializedViewProperty`. The property may be one the
+    model states, or one the comparison resets to its default. StarRocks takes one property per SET, so a refused
+    property would stop the migration after the properties before it were already set.
+    """
+    for key in list(properties_to_set):
+        reason = refusal_reason(key.lower())
+        if reason is None:
+            continue
+        logger.warning(
+            f"{object_label} {object_fqn!r}: the migration would set property {key!r} to "
+            f"{properties_to_set.pop(key)!r}, where the database has {properties_for_reverse.pop(key, None)!r}, but "
+            f"{reason}. No operation is generated for it; recreate the {object_label.lower()} to change it."
+        )
 
 
 def _compare_single_table_attribute(
@@ -2055,13 +2608,13 @@ def _compare_single_table_attribute(
         True if there's a meaningful change that requires an ALTER statement.
 
     Raises:
-        NotImplementedError: If support_change=False and a change is detected
+        UnalterableChange: If support_change=False and a change is detected
 
     Logic:
         1. If meta specifies value != (conn value or default value) -> change needed
         2. If meta specifies value == (conn value or default value) -> no change
         3. If meta not specified and (conn is None or conn == default) -> no change
-        4. If meta not specified and conn != default -> log error, return False (user must decide)
+        4. If meta not specified and conn != default -> leave the database value alone, return False
     """
     # Convert values to strings for comparison (handle None gracefully)
     conn_str = str(conn_value) if conn_value is not None else None
@@ -2095,8 +2648,7 @@ def _compare_single_table_attribute(
                     f"but '{meta_str}' in metadata. "
                     f"Please update your metadata to match the database."
                 )
-                logger.error(error_msg)
-                raise NotImplementedError(error_msg)
+                raise UnalterableChange(error_msg)
             # Log the detected change at INFO level
             logger.info(
                 f"Detected attribute {attribute_name.upper()} change on {object_label.lower()} {table_fqn!r}, "
@@ -2128,15 +2680,10 @@ def _compare_single_table_attribute(
                 )
                 pass
             else:
-                error_msg = (
-                    f"{object_label} {table_fqn!r}: Attribute '{attribute_name}' "
-                    f"in database has non-default value '{conn_str}' (default: '{default_str}'), "
-                    f"but not specified in metadata. Please specify this attribute explicitly "
-                    "in your table definition to avoid unexpected behavior. "
-                    "No ALTER statement will be generated automatically."
+                logger.debug(
+                    f"{object_label} {table_fqn!r}: Attribute '{attribute_name}' is '{conn_str}' in the database "
+                    f"(default: '{default_str}') and not set in metadata, so it is left as it is."
                 )
-                logger.error(error_msg)
-                raise NotImplementedError(error_msg)  # Don't generate ALTER - user must decide explicitly
         # Case 3: meta not specified, conn is default (or no default defined) -> no change
         return False
 
@@ -2186,10 +2733,11 @@ def compare_starrocks_column_agg_type(
         # "KEY", "SUM" for set, None for unsert
         if alter_column_op is not None:
             alter_column_op.kw[ColumnAggInfoKeyWithPrefix.AGG_TYPE] = meta_agg_type
-        raise NotImplementedError(
+        logger.warning(
             f"StarRocks does not support changing the aggregation type of a column: '{cname}', "
-            f"from {conn_agg_type} to {meta_agg_type}."
+            f"from {conn_agg_type} to {meta_agg_type}. No operation is generated for it; apply this change by hand."
         )
+        return
 
     # we need to set it in the AlterColumnOp, because the KEY/AGG_TYPE is always needed.
     # TODO: But currently, it's not passed to MySQLModifyColumn
@@ -2197,7 +2745,7 @@ def compare_starrocks_column_agg_type(
         alter_column_op.kw[ColumnAggInfoKeyWithPrefix.AGG_TYPE] = meta_agg_type
 
 
-@comparators_dispatch_for_starrocks("column")
+@comparators_dispatch_for_starrocks("column", run_last=True)
 def compare_starrocks_column_autoincrement(
     autogen_context: AutogenContext,
     alter_column_op: AlterColumnOp,
@@ -2207,24 +2755,139 @@ def compare_starrocks_column_autoincrement(
     conn_col: Column[Any],
     metadata_col: Column[Any],
 ) -> None:
-    """
-    Compare StarRocks-specific column options.
-    It will run after the  built-in comparator for "column" auto_increment.
+    """Keep ``autoincrement`` on an altered column only when the model declares one the database does not have.
 
-    StarRocks does not support changing the autoincrement of a column.
+    Alembic gives the alter of any single Integer primary key column, and of one declared ``autoincrement=True``,
+    ``autoincrement=True``, and the script carries no ``existing_autoincrement``. The dialect renders
+    AUTO_INCREMENT only for a column declared with it, and StarRocks keeps a column's AUTO_INCREMENT through a
+    MODIFY COLUMN that leaves it out, so ``autoincrement`` is dropped unless it differs from the database. StarRocks
+    cannot add or remove AUTO_INCREMENT, so a difference is warned about here and refused by the impl. This
+    comparator runs after Alembic's column comparators.
     """
     if conn_col is None or metadata_col is None:
         raise ArgumentError("Both conn column and meta column should not be None.")
 
-    # Because we can't inspect the autoincrement, we can't do the check of difference.
-    if conn_col.autoincrement != metadata_col.autoincrement and \
-            "auto" != metadata_col.autoincrement:
+    conn_autoincrement = conn_col.autoincrement is True
+    declared = metadata_col.autoincrement if isinstance(metadata_col.autoincrement, bool) else None
+    if alter_column_op is not None and (declared is None or declared == conn_autoincrement):
+        alter_column_op.kw.pop("autoincrement", None)
+    if declared is not None and declared != conn_autoincrement:
         table_fqn = utils.gen_simple_qualified_name(tname, schema)
         logger.warning(
-            f"Detected AUTO_INCREMENT change on column '{table_fqn}.{cname}'. "
-            f"from {conn_col.autoincrement!r} (in database) to {metadata_col.autoincrement!r} (in metadata). "
-            f"No ALTER statement will be generated automatically, "
-            f"Because we can't inspect the column's autoincrement currently."
+            f"Column '{table_fqn}.{cname}' is declared with autoincrement={declared!r}, but the database "
+            f"{'does not give it' if declared else 'gives it'} AUTO_INCREMENT. StarRocks cannot add or remove "
+            "AUTO_INCREMENT, so an alter of this column will be refused; recreate the table to change it."
         )
     return None
 
+
+def server_defaults_match(
+    metadata_column: Column[Any],
+    rendered_metadata_default: Optional[str],
+    rendered_inspector_default: Optional[str],
+) -> bool:
+    """
+    Whether a column's default in the metadata is the default reflected from StarRocks.
+
+    Alembic renders a string column's default as a quoted literal even when it is an expression such as
+    ``text("uuid()")``, and StarRocks reports a function default wrapped in parentheses, ``(uuid())``. So the
+    metadata default is read from the column itself, and both sides are compared as canonical defaults: a
+    literal by its decoded value, a function or keyword case insensitively and without wrapping parentheses.
+    An empty string is a default like any other.
+    """
+    if rendered_metadata_default is None or rendered_inspector_default is None:
+        return False
+    metadata_sql = _metadata_default_sql(metadata_column, rendered_metadata_default)
+    return utils.canonical_server_default(metadata_sql) == utils.canonical_server_default(rendered_inspector_default)
+
+
+def _metadata_default_sql(metadata_column: Column[Any], rendered_metadata_default: str) -> str:
+    """The SQL a metadata column's server default stands for: a str is a literal, an expression is its text.
+
+    An expression is compiled to the text StarRocks reflects, so a ``%`` in it is not doubled.
+    """
+    default = metadata_column.server_default
+    if not isinstance(default, sa_schema.DefaultClause):
+        return rendered_metadata_default
+    if isinstance(default.arg, str):
+        return utils.quote_sql_string_literal(default.arg)
+    if isinstance(default.arg, TextClause):
+        return default.arg.text
+    return stored_sql_text(default.arg)
+
+
+def server_default_text(server_default: Any) -> Optional[str]:
+    """Return the text of a server default, as a string, a ``text()`` or a ``DefaultClause``, or ``None`` for none."""
+    if server_default is None or server_default is False:
+        return None
+    argument = getattr(server_default, "arg", server_default)
+    return str(getattr(argument, "text", argument))
+
+
+def _warn_and_skip_default_change(
+    alter_column_op: AlterColumnOp,
+    schema: Optional[str],
+    tname: Union[quoted_name, str],
+    existing_default: Any,
+) -> None:
+    """Warn about a change of a column's default value and leave it out of the ALTER COLUMN op.
+
+    StarRocks cannot change a default ("Can not change default value"), so an op that carries the new default
+    could not be applied.
+    """
+    table_fqn = utils.gen_simple_qualified_name(tname, schema)
+    logger.warning(
+        f"Detected DEFAULT change on column '{table_fqn}.{alter_column_op.column_name}', "
+        f"from {server_default_text(existing_default)!r} (in database) to "
+        f"{server_default_text(alter_column_op.modify_server_default)!r} (in metadata). StarRocks does not support "
+        f"changing a column's default value. No operation is generated for it; recreate the column or the table "
+        f"with the new default."
+    )
+    alter_column_op.modify_server_default = False
+
+
+@comparators_dispatch_for_starrocks("column")
+def skip_starrocks_column_default_change(
+    autogen_context: AutogenContext,
+    alter_column_op: AlterColumnOp,
+    schema: Optional[str],
+    tname: Union[quoted_name, str],
+    cname: Union[quoted_name, str],
+    conn_col: Column[Any],
+    metadata_col: Column[Any],
+) -> None:
+    """Skip a default change where Alembic runs its default comparison before this comparator.
+
+    That is every Alembic before 1.18, which runs its own comparators first; later ones run theirs after, and
+    `skip_starrocks_default_changes` clears the change there.
+    """
+    if alter_column_op is not None and alter_column_op.modify_server_default is not False:
+        _warn_and_skip_default_change(alter_column_op, schema, tname, conn_col.server_default)
+
+
+def skip_starrocks_default_changes(autogen_context: AutogenContext, upgrade_ops: UpgradeOps) -> None:
+    """Skip every default change in the net changes, after Alembic 1.18's own comparators have produced them.
+
+    Alembic 1.18 and later compare server defaults after the dialect comparators of the same priority have run,
+    so the column comparator above sees no change yet. An ALTER COLUMN op left with no change, and a table
+    left with no op, are removed.
+    """
+    for table_ops in list(upgrade_ops.ops):
+        column_ops = getattr(table_ops, "ops", None)
+        if column_ops is None:
+            continue
+        skipped_any = False
+        for column_op in list(column_ops):
+            if isinstance(column_op, AlterColumnOp) and column_op.modify_server_default is not False:
+                _warn_and_skip_default_change(
+                    column_op, table_ops.schema, table_ops.table_name, column_op.existing_server_default
+                )
+                skipped_any = True
+                if not column_op.has_changes():
+                    column_ops.remove(column_op)
+        if skipped_any and not column_ops:
+            upgrade_ops.ops.remove(table_ops)
+
+
+if _LAST_PRIORITY:
+    comparators_dispatch_for_starrocks("autogenerate", run_last=True)(skip_starrocks_default_changes)

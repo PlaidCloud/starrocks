@@ -62,13 +62,21 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
 
     @property
     def index_reflection(self):
-        # ToDo - open when multi-column index is supported
+        """Closed: ComponentReflectionTest's fixture tables carry multi-column and unique indexes, which StarRocks
+        does not have, and HasIndexTest checks its indexes before StarRocks has built them.
+
+        HasIndexTest's indexes are single-column, but ``CREATE INDEX`` is an asynchronous schema change, so right after
+        ``create_all`` ``has_index`` is False, and True once the job finishes.
+
+        StarRocks' single-column BITMAP, NGRAMBF, GIN and VECTOR indexes are reflected, and tested in
+        ``test/integration/test_reflection_indexes.py``.
+        """
         return exclusions.closed()
 
     @property
     def primary_key_constraint_reflection(self):
-        # ToDo - open when multi-column index is supported
-        return exclusions.closed()
+        """PRIMARY KEY, UNIQUE KEY and AGGREGATE KEY tables reflect their key as the primary key."""
+        return exclusions.open()
 
     @property
     def foreign_key_constraint_reflection(self):

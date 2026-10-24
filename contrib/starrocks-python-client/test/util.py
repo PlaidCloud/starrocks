@@ -14,17 +14,7 @@
 
 import re
 
-from alembic import util as alembic_util
 from sqlalchemy import testing
-
-
-def alembic_runs_dialect_comparators_first(config: object) -> bool:
-    """Whether Alembic runs the comparators in its global registry ahead of its own.
-
-    Alembic's PriorityDispatcher (1.18 and later) copies the global registry, which holds the dialect's
-    comparators, before adding its own, so the dialect's ``schema`` and ``table`` comparators run first.
-    """
-    return hasattr(alembic_util, "PriorityDispatcher")
 
 
 def normalize_sql(sql: str) -> str:
@@ -80,6 +70,12 @@ STRUCT_FIELD_NAMES_UNQUOTED = testing.skip_if(
 )
 TIME_SLICE_CEIL_PARTITION_NEEDS_3_4_1 = testing.skip_if(
     "starrocks<3.4.1", "StarRocks before 3.4.1 refuses time_slice(..., ceil) in PARTITION BY"
+)
+MV_TEXT_REWRITTEN_BEFORE_4_0_6 = testing.skip_if(
+    "starrocks<4.0.6", "Before 4.0.6 StarRocks stores an MV definition rewritten, so its text is not compared"
+)
+MV_TEXT_STORED_AS_WRITTEN_FROM_4_0_6 = testing.skip_if(
+    "starrocks>=4.0.6", "From 4.0.6 StarRocks stores an MV definition as written, so its text is compared"
 )
 VIEW_TEXT_REWRITTEN_BEFORE_4_0_6 = testing.skip_if(
     "starrocks<4.0.6",
