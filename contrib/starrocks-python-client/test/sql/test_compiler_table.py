@@ -323,6 +323,18 @@ class CreateTableCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     @testing.combinations(
+        ("bare", "k, s", "PARTITION BY (k, s)"),
+        ("backquoted", "`k`,`s`", "PARTITION BY (`k`,`s`)"),
+        ("expressions", "date_trunc('day', dt), k", "PARTITION BY date_trunc('day', dt), k"),
+        argnames="partition_by, clause",
+        id_="iaa",
+    )
+    def test_a_column_list_partition_is_parenthesized(self, partition_by, clause):
+        """StarRocks 3.3 takes a list of partition columns only in parentheses."""
+        tbl = Table("p_tbl", MetaData(), Column("k", Integer), Column("s", Integer), starrocks_partition_by=partition_by)
+        self.assert_compile(CreateTable(tbl), f"CREATE TABLE p_tbl (    k INTEGER,     s INTEGER){clause}")
+
+    @testing.combinations(
         ("hash", Column("user_id", Integer), "HASH(user_id) BUCKETS 10", "    user_id INTEGER"),
         ("random", Column("log_id", BigInteger), "RANDOM BUCKETS 4", "    log_id BIGINT"),
         argnames="column, distributed_by, column_line",

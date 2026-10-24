@@ -657,6 +657,21 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             raise exc.CompileError(f"Property {key!r} has no value; StarRocks properties are strings")
         return self.sql_text(f"{self.quoted_property(key)}{separator}{self.quoted_property(value)}")
 
+    _COLUMN_LIST: Final[re.Pattern[str]] = re.compile(
+        r"\s*(?:`(?:[^`]|``)+`|\w+)(?:\s*,\s*(?:`(?:[^`]|``)+`|\w+))+\s*"
+    )
+
+    @classmethod
+    def _partition_clause(cls, partition_by: Any) -> str:
+        """Return a PARTITION BY clause, with a bare list of columns, such as ``k, s``, in parentheses.
+
+        StarRocks 3.3 refuses ``PARTITION BY k, s`` and takes ``PARTITION BY (k, s)``, which later versions take
+        too. Reflection gives the list without its parentheses. A list of expressions is left as written: 3.3
+        refuses it either way, and 3.5 refuses it in parentheses.
+        """
+        text = str(partition_by)
+        return f"({text.strip()})" if cls._COLUMN_LIST.fullmatch(text) else text
+
     def sql_text(self, text: Any) -> str:
         """Return SQL given as text, such as a view definition or a PARTITION BY clause, ready to splice into DDL.
 
@@ -999,7 +1014,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         # Partition
         if partition_by := opts.get(TableInfoKey.PARTITION_BY):
-            table_opts.append(f'PARTITION BY {self.sql_text(partition_by)}')
+            table_opts.append(f'PARTITION BY {self.sql_text(self._partition_clause(partition_by))}')
 
         # Distribution
         distributed_by = opts.get(TableInfoKey.DISTRIBUTED_BY)

@@ -18,7 +18,7 @@ from sqlalchemy import Column, MetaData, Table, inspect, testing
 from sqlalchemy.schema import CreateTable
 from sqlalchemy.testing import fixtures
 
-from starrocks.datatype import INTEGER
+from starrocks.datatype import INTEGER, VARCHAR
 from starrocks.sql.schema import MaterializedView, View
 
 
@@ -76,7 +76,7 @@ class MetaDataCreateDropTest(fixtures.TestBase):
 
 
 class ReflectedTableRecreateTest(fixtures.TestBase):
-    """A reflected table's CREATE TABLE, with its partition, distribution and sort key, runs again."""
+    """A reflected table's CREATE TABLE runs again on every version, with its partition, distribution and sort key."""
 
     __backend__ = True
     __only_on__ = "starrocks"
@@ -96,3 +96,25 @@ class ReflectedTableRecreateTest(fixtures.TestBase):
         finally:
             connection.exec_driver_sql("DROP TABLE IF EXISTS recreated")
             connection.exec_driver_sql("DROP TABLE IF EXISTS reflected_to_recreate")
+
+    def test_a_reflected_column_list_partition_is_created_again(self, metadata, connection):
+        Table(
+            "partitioned_by_columns",
+            metadata,
+            Column("k", INTEGER),
+            Column("s", VARCHAR(10)),
+            starrocks_partition_by="k, s",
+            starrocks_distributed_by="HASH(k)",
+            starrocks_properties={"replication_num": "1"},
+        )
+        metadata.create_all(connection)
+        reflected = Table("partitioned_by_columns", MetaData(), autoload_with=connection)
+        recreate = str(CreateTable(reflected).compile(connection)).replace(
+            "partitioned_by_columns", "partitioned_by_columns_again", 1
+        )
+        connection.exec_driver_sql(recreate)
+        try:
+            options = inspect(connection).get_table_options("partitioned_by_columns_again")
+            assert "`s`" in str(options["starrocks_partition_by"]), options
+        finally:
+            connection.exec_driver_sql("DROP TABLE IF EXISTS partitioned_by_columns_again")
