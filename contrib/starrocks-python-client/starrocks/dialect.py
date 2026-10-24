@@ -804,11 +804,11 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         This method extends the base MySQL compiler to support:
         - **KEY specifier**: For AGGREGATE KEY tables, key columns can be marked
-          with `info={'starrocks_is_agg_key': True}`. The compiler validates that
+          with `Column(..., starrocks_is_agg_key=True)`. The compiler validates that
           a column is not both a key and an aggregate.
         - **Aggregate Functions**: For AGGREGATE KEY tables, value columns can have
-          an aggregate function (e.g., 'SUM', 'REPLACE') specified via the
-          `info={'starrocks_agg': '...'}` dictionary on a Column.
+          an aggregate function (e.g., 'SUM', 'REPLACE', or a state function such as
+          'sum(BIGINT)') given as `Column(..., starrocks_agg_type='...')`.
         - **AUTO_INCREMENT**: Automatically renders `AUTO_INCREMENT` for columns
           with `autoincrement=True`. It also ensures these columns are `BIGINT`
           and `NOT NULL` as required by StarRocks.
@@ -905,11 +905,11 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         This method extends the base MySQL compiler to support:
         - **KEY specifier**: For AGGREGATE KEY tables, key columns can be marked
-          with `info={'starrocks_is_agg_key': True}`. The compiler validates that
+          with `Column(..., starrocks_is_agg_key=True)`. The compiler validates that
           a column is not both a key and an aggregate.
         - **Aggregate Functions**: For AGGREGATE KEY tables, value columns can have
-          an aggregate function (e.g., 'SUM', 'REPLACE') specified via the
-          `info={'starrocks_agg': '...'}` dictionary on a Column.
+          an aggregate function (e.g., 'SUM', 'REPLACE', or a state function such as
+          'sum(BIGINT)') given as `Column(..., starrocks_agg_type='...')`.
         - **AUTO_INCREMENT**: Automatically renders `AUTO_INCREMENT` for columns
           with `autoincrement=True`. It also ensures these columns are `BIGINT`
           and `NOT NULL` as required by StarRocks.
@@ -1034,7 +1034,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             return ColumnAggType.KEY
         elif has_agg_type:
             agg_val = str(opt_dict[ColumnAggInfoKey.AGG_TYPE])
-            if agg_val.upper() not in ColumnAggType.ALLOWED_ITEMS:
+            if not ColumnAggType.is_valid(agg_val):
                 raise exc.CompileError(
                     f"Unsupported aggregate type for column '{column.name}': {agg_val}"
                 )

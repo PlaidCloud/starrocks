@@ -48,6 +48,7 @@ from starrocks.datatype import (
     JSON,
     LARGEINT,
     MAP,
+    PERCENTILE,
     SMALLINT,
     STRING,
     STRUCT,
@@ -248,7 +249,7 @@ class DataTypeReflectionTest(fixtures.TestBase):
             Column("id_col", INTEGER()),
             Column("hll_col", HLL(), starrocks_agg_type='HLL_UNION'),
             Column("bitmap_col", BITMAP(), starrocks_agg_type='BITMAP_UNION'),
-            # Column("percentile_col", PERCENTILE()),  # Not supported by compiler yet
+            Column("percentile_col", PERCENTILE(), starrocks_agg_type='PERCENTILE_UNION'),
             Column("json_col", JSON(), starrocks_agg_type='REPLACE'),
             starrocks_aggregate_key='id_col',
             starrocks_distributed_by='HASH(id_col)',
@@ -260,7 +261,7 @@ class DataTypeReflectionTest(fixtures.TestBase):
         # Check column types
         assert isinstance(reflected_table.c.hll_col.type, HLL)
         assert isinstance(reflected_table.c.bitmap_col.type, BITMAP)
-        # assert isinstance(reflected_table.c.percentile_col.type, PERCENTILE)
+        assert isinstance(reflected_table.c.percentile_col.type, PERCENTILE)
         assert isinstance(reflected_table.c.json_col.type, JSON)
 
     def test_reflect_array_types(self, connection):
