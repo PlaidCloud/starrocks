@@ -1837,6 +1837,24 @@ class StarRocksDialect(MySQLDialect_pymysql):
 
         return TableKind.TABLE  # Default fallback
 
+    def _parsed_state_or_create(
+        self, connection: Connection, table_name: str, schema: Optional[str] = None, **kw: Any
+    ) -> ReflectedState:
+        """
+        Look the parsed state up under plain string names.
+
+        ``@reflection.cache`` keys a ``quoted_name`` by ``(name, quote)`` but a plain
+        ``str`` by its value alone, so the same table reached once through the
+        ``Table`` (a ``quoted_name``) and once through a name list (a ``str``) used to
+        miss the cache and be reflected twice.
+        """
+        return super()._parsed_state_or_create(
+            connection,
+            None if table_name is None else str(table_name),
+            None if schema is None else str(schema),
+            **kw,
+        )
+
     @reflection.cache
     def get_table_kind(self, connection, table_name, schema = None, **kwargs):
         """

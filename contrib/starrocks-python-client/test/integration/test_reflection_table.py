@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from sqlalchemy import Column, Integer, String, Table, inspect, testing
+from sqlalchemy import Column, Integer, MetaData, String, Table, event, inspect, testing
 from sqlalchemy.testing import fixtures
 
 from starrocks.common.params import TableInfoKeyWithPrefix
@@ -136,3 +136,55 @@ class ReflectedPrimaryKeyTest(fixtures.TestBase):
         assert inspector.get_pk_constraint("reflected_pk_model")["constrained_columns"] == expected_pk_columns
         assert inspector.get_table_options("reflected_pk_model")[f"{key_option}"] == "id, tenant"
         assert inspector.get_indexes("reflected_pk_model") == []
+
+
+class ReflectionStatementCountTest(fixtures.TestBase):
+    """A table is read from information_schema once, however it is reflected."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @staticmethod
+    def _create_tables(connection, metadata, count):
+        for number in range(count):
+            Table(
+                f"stmt_count_{number}",
+                metadata,
+                Column("id", Integer),
+                Column("name", String(32)),
+                starrocks_duplicate_key="id",
+                starrocks_distributed_by="HASH(id) BUCKETS 1",
+                starrocks_properties={"replication_num": "1"},
+            )
+        metadata.create_all(connection)
+
+    @staticmethod
+    def _config_reads_while(connection, reflect):
+        statements = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(" ".join(statement.split()).lower())
+
+        event.listen(connection, "before_cursor_execute", record)
+        try:
+            reflect()
+        finally:
+            event.remove(connection, "before_cursor_execute", record)
+        return [s for s in statements if "information_schema.tables_config" in s]
+
+    def test_autoload_reads_each_table_once(self, connection, metadata):
+        self._create_tables(connection, metadata, 1)
+
+        reads = self._config_reads_while(
+            connection, lambda: Table("stmt_count_0", MetaData(), autoload_with=connection)
+        )
+
+        assert len(reads) == 1
+
+    def test_metadata_reflect_reads_each_table_once(self, connection, metadata):
+        self._create_tables(connection, metadata, 3)
+        names = [f"stmt_count_{number}" for number in range(3)]
+
+        reads = self._config_reads_while(connection, lambda: MetaData().reflect(connection, only=names))
+
+        assert len(reads) == 3
