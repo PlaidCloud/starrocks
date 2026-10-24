@@ -14,7 +14,7 @@
 
 """UPDATE, DELETE and INSERT compilation."""
 
-from sqlalchemy import Column, Integer, MetaData, Table, update
+from sqlalchemy import Column, Integer, MetaData, Table, delete, update
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
@@ -44,3 +44,15 @@ class MultiTableDmlCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_update_single_table_has_no_from(self):
         self.assert_compile(update(A).values(v=1).where(A.c.id == 2), "UPDATE a SET v=%s WHERE a.id = %s")
+
+    def test_delete_using_one_table(self):
+        self.assert_compile(
+            delete(A).where(A.c.id == B.c.id).where(B.c.w == 3),
+            "DELETE FROM a USING b WHERE a.id = b.id AND b.w = %s",
+        )
+
+    def test_delete_using_two_tables(self):
+        self.assert_compile(
+            delete(A).where(A.c.id == B.c.id).where(B.c.id == C.c.id),
+            "DELETE FROM a USING b, c WHERE a.id = b.id AND b.id = c.id",
+        )

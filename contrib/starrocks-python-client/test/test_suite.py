@@ -571,11 +571,6 @@ class CTETest(_CTETest):
             starrocks_distributed_by="HASH(id)",
         )
 
-    @testing.requires.ctes_with_update_delete
-    @testing.skip('starrocks', 'needs a primary column')
-    def test_delete_scalar_subq_round_trip(self, connection):
-        pass
-
     @testing.skip('starrocks', 'Does not support recursive CTE')
     def test_select_recursive_round_trip(self, connection):
         pass

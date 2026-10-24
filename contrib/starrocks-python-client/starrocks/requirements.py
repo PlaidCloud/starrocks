@@ -231,6 +231,11 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
         return exclusions.open()
 
     @property
+    def delete_from(self):
+        """Target must support DELETE FROM..FROM or DELETE..USING syntax"""
+        return exclusions.open()
+
+    @property
     def empty_inserts(self):
         return exclusions.closed()
 

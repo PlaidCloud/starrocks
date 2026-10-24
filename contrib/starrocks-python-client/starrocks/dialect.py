@@ -348,6 +348,20 @@ class StarRocksSQLCompiler(MySQLCompiler):
             t._compiler_dispatch(self, fromhints=from_hints, **kw) for t in extra_froms
         )
 
+    def delete_extra_from_clause(
+        self,
+        delete_stmt: Delete,
+        from_table: Any,
+        extra_froms: list[Any],
+        from_hints: Any,
+        **kw: Any,
+    ) -> str:
+        """Render ``USING b, c`` for the extra tables only; StarRocks rejects the deleted table repeated in it."""
+        kw["asfrom"] = True
+        return "USING " + ", ".join(
+            t._compiler_dispatch(self, fromhints=from_hints, **kw) for t in extra_froms
+        )
+
     def limit_clause(self, select: Select, **kw: Any) -> str:
         # StarRocks supports:
         #   LIMIT <limit>
