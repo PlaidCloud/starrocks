@@ -480,9 +480,6 @@ class NumericTest(_NumericTest,):
             return run
 
 
-FLOAT_CAST_SKIPPED = testing.fails_on(
-    "starrocks", "the dialect inherits MySQL's version check and skips CAST to FLOAT, which StarRocks supports"
-)
 DECIMAL_SCALE_ABOVE_38 = testing.skip(
     "starrocks", "the quotient of two DECIMAL(38, 20) needs scale 40; StarRocks allows 38"
 )
@@ -501,8 +498,8 @@ if IS_SQLALCHEMY_2:
         """Upstream's pair of combinations, flattened so StarRocks' DECIMAL limits can be marked per case."""
 
         @testing.combinations(
-            ("float-typed", "7.0", "3.5", Float(), "2", False, FLOAT_CAST_SKIPPED),
-            ("float-untyped_function", "7.0", "3.5", Float(), "2", True, FLOAT_CAST_SKIPPED),
+            ("float-typed", "7.0", "3.5", Float(), "2", False),
+            ("float-untyped_function", "7.0", "3.5", Float(), "2", True),
             ("numeric_whole_number-typed", "1", "2.00", Numeric(10, 2), "0.5", False),
             ("numeric_whole_number-untyped_function", "1", "2.00", Numeric(10, 2), "0.5", True),
             ("numeric_many_decimals-typed", MANY_DIGITS_DIVIDEND, MANY_DIGITS_DIVISOR, Numeric(22, 20), "7", False,

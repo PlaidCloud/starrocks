@@ -138,6 +138,18 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             self.assert_compile(type_, expected)
 
     @testing.combinations(
+        (sa.Float(), "CAST(t.x AS FLOAT)"),
+        (FLOAT(), "CAST(t.x AS FLOAT)"),
+        (DOUBLE(), "CAST(t.x AS DOUBLE)"),
+        argnames="target_type, expected",
+        id_="ra",
+    )
+    def test_cast_to_floating_point_is_not_dropped(self, target_type, expected):
+        """MySQL's version gate on CAST to FLOAT fails for StarRocks' 4.x version, silently dropping the CAST."""
+        x = sa.column("x", sa.Integer, _selectable=sa.table("t"))
+        self.assert_compile(sa.cast(x, target_type), expected)
+
+    @testing.combinations(
         ("not_null", INTEGER(), {"nullable": False}, "col INTEGER NOT NULL"),
         ("comment", VARCHAR(100), {"comment": "A test column"}, "col VARCHAR(100) COMMENT 'A test column'"),
         ("default", INTEGER(), {"server_default": "0"}, "col INTEGER DEFAULT '0'"),

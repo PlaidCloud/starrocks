@@ -1491,6 +1491,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
     # and tests are needed before being enabled
     supports_statement_cache = True
     supports_native_enum = False
+    _support_float_cast = True
     supports_empty_insert = False
 
     ischema_names = ischema_names
