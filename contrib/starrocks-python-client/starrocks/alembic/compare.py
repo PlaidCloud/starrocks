@@ -14,6 +14,7 @@
 
 from functools import wraps
 import logging
+import re
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 import uuid
 import warnings
@@ -1216,15 +1217,16 @@ def _split_refresh_moment(refresh: Optional[str]) -> Tuple[Optional[str], Option
 def _normalize_refresh_scheme(refresh: Optional[str]) -> Optional[str]:
     """Normalize the scheme of a refresh string for comparison, leaving out its IMMEDIATE or DEFERRED moment.
 
-    SHOW CREATE spells a periodic refresh SCHEDULE since 4.1.1 where the model says ASYNC, and quotes START("...")
-    with double quotes where the model uses single quotes.
+    SHOW CREATE spells a periodic refresh SCHEDULE since 4.1.1 where the model says ASYNC, quotes START("...")
+    with double quotes where the model uses single quotes, and writes ``EVERY(`` where the model may write
+    ``EVERY (``, so whitespace around parentheses does not count.
     """
     _, scheme = _split_refresh_moment(refresh)
     if scheme is None:
         return None
     if scheme.startswith("SCHEDULE"):
         scheme = "ASYNC" + scheme[len("SCHEDULE"):]
-    return scheme.replace('"', "'")
+    return re.sub(r"\s*([()])\s*", r"\1", " ".join(scheme.split())).replace('"', "'")
 
 
 def _compare_mv_refresh_moment(
@@ -2448,8 +2450,9 @@ def server_defaults_match(
     ``text("uuid()")``, and StarRocks reports a function default wrapped in parentheses, ``(uuid())``. So the
     metadata default is read from the column itself, and both sides are compared as canonical defaults: a
     literal by its decoded value, a function or keyword case insensitively and without wrapping parentheses.
+    An empty string is a default like any other.
     """
-    if not rendered_metadata_default or not rendered_inspector_default:
+    if rendered_metadata_default is None or rendered_inspector_default is None:
         return False
     metadata_sql = _metadata_default_sql(dialect, metadata_column, rendered_metadata_default)
     return utils.canonical_server_default(metadata_sql) == utils.canonical_server_default(rendered_inspector_default)

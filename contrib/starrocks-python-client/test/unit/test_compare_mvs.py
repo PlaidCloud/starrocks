@@ -97,6 +97,20 @@ class CompareMaterializedViewTest(fixtures.TestBase):
         assert op.properties is None
         assert op.existing_properties is None
 
+    def test_spacing_around_parentheses_is_no_refresh_change(self):
+        """SHOW CREATE writes EVERY(INTERVAL ...), the model may write EVERY (INTERVAL ...)."""
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv(
+            "my_mv", definition="SELECT 1", refresh="DEFERRED ASYNC EVERY(INTERVAL 2 HOUR)"
+        )
+        meta_mv = MaterializedView(
+            "my_mv", MetaData(), definition="SELECT 1", starrocks_refresh="DEFERRED ASYNC EVERY ( INTERVAL 2 HOUR )"
+        )
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        eq_(upgrade_ops.ops, [])
+
     def test_an_omitted_refresh_is_left_alone(self):
         """An MV with a distribution may omit its refresh; StarRocks then reports MANUAL, which is no change."""
         upgrade_ops = ops.UpgradeOps([])

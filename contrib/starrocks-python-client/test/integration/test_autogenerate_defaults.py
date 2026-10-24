@@ -104,11 +104,12 @@ class ServerDefaultComparisonTest(_DefaultsTestBase):
         ("backslash", "x\\y"),
         ("double_quote", 'say "hi"'),
         ("number_like", "5"),
+        ("empty", ""),
         argnames="value",
         id_="ia",
     )
     @testing.requires.sqlalchemy_2
-    def test_literal_default_round_trips(self, connection, metadata, value):
+    def test_literal_default_round_trips(self, connection, metadata, value, caplog):
         self._table(metadata, "default_literal", label=value)
         metadata.create_all(connection)
 
@@ -116,6 +117,7 @@ class ServerDefaultComparisonTest(_DefaultsTestBase):
 
         assert unquote_sql_string_literal(reflected.c.label.server_default.arg.text) == value
         assert self._diff_ops(connection, metadata, "default_literal") == []
+        assert "Detected DEFAULT change" not in caplog.text
 
     @testing.requires.sqlalchemy_2
     def test_changed_literal_default_is_still_a_difference(self, connection, metadata, caplog):
