@@ -20,7 +20,7 @@ from sqlalchemy.testing import fixtures
 from starrocks.common.defaults import ReflectionViewDefaults
 from starrocks.common.types import ViewSecurityType
 from starrocks.engine.interfaces import ReflectedViewState
-from starrocks.reflection import StarRocksTableDefinitionParser
+from starrocks.reflection import StarRocksTableDefinitionParser, column_default_kinds
 
 
 class ReflectionViewDefaultsTest(fixtures.TestBase):
@@ -79,3 +79,38 @@ class ColumnDefaultValueRendererTest(fixtures.TestBase):
     )
     def test_rendered_default(self, column_type, default, expected):
         assert self._rendered(column_type, default) == expected
+
+    @testing.combinations(
+        ("padded_literal", "  padded  ", "literal", "'  padded  '"),
+        ("null_word_literal", "NULL", "literal", "'NULL'"),
+        ("call_like_literal", "uuid()", "literal", "'uuid()'"),
+        ("expression", "uuid()", "expression", "(uuid())"),
+        ("keyword", "CURRENT_TIMESTAMP", "keyword", "CURRENT_TIMESTAMP"),
+        ("no_default_clause", "x", "none", None),
+        id_="iaaa",
+        argnames="default, kind, expected",
+    )
+    def test_spelling_from_show_create_table_decides(self, default, kind, expected):
+        """information_schema reports these alike; SHOW CREATE TABLE's spelling tells them apart."""
+        column = SimpleNamespace(COLUMN_TYPE="varchar(40)", COLUMN_DEFAULT=default)
+        assert StarRocksTableDefinitionParser._ColumnDefaultValueRenderer().build(column, kind) == expected
+
+
+class ColumnDefaultKindsTest(fixtures.TestBase):
+    def test_kinds_read_from_show_create_table(self):
+        ddl = (
+            "CREATE TABLE `t` (\n"
+            '  `id` int(11) NULL COMMENT "",\n'
+            '  `c_lit` varchar(20) NULL DEFAULT "uuid()" COMMENT "has DEFAULT (x) inside",\n'
+            '  `c_fn` varchar(40) NULL DEFAULT (uuid()) COMMENT "",\n'
+            '  `d_ts` datetime NULL DEFAULT CURRENT_TIMESTAMP COMMENT "",\n'
+            '  `odd``name` int(11) NULL COMMENT " DEFAULT \\"x\\""\n'
+            ") ENGINE=OLAP\nDUPLICATE KEY(`id`)"
+        )
+        assert column_default_kinds(ddl) == {
+            "id": "none",
+            "c_lit": "literal",
+            "c_fn": "expression",
+            "d_ts": "keyword",
+            "odd`name": "none",
+        }

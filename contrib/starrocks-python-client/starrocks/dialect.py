@@ -2503,6 +2503,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
         full_name = self._get_quote_full_table_name(table_name, schema=schema)
         show_create_table = self._show_create_table(connection, None, charset, full_name)
         column_autoinc = self._get_autoinc_from_show_create_table(show_create_table)
+        column_default_kinds = _reflection.column_default_kinds(show_create_table)
 
         # Get aggregate info from `SHOW FULL COLUMNS`
         full_column_rows: List[Row] = (
@@ -2529,6 +2530,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
             columns=column_rows,
             column_2_agg_type=column_2_agg_type,
             column_autoinc=column_autoinc,
+            column_default_kinds=column_default_kinds,
             charset=charset,
             secondary_indexes=parser.parse_secondary_indexes(show_create_table),
         )

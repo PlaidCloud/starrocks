@@ -105,6 +105,9 @@ class ServerDefaultComparisonTest(_DefaultsTestBase):
         ("double_quote", 'say "hi"'),
         ("number_like", "5"),
         ("empty", ""),
+        ("padded", "  padded  "),
+        ("null_word", "NULL"),
+        ("call_like", "uuid()"),
         argnames="value",
         id_="ia",
     )
