@@ -55,9 +55,10 @@ class BIGINT(mysql_types.BIGINT):
 class LARGEINT(sqltypes.Integer):
     __visit_name__ = "LARGEINT"
 
-    def result_processor(self, dialect: Dialect, coltype: object):
-        # The server sends LARGEINT as text.
-        def process(value):
+    def result_processor(self, dialect: Dialect, coltype: object) -> Callable[[Any], Optional[int]]:
+        """Read a LARGEINT, which the server sends as text, as an ``int``."""
+
+        def process(value: Any) -> Optional[int]:
             if value is None or isinstance(value, int):
                 return value
             if isinstance(value, (bytes, bytearray)):
@@ -115,10 +116,10 @@ class DATETIME(mysql_types.DATETIME):
 
     _reg = re.compile(r"(\d+)-(\d+)-(\d+)[ T](\d+):(\d+):(\d+)(?:\.(\d{1,6}))?$")
 
-    def bind_processor(self, dialect: Dialect):
-        # DATETIME has no time zone and the driver drops a bound value's UTC
-        # offset, so reject an aware value instead of storing it as wall time.
-        def process(value):
+    def bind_processor(self, dialect: Dialect) -> Callable[[Any], Any]:
+        """Refuse an aware datetime: DATETIME has no time zone, and the driver would drop its UTC offset."""
+
+        def process(value: Any) -> Any:
             if isinstance(value, datetime) and value.utcoffset() is not None:
                 raise ValueError(
                     "StarRocks DATETIME has no time zone; convert %r to a naive "
@@ -137,8 +138,10 @@ class DATETIME(mysql_types.DATETIME):
 
         return process
 
-    def result_processor(self, dialect: Dialect, coltype: object):
-        def process(value):
+    def result_processor(self, dialect: Dialect, coltype: object) -> Callable[[Any], Any]:
+        """Read DATETIME text as a ``datetime``; a fraction such as ``.5`` is 500000 microseconds, not 5."""
+
+        def process(value: Any) -> Any:
             if isinstance(value, (bytes, bytearray)):
                 value = value.decode("ascii")
             if isinstance(value, str):
@@ -148,7 +151,6 @@ class DATETIME(mysql_types.DATETIME):
                         "could not parse %r as a datetime value" % (value,)
                     )
                 *parts, fraction = m.groups()
-                # ".5" is 500000 microseconds, not 5.
                 return datetime(*(int(x) for x in parts), int((fraction or "").ljust(6, "0")))
             else:
                 return value
@@ -438,9 +440,8 @@ class STRUCT(StructuredType):
         )
         return f"STRUCT({fields})"
 
-    def adapt(self, cls, **kw):
-        # The default constructor copy cannot see the fields (they are passed
-        # positionally), so a copied or dialect-adapted STRUCT had none.
+    def adapt(self, cls: Type[Any], **kw: Any) -> Any:
+        """Copy the STRUCT with its fields, which the default constructor copy misses as they are positional."""
         if isclass(cls) and issubclass(cls, STRUCT):
             return cls(*self.field_tuples)
         return super().adapt(cls, **kw)

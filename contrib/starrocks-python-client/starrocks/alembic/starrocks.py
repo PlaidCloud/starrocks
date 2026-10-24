@@ -35,22 +35,23 @@ from starrocks.sql.ddl import AlterTableColumns, AlterTableDistribution, AlterTa
 
 logger = logging.getLogger(__name__)
 
-# DDL constructs that submit an asynchronous StarRocks column schema-change job.
-# StarRocks allows only one in-flight schema-change job per table, so when the
-# wait feature is enabled we poll for a terminal state after each of these.
-# A property set may start one too (bloom_filter_columns does), and most start none.
-# So does a sort key change, ORDER BY: on 4.1.6 it is listed by SHOW ALTER TABLE COLUMN.
 _COLUMN_JOB_CONSTRUCTS = (
     AlterTableColumns,
     AlterTableOrder,
     AlterTableProperties,
     alembic_base.AddColumn,
     alembic_base.DropColumn,
-    alembic_base.AlterColumn,  # covers Column{Nullable,Type,Default,Comment} + MySQL modify/change
+    alembic_base.AlterColumn,
 )
+"""DDL that can start a column schema-change job, listed by SHOW ALTER TABLE COLUMN.
 
-# Changing the distribution submits an OPTIMIZE job, which SHOW ALTER TABLE COLUMN does not list.
+StarRocks runs one schema-change job per table at a time, so with the wait on, the impl polls after each of these
+for the job to end. A sort key change (ORDER BY) starts such a job, a property set may (bloom_filter_columns does),
+and ``AlterColumn`` covers Alembic's nullable, type, default and comment changes and MySQL's MODIFY and CHANGE.
+"""
+
 _OPTIMIZE_JOB_CONSTRUCTS = (AlterTableDistribution,)
+"""DDL that starts an OPTIMIZE job, which SHOW ALTER TABLE COLUMN does not list: a distribution change."""
 
 _SCHEMA_CHANGE_CONSTRUCTS = _COLUMN_JOB_CONSTRUCTS + _OPTIMIZE_JOB_CONSTRUCTS
 
@@ -116,7 +117,7 @@ class StarRocksImpl(MySQLImpl):
         StarRocks runs schema changes asynchronously and rejects a new
         job while a prior one on the same table is still running. When the user
         opts in via ``context.configure(starrocks_wait_for_schema_change=True)``,
-        we poll ``SHOW ALTER TABLE COLUMN`` (or ``OPTIMIZE`` after a distribution or sort key change)
+        we poll ``SHOW ALTER TABLE COLUMN`` (or ``OPTIMIZE`` after a distribution change)
         after each such statement until the job it started reaches a terminal state, keeping the
         migration in lock-step with the cluster.
 

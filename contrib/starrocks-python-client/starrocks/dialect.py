@@ -274,11 +274,11 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
     def visit_STRING(self, type_, **kw):
         return "STRING"
 
-    def visit_DATETIME(self, type_, **kw):
+    def visit_DATETIME(self, type_: sqltypes.DateTime, **kw: Any) -> str:
         """StarRocks DATETIME has no precision argument; ``DATETIME(6)`` is a syntax error."""
         return "DATETIME"
 
-    def visit_TIMESTAMP(self, type_, **kw):
+    def visit_TIMESTAMP(self, type_: sqltypes.TIMESTAMP, **kw: Any) -> str:
         """TIMESTAMP is not a StarRocks type keyword; DATETIME is the equivalent."""
         return "DATETIME"
 
@@ -297,7 +297,7 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
         """StarRocks has no NATIONAL CHAR; its CHAR is UTF-8 already, as NVARCHAR's VARCHAR is."""
         return self.visit_CHAR(type_, **kw)
 
-    def visit_TEXT(self, type_, **kw):
+    def visit_TEXT(self, type_: sqltypes.Text, **kw: Any) -> str:
         """StarRocks stores TEXT as varchar(65533), which is what STRING means."""
         return "STRING"
 
@@ -353,7 +353,7 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
     def visit_BITMAP(self, type_, **kw):
         return "BITMAP"
 
-    def visit_PERCENTILE(self, type_, **kw):
+    def visit_PERCENTILE(self, type_: PERCENTILE, **kw: Any) -> str:
         return "PERCENTILE"
 
     def visit_VARIANT(self, type_, **kw):
@@ -1690,9 +1690,8 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         else:
             order_by = alter.order_by
 
-        # notice users about such a time consuming operation
         from_db_clause = f"FROM {alter.schema} " if alter.schema else ""
-        show_clause = f"SHOW ALTER TABLE OPTIMIZE {from_db_clause}WHERE TableName='{alter.table_name}'"
+        show_clause = f"SHOW ALTER TABLE COLUMN {from_db_clause}WHERE TableName='{alter.table_name}'"
         logger.info(f"You probably should use ({show_clause}) to check the execution status "
                     f"of altering ORDER before doing another ALTER TABLE statement.")
 

@@ -607,11 +607,12 @@ class StarRocksTableDefinitionParser(object):
         """
         Get distribution from information_schema.tables_config table.
         It returns ReflectedDistributionInfo representation of distribution option.
+
+        Range distribution has no bucketing key or bucket count, and StarRocks reports a placeholder count of 1
+        (RangeDistributionInfo.getBucketNum), so only the method is kept.
         """
         distribute_type = table_config.get(TableConfigKey.DISTRIBUTE_TYPE)
         if str(distribute_type or '').strip().upper() == TableDistribution.RANGE:
-            # Range distribution has no bucketing key or bucket count: StarRocks reports a
-            # placeholder of 1 (RangeDistributionInfo.getBucketNum), so keep just the method.
             return ReflectedDistributionInfo(
                 type=TableDistribution.RANGE,
                 columns=None,

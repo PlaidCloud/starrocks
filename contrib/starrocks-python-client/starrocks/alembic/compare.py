@@ -242,7 +242,9 @@ except ImportError:
     _LAST_PRIORITY = {}
 
 
-def comparators_dispatch_for_starrocks(dispatch_type: str, run_last: bool = False):
+def comparators_dispatch_for_starrocks(
+    dispatch_type: str, run_last: bool = False
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """
     StarRocks-specific dispatch decorator.
 
@@ -2151,7 +2153,6 @@ def _compare_table_properties_impl(
             continue
 
         if meta_value is None:
-            # Unmanaged property: leave the database value alone. See the docstring.
             if default_value is None:
                 logger.warning(
                     f"{object_label} '{full_name}': Property '{key}' exists in the database with value '{conn_value}' "
@@ -2169,8 +2170,6 @@ def _compare_table_properties_impl(
 
         unreported_reason = default_cls.unreported_property_reason(key)
         if conn_value is None and unreported_reason:
-            # The database does not report it, so the table cannot hold it: an ALTER would
-            # fail or repeat on every run.
             logger.warning(
                 f"{object_label} '{full_name}': Property '{key}' is set to '{meta_value}' in metadata "
                 f"but the database does not report it ({unreported_reason}). It cannot be compared. "

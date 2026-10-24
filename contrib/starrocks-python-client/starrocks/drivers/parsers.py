@@ -53,6 +53,7 @@ class DataTypeTransformer(Transformer):
 
     @v_args(inline=True)
     def simple_type(self, type_name: str, args: List[int] = None, unsigned: Token = None) -> sqltypes.TypeEngine:
+        """Build a scalar type from its name and arguments; a nested ``largeint(40)`` has a display width, not an argument."""
         type_name_lower = type_name.lower()
         # logger.debug(f"type_name_lower: {type_name_lower}, args: {args}, unsigned: {unsigned}")
         # There may be a bug of parsing the type and unsigned keyword together
@@ -67,8 +68,6 @@ class DataTypeTransformer(Transformer):
         if type_name_lower == "tinyint" and args and len(args) == 1 and args[0] == 1:
             return self.type_map["boolean"]
 
-        # A nested LARGEINT is rendered as ``largeint(40)``: a display width,
-        # not a constructor argument.
         if type_name_lower == "largeint":
             args = None
 
