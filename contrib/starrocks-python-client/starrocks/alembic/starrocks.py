@@ -15,11 +15,11 @@
 from enum import Enum
 import logging
 import time
-from typing import Any, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Collection, Mapping, Optional, Sequence, Tuple, Union
 
 from alembic.ddl import base as alembic_base
 from alembic.ddl.mysql import MySQLImpl
-from sqlalchemy import Column, MetaData, Table, text, util
+from sqlalchemy import Column, ForeignKeyConstraint, Index, MetaData, Table, UniqueConstraint, text, util
 from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.sql import Executable
 
@@ -211,6 +211,38 @@ class StarRocksImpl(MySQLImpl):
                 table_name, raw_state,
             )
             time.sleep(poll_interval)
+
+    def correct_for_autogen_constraints(
+        self,
+        conn_unique_constraints: Collection[UniqueConstraint],
+        conn_indexes: Collection[Index],
+        metadata_unique_constraints: Collection[UniqueConstraint],
+        metadata_indexes: Collection[Index],
+    ) -> None:
+        """Leave unique constraints out of the comparison: StarRocks tables cannot hold them.
+
+        CREATE TABLE drops a model's UniqueConstraint and reflection reports none, so comparing them proposed the same
+        ``create_unique_constraint`` on every run, which StarRocks then rejects. Uniqueness comes from a PRIMARY KEY or
+        UNIQUE KEY table instead. MySQL's correction for its implicit foreign key indexes does not apply.
+        """
+        self._empty(conn_unique_constraints, metadata_unique_constraints)
+
+    def correct_for_autogen_foreignkeys(
+        self, conn_fks: Collection[ForeignKeyConstraint], metadata_fks: Collection[ForeignKeyConstraint]
+    ) -> None:
+        """Leave foreign keys out of the comparison: StarRocks tables cannot hold them.
+
+        As with unique constraints, a model's ForeignKey never reaches the table, so comparing them proposed the same
+        ``create_foreign_key`` on every run.
+        """
+        self._empty(conn_fks, metadata_fks)
+
+    @staticmethod
+    def _empty(*collections: Collection[Any]) -> None:
+        """Empty each collection; for a table that does not exist yet Alembic passes an already empty frozenset."""
+        for collection in collections:
+            if isinstance(collection, set):
+                collection.clear()
 
     def compare_type(self, inspector_column: Column[Any], metadata_column: Column[Any]) -> bool:
         """
