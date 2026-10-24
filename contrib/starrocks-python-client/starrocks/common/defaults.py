@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 try:
     from sqlalchemy.engine.reflection import ReflectionDefaults
@@ -103,6 +103,7 @@ class ReflectionTableDefaults(ReflectionDefaults):
         'compaction_strategy',
         'compression',
         'persistent_index_type',
+        'query_rewrite_consistency',
         'storage_format',
         'storage_medium',
         'storage_type',
@@ -256,16 +257,24 @@ class ReflectionMVDefaults(ReflectionViewDefaults):
     # SHOW CREATE MATERIALIZED VIEW also prints effective values that tables_config leaves out
     # on purpose (e.g. replicated_storage), and those have no entry in _DEFAULT_PROPERTIES, so
     # merging them in would warn about an unmanaged database value on every autogenerate.
+    #
+    # StarRocks 3.3.22, 3.5.21 and 4.1.6 all leave out these, and every session.* property.
     _DDL_ONLY_PROPERTY_KEYS: frozenset = frozenset({
         'colocate_with',
+        'enable_query_rewrite',
+        'force_external_table_query_rewrite',
+        'query_rewrite_consistency',
     })
+    _DDL_ONLY_PROPERTY_PREFIXES: Tuple[str, ...] = ('session.',)
 
     @classmethod
-    def ddl_only_property_keys(cls) -> frozenset:
-        """Property names (lowercase) to take from the MV ddl instead of tables_config.
+    def is_ddl_only_property(cls, key: str) -> bool:
+        """Whether to take the MV property from the MV's DDL, because tables_config leaves it out.
+
         See ``_DDL_ONLY_PROPERTY_KEYS``.
         """
-        return cls._DDL_ONLY_PROPERTY_KEYS
+        key = key.lower()
+        return key in cls._DDL_ONLY_PROPERTY_KEYS or key.startswith(cls._DDL_ONLY_PROPERTY_PREFIXES)
 
     @classmethod
     def apply(cls, *, name: str, definition: str, comment: Union[str, None] = None, security: Union[str, None] = None) -> ReflectedMVState:

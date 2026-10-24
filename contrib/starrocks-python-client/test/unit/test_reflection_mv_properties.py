@@ -77,6 +77,18 @@ class ReflectionMVPropertiesTest(fixtures.TestBase):
         make autogenerate warn about unmanaged database values on every run."""
         assert prop not in _ddl_properties()
 
+    @testing.combinations(
+        ("session.query_timeout", "900"),
+        ("session.enable_spill", "true"),
+        ("query_rewrite_consistency", "loose"),
+        ("enable_query_rewrite", "false"),
+        ("force_external_table_query_rewrite", "true"),
+        argnames="prop,value",
+    )
+    def test_properties_tables_config_leaves_out_are_taken_from_ddl(self, prop, value):
+        ddl = MV_DDL.replace('"colocate_with" = "cg_test"', f'"{prop}" = "{value}"')
+        assert _ddl_properties(ddl) == {prop: value}
+
     def test_mv_without_colocation_has_no_ddl_properties(self):
         ddl = MV_DDL.replace(',\n"colocate_with" = "cg_test"', "")
         assert _ddl_properties(ddl) == {}

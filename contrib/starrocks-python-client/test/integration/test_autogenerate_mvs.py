@@ -17,7 +17,7 @@ import logging
 from alembic.autogenerate import api
 from alembic.operations import Operations
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import MetaData, exc, text
+from sqlalchemy import MetaData, exc, testing, text
 from sqlalchemy.testing import config, expect_raises_message, fixtures
 
 from starrocks.alembic.compare import combine_include_object
@@ -201,6 +201,36 @@ class AlterMaterializedViewTest(_MaterializedViewAutogenerateBase):
             assert isinstance(alter_op_properties, AlterMaterializedViewOp)
             assert alter_op_refresh.refresh == "MANUAL"
             assert alter_op_properties.properties == {"replication_num": "2"}
+        finally:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+
+    @testing.combinations(
+        ("session_variable", "session.query_timeout", "500", "1000"),
+        ("rewrite_consistency", "query_rewrite_consistency", "loose", "checked"),
+        argnames="key,in_database,in_model",
+        id_="iaaa",
+    )
+    def test_a_property_tables_config_leaves_out_is_compared(self, connection, key, in_database, in_model) -> None:
+        mv_name = "test_alter_mv_ddl_only_property"
+        connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+        connection.execute(text(
+            f"CREATE MATERIALIZED VIEW {mv_name} REFRESH MANUAL PROPERTIES('{key}' = '{in_database}') "
+            "AS SELECT val FROM t_autogen"
+        ))
+        try:
+            def migration_for(value):
+                target_metadata = MetaData()
+                MaterializedView(
+                    mv_name, target_metadata, definition="SELECT val FROM t_autogen", starrocks_refresh="MANUAL",
+                    starrocks_properties={key: value},
+                )
+                return api.produce_migrations(create_migration_context(connection, target_metadata), target_metadata)
+
+            assert migration_for(in_database).upgrade_ops.ops == []
+            changed = migration_for(in_model)
+            assert [op.properties for op in changed.upgrade_ops.ops] == [{key: in_model}]
+            restored = [{name: value.lower() for name, value in op.properties.items()} for op in changed.downgrade_ops.ops]
+            assert restored == [{key: in_database}]
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 

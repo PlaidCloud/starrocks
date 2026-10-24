@@ -994,7 +994,7 @@ class StarRocksTableDefinitionParser(object):
             ddl_properties = self._parse_properties(properties_match.group(1))
             ddl_only_properties = {
                 key: value for key, value in ddl_properties.items()
-                if key.lower() in ReflectionMVDefaults.ddl_only_property_keys()
+                if ReflectionMVDefaults.is_ddl_only_property(key)
             }
             if ddl_only_properties:
                 logger.debug("mv: %r, ddl-only properties: %s", mv_name, ddl_only_properties)
