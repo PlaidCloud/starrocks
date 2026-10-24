@@ -18,11 +18,14 @@ The dialect puts each materialized view clause and ``AS`` on lines of their own;
 breaks, so each expected string literal below is one line of the generated DDL.
 """
 
+from alembic import op
+from alembic.testing.fixtures import op_fixture
 from sqlalchemy import Column, MetaData, Table, exc, select, testing
 from sqlalchemy.schema import DropTable
 from sqlalchemy.testing import expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
+import starrocks.alembic  # noqa: F401
 from starrocks.datatype import INTEGER, VARCHAR
 from starrocks.dialect import StarRocksDialect
 from starrocks.sql.ddl import AlterMaterializedView, CreateMaterializedView, DropMaterializedView
@@ -229,4 +232,18 @@ class AlterMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             AlterMaterializedView("my_mv", schema="test_db", refresh="MANUAL", properties={"replication_num": "3"}),
             "ALTER MATERIALIZED VIEW test_db.my_mv REFRESH MANUAL;"
             'ALTER MATERIALIZED VIEW test_db.my_mv SET ("replication_num" = "3")',
+        )
+
+
+class AlterMaterializedViewOperationTest(fixtures.TestBase):
+    """``op.alter_materialized_view`` alters the refresh and the properties in statements of their own."""
+
+    __requires__ = ("sqlalchemy_2",)
+
+    def test_refresh_and_properties_are_separate_statements(self):
+        context = op_fixture("starrocks")
+        op.alter_materialized_view("mv", refresh="MANUAL", properties={"session.query_timeout": "900"})
+        context.assert_(
+            "ALTER MATERIALIZED VIEW mv REFRESH MANUAL",
+            'ALTER MATERIALIZED VIEW mv SET ("session.query_timeout" = "900")',
         )

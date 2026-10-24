@@ -312,6 +312,27 @@ class TransactionTest(fixtures.TablesTest):
         eq_(self._ids("txn_keyed"), [1])
 
     @TRANSACTIONS_NEED_3_5
+    def test_a_begin_starrocks_refuses_opens_no_transaction(self):
+        """The dialect notes a text BEGIN only once StarRocks has accepted it."""
+        with config.db.connect() as conn:
+            with expect_raises(exc.DBAPIError):
+                conn.exec_driver_sql("START TRANSACTION READ ONLY")
+            assert not conn.connection.info.get("starrocks_transaction_open")
+
+    @TRANSACTIONS_NEED_3_5
+    def test_a_delete_on_a_view_is_left_to_starrocks(self):
+        """A view has no table model to refuse a DELETE for, so StarRocks' own error comes back."""
+        with config.db.begin() as conn:
+            conn.exec_driver_sql("CREATE VIEW txn_logged_view AS SELECT id, v FROM txn_logged")
+        try:
+            with expect_raises(exc.DBAPIError):
+                with self._read_committed_engine().begin() as conn:
+                    conn.exec_driver_sql("DELETE FROM txn_logged_view WHERE id = 2")
+        finally:
+            with config.db.begin() as conn:
+                conn.exec_driver_sql("DROP VIEW IF EXISTS txn_logged_view")
+
+    @TRANSACTIONS_NEED_3_5
     def test_a_delete_without_where_is_refused(self):
         self._insert_logged_rows()
         with expect_raises_message(exc.InvalidRequestError, "compiles to TRUNCATE TABLE"):
