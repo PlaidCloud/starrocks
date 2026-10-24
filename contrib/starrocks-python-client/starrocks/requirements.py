@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any, Dict
+
 from alembic.testing.requirements import SuiteRequirements as AlembicSuiteRequirements
 import sqlalchemy
 from sqlalchemy.testing import exclusions
@@ -346,6 +348,22 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
     @property
     def datetime_literals(self) -> exclusions.compound:
         return exclusions.open()
+
+    @property
+    def isolation_level(self) -> exclusions.compound:
+        """``AUTOCOMMIT``, the default, and ``READ COMMITTED``, which runs DML in StarRocks transactions."""
+        return exclusions.open()
+
+    @property
+    def autocommit(self) -> exclusions.compound:
+        return exclusions.open()
+
+    def get_isolation_levels(self, config: Any) -> Dict[str, Any]:
+        with config.db.connect() as conn:
+            return {
+                "default": conn.dialect.default_isolation_level,
+                "supported": list(conn.dialect.get_isolation_level_values(None)),
+            }
 
     @property
     def computed_columns(self) -> exclusions.compound:

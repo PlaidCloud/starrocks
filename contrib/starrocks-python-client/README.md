@@ -79,6 +79,8 @@ starrocks+asyncmy://<User>:<Password>@<Host>:<Port>/[<Catalog>.]<Database>
 > Note: The `Catalog` can be omitted and is managed by StarRocks.
 > The default is `default_catalog`.
 
+Connections autocommit by default, as StarRocks does. Pass `isolation_level="READ COMMITTED"` to `create_engine` to run INSERT, UPDATE and DELETE in StarRocks transactions; see [Transactions](./docs/usage_guide/sqlalchemy.md#transactions).
+
 ### Example: Basic Operations
 
 Connect to your database and do a query.

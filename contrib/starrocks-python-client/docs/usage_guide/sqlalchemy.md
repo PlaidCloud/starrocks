@@ -18,6 +18,48 @@ with engine.connect() as connection:
     print(rows)
 ```
 
+## Transactions
+
+StarRocks commits each statement as it runs, unless a transaction has been opened with `BEGIN WORK`. StarRocks has transactions from version 3.5. The dialect offers two isolation levels:
+
+- **`AUTOCOMMIT`**, the default. Every statement is committed when it runs. `commit()` and `rollback()` send nothing to StarRocks, so a rollback undoes nothing.
+- **`READ COMMITTED`**. The first INSERT, UPDATE or DELETE of a SQLAlchemy transaction opens a StarRocks transaction, and `commit()` or `rollback()` ends it. A transaction that only reads opens none.
+
+Set the level on the engine, or on one connection:
+
+```python
+engine = create_engine("starrocks://root@localhost:9030/mydatabase", isolation_level="READ COMMITTED")
+
+with engine.begin() as connection:
+    connection.execute(orders.insert(), {"id": 1, "total": 10})
+    connection.execute(order_lines.insert(), {"order_id": 1, "item": "pen"})
+    # both inserts commit together, or neither does
+
+with engine.connect() as connection:
+    connection.execution_options(isolation_level="READ COMMITTED")
+    with connection.begin():
+        ...
+```
+
+Other isolation levels, such as `SERIALIZABLE`, raise an `ArgumentError`. Before StarRocks 3.5, `BEGIN WORK` is accepted and does nothing, so the dialect raises an `InvalidRequestError` at the first INSERT, UPDATE or DELETE on a `READ COMMITTED` connection.
+
+StarRocks restricts what a transaction can do, and refuses the statement when the transaction oversteps:
+
+- The tables a transaction changes must all be in one database.
+- A transaction can't read a table it has changed, so an ORM `Session` fails when a query reads a table its flush has written. Use `AUTOCOMMIT` with the ORM, or commit before reading back.
+- On shared-nothing clusters, a transaction can write each table once. A large `executemany` that the driver splits into several INSERT statements counts as several writes.
+- UPDATE and DELETE inside a transaction are refused by StarRocks 3.5. StarRocks documents them for shared-data clusters from 4.0, and 4.1 accepts them on shared-nothing clusters as well.
+- `INSERT OVERWRITE` can't run inside a transaction.
+
+The dialect adds two rules of its own:
+
+- **DDL first commits the open transaction**, as MySQL does, because StarRocks refuses DDL inside one. What ran before the DDL is committed, and the next INSERT, UPDATE or DELETE opens a new transaction.
+- **A DELETE on a table without a primary key raises an `InvalidRequestError`.** StarRocks applies such a DELETE at once, outside the transaction, and ROLLBACK doesn't undo it ([StarRocks issue 81471](https://github.com/StarRocks/starrocks/issues/81471)). Run those deletes on an `AUTOCOMMIT` connection.
+
+`BEGIN WORK`, `COMMIT` and `ROLLBACK` sent as text are tracked too, so a transaction opened by hand on an `AUTOCOMMIT` connection is ended by the connection's `commit()` or `rollback()`, or when the connection goes back to the pool.
+
+With Alembic, migrations behave as before under `AUTOCOMMIT`. Under `READ COMMITTED`, a migration's data changes, such as `op.bulk_insert`, are transactional until the next DDL operation commits them.
+
 ## Defining Schema: Tables, Views, and Materialized Views
 
 You can define your StarRocks schema using SQLAlchemy's Core or ORM approaches.
