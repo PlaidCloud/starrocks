@@ -1264,15 +1264,26 @@ def _normalize_refresh_scheme(refresh: Optional[str]) -> Optional[str]:
     """Normalize the scheme of a refresh string for comparison, leaving out its IMMEDIATE or DEFERRED moment.
 
     SHOW CREATE spells a periodic refresh SCHEDULE since 4.1.1 where the model says ASYNC, quotes START("...")
-    with double quotes where the model uses single quotes, and writes ``EVERY(`` where the model may write
-    ``EVERY (``, so whitespace around parentheses does not count.
+    with double quotes where the model uses single quotes, writes ``EVERY(`` where the model may write
+    ``EVERY (``, so whitespace around parentheses does not count, and gives a START time in full, as
+    ``2026-10-25 00:00:00`` for a model's ``2026-10-25``.
     """
     _, scheme = _split_refresh_moment(refresh)
     if scheme is None:
         return None
     if scheme.startswith("SCHEDULE"):
         scheme = "ASYNC" + scheme[len("SCHEDULE"):]
-    return re.sub(r"\s*([()])\s*", r"\1", " ".join(scheme.split())).replace('"', "'")
+    scheme = re.sub(r"\s*([()])\s*", r"\1", " ".join(scheme.split())).replace('"', "'")
+    return _REFRESH_START.sub(_full_refresh_start, scheme)
+
+
+_REFRESH_START: re.Pattern[str] = re.compile(r"START\('(\d{4}-\d{2}-\d{2})(?: (\d{2}:\d{2})(:\d{2})?)?'\)")
+
+
+def _full_refresh_start(match: re.Match[str]) -> str:
+    """Write a refresh START time as StarRocks keeps it: a date gets midnight, and a time without seconds ``:00``."""
+    date, hours_and_minutes, seconds = match.groups()
+    return f"START('{date} {hours_and_minutes or '00:00'}{seconds or ':00'}')"
 
 
 def _compare_mv_refresh_moment(

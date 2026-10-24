@@ -287,6 +287,9 @@ class CompareMaterializedViewTest(fixtures.TestBase):
         ("ASYNC EVERY(INTERVAL 1 HOUR)", "IMMEDIATE ASYNC EVERY(INTERVAL 1 HOUR)"),
         ("ASYNC EVERY(INTERVAL 1 HOUR)", "IMMEDIATE SCHEDULE EVERY(INTERVAL 1 HOUR)"),
         ("ASYNC", "IMMEDIATE ASYNC"),
+        # StarRocks keeps a START time in full: midnight for a date alone, and seconds for a time without them.
+        ('ASYNC START("2026-10-25 00:00:00") EVERY(INTERVAL 1 DAY)', "ASYNC START('2026-10-25') EVERY (INTERVAL 1 DAY)"),
+        ('ASYNC START("2026-10-25 10:30:00") EVERY(INTERVAL 1 HOUR)', "ASYNC START('2026-10-25 10:30') EVERY(INTERVAL 1 HOUR)"),
         argnames="conn_refresh, meta_refresh",
     )
     def test_no_change_mv_refresh_schedule_alias(self, conn_refresh, meta_refresh):
@@ -298,6 +301,19 @@ class CompareMaterializedViewTest(fixtures.TestBase):
         _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
 
         eq_(len(upgrade_ops.ops), 0)
+
+    def test_another_refresh_start_is_a_change(self):
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv(
+            "my_mv", definition="SELECT 1", refresh='ASYNC START("2026-10-25 00:00:00") EVERY(INTERVAL 1 DAY)'
+        )
+        meta_mv = MaterializedView(
+            "my_mv", MetaData(), definition="SELECT 1", starrocks_refresh="ASYNC START('2026-10-26') EVERY(INTERVAL 1 DAY)"
+        )
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        eq_(len(upgrade_ops.ops), 1)
 
 
     @testing.combinations(
