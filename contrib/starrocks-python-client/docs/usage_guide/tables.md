@@ -137,6 +137,7 @@ A dictionary of additional table attributes.
 
 > **Note on Future Partition Properties**: Certain properties, such as `replication_num` and `storage_medium`, can be modified to apply only to newly created partitions. When `alembic revision --autogenerate` detects changes to these specific properties, it will generate an `ALTER TABLE` statement that prefixes them with `default.` prefix (e.g., `SET ("default.replication_num" = "...")`). This ensures that the changes do not affect existing data.
 
+Indexes are reflected with their type, comment and properties, including the ones StarRocks filled in, so autogenerate creates and drops them like any other index. Dropping a column drops its index as well, so in a migration, a `drop_index` for an index that a `drop_column` earlier in the same run took with it does nothing. Index names are matched without regard to case, as StarRocks matches them. `drop_index(..., if_exists=True)` drops the index only if it exists, and any other `drop_index` of a missing index fails with StarRocks' error.
 ### Column Attributes
 
 #### Column Data Types

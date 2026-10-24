@@ -14,7 +14,9 @@
 
 """Tests for performance optimizations and default value updates."""
 
+from sqlalchemy import testing
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.assertions import eq_
 
 from starrocks.common.defaults import ReflectionTableDefaults
 from starrocks.common.utils import TableAttributeNormalizer
@@ -115,3 +117,21 @@ class DefaultValuesTest(fixtures.TestBase):
         # Test other engine -> unchanged
         result = ReflectionTableDefaults.normalize_engine("MYSQL")
         assert result == "MYSQL"
+
+
+class PropertyValueNormalizationTest(fixtures.TestBase):
+    @testing.combinations(
+        ("name, k", "k, name"),
+        ("`K`,`Name`", "k, name"),
+        ("k,name,", "k,  name"),
+        argnames="model_value,database_value",
+    )
+    def test_bloom_filter_columns_compare_in_any_order_and_case(self, model_value, database_value):
+        eq_(
+            ReflectionTableDefaults.normalize_property_value("bloom_filter_columns", model_value),
+            ReflectionTableDefaults.normalize_property_value("bloom_filter_columns", database_value),
+        )
+
+    def test_another_bloom_filter_column_is_a_change(self):
+        normalize = ReflectionTableDefaults.normalize_property_value
+        assert normalize("bloom_filter_columns", "k, name") != normalize("bloom_filter_columns", "k, other")

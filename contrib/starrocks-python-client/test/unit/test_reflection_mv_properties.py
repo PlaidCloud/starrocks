@@ -77,6 +77,34 @@ class ReflectionMVPropertiesTest(fixtures.TestBase):
         make autogenerate warn about unmanaged database values on every run."""
         assert prop not in _ddl_properties()
 
+    @testing.combinations(
+        ("session.query_timeout", "900"),
+        ("session.enable_spill", "true"),
+        ("query_rewrite_consistency", "loose"),
+        ("enable_query_rewrite", "false"),
+        ("force_external_table_query_rewrite", "true"),
+        ("partition_retention_condition", "dt >= current_date() - interval 3 month"),
+        argnames="prop,value",
+    )
+    def test_properties_tables_config_leaves_out_are_taken_from_ddl(self, prop, value):
+        ddl = MV_DDL.replace('"colocate_with" = "cg_test"', f'"{prop}" = "{value}"')
+        assert _ddl_properties(ddl) == {prop: value}
+
+    @testing.combinations(
+        ("single_quotes", "dt >= '2020-01-01'", "dt >= '2020-01-01'"),
+        ("double_quotes_as_printed", 'dt >= "2020-01-01"', 'dt >= "2020-01-01"'),
+        ("double_quotes_escaped", 'dt >= \\"2020-01-01\\"', 'dt >= "2020-01-01"'),
+        ("comma_and_quote", 'dt IN ("a", "b")', 'dt IN ("a", "b")'),
+        argnames="printed, value",
+        id_="iaa",
+    )
+    def test_a_value_holding_quotes(self, printed, value):
+        """StarRocks 4.1.6 prints a property value's ``"`` as it is, and the value ends before the next key."""
+        ddl = MV_DDL.replace(
+            '"colocate_with" = "cg_test"', f'"partition_retention_condition" = "{printed}",\n"session.x" = "1"'
+        )
+        assert _ddl_properties(ddl) == {"partition_retention_condition": value, "session.x": "1"}
+
     def test_mv_without_colocation_has_no_ddl_properties(self):
         ddl = MV_DDL.replace(',\n"colocate_with" = "cg_test"', "")
         assert _ddl_properties(ddl) == {}
