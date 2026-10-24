@@ -20,6 +20,7 @@ import json
 import math
 import warnings
 
+import sqlalchemy as sa
 from sqlalchemy import Column, Enum, MetaData, Table, TypeDecorator, insert, testing
 from sqlalchemy.testing import AssertsCompiledSQL, fixtures
 
@@ -446,6 +447,28 @@ class StructuredTypeBindProcessorTest(fixtures.TestBase):
     def test_value_of_the_wrong_shape_is_rejected(self, type_obj, value):
         with testing.expect_raises_message(ValueError, "expected"):
             _bind(type_obj, value)
+
+    @testing.combinations(
+        ("list_in_integer", datatype.ARRAY(datatype.INTEGER()), [[1, 2]]),
+        ("list_in_string", datatype.ARRAY(datatype.VARCHAR(10)), [["a"]]),
+        ("tuple_in_string", datatype.ARRAY(datatype.VARCHAR(10)), [("a",)]),
+        ("dict_in_string", datatype.ARRAY(datatype.VARCHAR(10)), [{"a": 1}]),
+        ("list_in_struct_field", datatype.STRUCT(a=datatype.INTEGER()), {"a": [1]}),
+        ("dict_in_map_value", datatype.MAP(datatype.VARCHAR(10), datatype.DATE()), {"k": {"x": 1}}),
+        id_="iaa",
+        argnames="type_obj,value",
+    )
+    def test_a_collection_in_a_scalar_element_is_refused(self, type_obj, value):
+        """A collection in a scalar element would be stored as its repr, or as NULL."""
+        with testing.expect_raises_message(TypeError, "cannot store the"):
+            _bind(type_obj, value)
+
+    def test_generic_array_dimensions_nest(self):
+        """The generic ARRAY declares an array of arrays by ``dimensions``; a copy of the adapted type keeps the depth."""
+        adapted = sa.ARRAY(sa.Integer, dimensions=3).dialect_impl(_DIALECT)
+        assert repr(adapted) == "ARRAY(ARRAY(ARRAY(Integer())))"
+        assert repr(adapted.copy()) == repr(adapted)
+        assert _bind(adapted, [[[1]], None]) == '[[["1"]], null]'
 
 
 class _Reversed(TypeDecorator):

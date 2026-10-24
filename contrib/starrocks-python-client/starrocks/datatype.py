@@ -326,8 +326,16 @@ class ARRAY(StructuredType):
     __visit_name__ = "ARRAY"
     cache_ok = True
 
-    def __init__(self, item_type: sqltypes.TypeEngine, **kwargs):
-        self.item_type = self._check_subtype(item_type)
+    def __init__(self, item_type: sqltypes.TypeEngine, dimensions: Optional[int] = None, **kwargs: Any) -> None:
+        """Hold ``item_type``, inside ``dimensions - 1`` further ARRAYs when ``dimensions`` is above one.
+
+        ``dimensions`` is how SQLAlchemy's generic ``ARRAY``, which cannot be nested, declares an array of arrays,
+        and it is copied here when that type is adapted. It is not kept, so a copy of this type does not nest again.
+        """
+        item_type = self._check_subtype(item_type)
+        for _ in range((dimensions or 1) - 1):
+            item_type = ARRAY(item_type)
+        self.item_type = item_type
         super().__init__(**kwargs)
 
     @property
@@ -613,9 +621,19 @@ def _structured_leaf_encoder(type_: sqltypes.TypeEngine, dialect: Dialect) -> Ca
     def encode_leaf(value: Any) -> Any:
         if value is not None and process is not None:
             value = process(value)
+        _refuse_collection_in_scalar_element(type_, value)
         return None if value is None else _encode_structured_leaf(kind, value, integral)
 
     return encode_leaf
+
+
+def _refuse_collection_in_scalar_element(type_: sqltypes.TypeEngine, value: Any) -> None:
+    """Refuse a list, tuple or mapping bound to a scalar element, which would be stored as its repr or as NULL."""
+    if isinstance(value, (list, tuple, Mapping)):
+        raise TypeError(
+            "cannot store the %s %r in a %r element; declare a nested ARRAY, MAP or STRUCT for it"
+            % (type(value).__name__, value, type_)
+        )
 
 
 class StructuredBindExpression(ColumnElement):

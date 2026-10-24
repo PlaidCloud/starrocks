@@ -324,9 +324,10 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
         length = getattr(type_, "length", None)
         return keyword if length is None else f"{keyword}({length})"
 
-    def visit_ARRAY(self, type_: ARRAY, **kw):
-        """Compiles the ARRAY type into the correct StarRocks syntax."""
-        # logger.debug("visit_ARRAY: type_: %r, kw: %s", type_, kw)
+    def visit_ARRAY(self, type_: Union[ARRAY, sqltypes.ARRAY], **kw: Any) -> str:
+        """Render ``ARRAY<item>``; SQLAlchemy's generic ARRAY is adapted first, so its ``dimensions`` nest."""
+        if not isinstance(type_, ARRAY):
+            type_ = type_.dialect_impl(self.dialect)
         inner_type_sql = self.process(type_.item_type, **kw)
         return f"ARRAY<{inner_type_sql}>"
 

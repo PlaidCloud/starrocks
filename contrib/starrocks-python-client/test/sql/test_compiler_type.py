@@ -110,6 +110,8 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         (ARRAY(INTEGER), "ARRAY<INTEGER>"),
         (ARRAY(VARCHAR(50)), "ARRAY<VARCHAR(50)>"),
         (ARRAY(ARRAY(INTEGER)), "ARRAY<ARRAY<INTEGER>>"),
+        (sa.ARRAY(sa.Integer, dimensions=2), "ARRAY<ARRAY<INTEGER>>"),
+        (sa.ARRAY(sa.String(20), dimensions=3), "ARRAY<ARRAY<ARRAY<VARCHAR(20)>>>"),
         (MAP(STRING, INTEGER), "MAP<STRING, INTEGER>"),
         (MAP(VARCHAR(50), DOUBLE), "MAP<VARCHAR(50), DOUBLE>"),
         (MAP(STRING, MAP(INTEGER, STRING)), "MAP<STRING, MAP<INTEGER, STRING>>"),
@@ -317,6 +319,8 @@ class GenericArrayTest(fixtures.TablesTest):
             sa.Column("id", INTEGER),
             sa.Column("numbers", sa.ARRAY(sa.Integer)),
             sa.Column("words", sa.ARRAY(sa.String(10))),
+            sa.Column("number_grid", sa.ARRAY(sa.Integer, dimensions=2)),
+            sa.Column("word_grid", sa.ARRAY(sa.String(10), dimensions=2)),
             starrocks_duplicate_key="id",
         )
 
@@ -324,3 +328,10 @@ class GenericArrayTest(fixtures.TablesTest):
         table = self.tables.generic_array
         connection.execute(table.insert(), {"id": 1, "numbers": [1, 2, 3], "words": ["x", None]})
         eq_(connection.execute(sa.select(table.c.numbers, table.c.words)).one(), ([1, 2, 3], ["x", None]))
+
+    def test_dimensions_round_trip(self, connection):
+        """``dimensions`` declares an array of arrays, which the generic ARRAY cannot nest."""
+        table = self.tables.generic_array
+        grids = {"number_grid": [[1, 2], [3], None], "word_grid": [["a", "b"], [None]]}
+        connection.execute(table.insert(), {"id": 2, **grids})
+        eq_(connection.execute(sa.select(table.c.number_grid, table.c.word_grid)).one(), tuple(grids.values()))
