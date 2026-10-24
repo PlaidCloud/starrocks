@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import re
+from typing import Any, Coroutine
 
-from sqlalchemy import testing
+from sqlalchemy import testing, util
+from sqlalchemy.testing import config
 
 
 def normalize_sql(sql: str) -> str:
@@ -46,6 +49,17 @@ def normalize_py_call(s: str) -> str:
     s = re.sub(r"\[ ", "[", s)
     s = re.sub(r" \]", "]", s)
     return s
+
+
+def run_coroutine(coroutine: Coroutine[Any, Any, Any]) -> Any:
+    """Run a coroutine from a test, under any ``--dburi``.
+
+    Under an async driver the plugin already runs each test in a greenlet inside its event loop, where
+    ``asyncio.run()`` refuses to start another, so the coroutine is awaited on that loop instead.
+    """
+    if config.db.dialect.is_async:
+        return util.await_only(coroutine)
+    return asyncio.run(coroutine)
 
 
 def _server_version(config: object) -> tuple:
