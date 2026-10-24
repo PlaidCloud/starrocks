@@ -103,14 +103,6 @@ class AlterTablePropertiesCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             f'ALTER TABLE test_table SET ("comment" = {rendered_value})',
         )
 
-    def test_property_values_with_backslashes_compile(self):
-        """The backslash cases below fail as expected; this keeps a compile error from hiding among them."""
-        compiled = str(AlterTableProperties("test_table", dict(BACKSLASH_VALUES)).compile(dialect=self.__dialect__))
-        assert compiled.count("ALTER TABLE test_table SET (") == len(BACKSLASH_VALUES)
-
-    @testing.fails_on(
-        "starrocks", "property values are not backslash-escaped, so StarRocks stores \\d+\\.\\d+ as d+.d+"
-    )
     @testing.combinations(
         ("file_path", r'"C:\\temp\\data\\file.txt"'),
         ("regex_pattern", r'"\\d+\\.\\d+"'),

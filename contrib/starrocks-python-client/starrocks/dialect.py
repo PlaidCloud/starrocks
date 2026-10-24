@@ -401,6 +401,15 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
     INDEX_TYPES: Final[Tuple[str, ...]] = ("BITMAP", "GIN", "NGRAMBF", "VECTOR")
 
+    @staticmethod
+    def quoted_property(value: Any) -> str:
+        """Quote a PROPERTIES key or value as the double-quoted string StarRocks reads back unchanged.
+
+        StarRocks unescapes the string once, as MySQL does, so each backslash is doubled before double quotes are
+        escaped; otherwise ``\\d+`` is stored as ``d+`` and a ``"`` ends the string early.
+        """
+        return '"%s"' % str(value).replace("\\", "\\\\").replace('"', '\\"')
+
     def visit_create_index(self, create: sa_schema.CreateIndex, **kw: Any) -> str:  # type: ignore[override]
         """Compile ``CREATE INDEX name ON table (columns) [USING <type>]`` in StarRocks' grammar.
 
@@ -735,7 +744,9 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         # if self.dialect.test_replication_num and "replication_num" not in props_dict:
         #     props_dict.setdefault("replication_num", str(self.dialect.test_replication_num))
         if props_dict:
-            props = ",\n".join([f'{self.indent}"{k}"="{v}"' for k, v in props_dict.items()])
+            props = ",\n".join(
+                f"{self.indent}{self.quoted_property(k)}={self.quoted_property(v)}" for k, v in props_dict.items()
+            )
             table_opts.append(f"PROPERTIES(\n{props}\n)")
 
         logger.debug("table opts for table: %s, schema: %s, processed opts: %r", table.name, table.schema, table_opts)
@@ -1177,7 +1188,9 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         # ALTER PROPERTIES
         if alter.properties is not None:
-            props_str = ", ".join([f'"{k}" = "{v}"' for k, v in alter.properties.items()])
+            props_str = ", ".join(
+                f"{self.quoted_property(k)} = {self.quoted_property(v)}" for k, v in alter.properties.items()
+            )
             statements.append(f"ALTER MATERIALIZED VIEW {mv_name} SET ({props_str})")
 
         if not statements:
@@ -1344,11 +1357,10 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         table_name = format_table_name(self, alter.table_name, alter.schema)
         # logger.debug("ALTER TABLE %r SET (%s)", table_name, alter.properties)
 
-        # Escape double quotes in property values
-        def escape_value(value: str) -> str:
-            return value.replace('"', '\\"')
-
-        multi_set_statement = "; ".join([f'ALTER TABLE {table_name} SET ("{k}" = "{escape_value(v)}")' for k, v in alter.properties.items()])
+        multi_set_statement = "; ".join(
+            f"ALTER TABLE {table_name} SET ({self.quoted_property(k)} = {self.quoted_property(v)})"
+            for k, v in alter.properties.items()
+        )
         logger.debug("Compiled SQL for AlterTableProperties: \n%s", multi_set_statement)
         return multi_set_statement
 

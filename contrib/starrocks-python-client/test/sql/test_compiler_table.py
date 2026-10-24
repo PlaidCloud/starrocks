@@ -468,3 +468,35 @@ class CreateIndexCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         table = self._table()
         with expect_raises_message(exc.CompileError, "StarRocks indexes plain columns only"):
             CreateIndex(Index("ix_lower_city", func.lower(table.c.city))).compile(dialect=self.__dialect__)
+
+
+class CreateTablePropertyQuotingTest(fixtures.TestBase, AssertsCompiledSQL):
+    """PROPERTIES values are quoted so that StarRocks, which unescapes them once, stores them unchanged."""
+
+    __dialect__ = StarRocksDialect()
+
+    @testing.combinations(
+        ("double_quote", 'grp"1', r'"grp\"1"'),
+        ("backslash", r"C:\temp", r'"C:\\temp"'),
+        ("escaped_quote", r"a\"b", r'"a\\\"b"'),
+        argnames="value, rendered_value",
+        id_="iaa",
+    )
+    def test_property_value_quoting(self, value, rendered_value):
+        tbl = Table(
+            "quoted_props",
+            MetaData(),
+            Column("id", Integer),
+            starrocks_duplicate_key="id",
+            starrocks_properties={"colocate_with": value},
+        )
+        self.assert_compile(
+            CreateTable(tbl),
+            "CREATE TABLE quoted_props ("
+            "    id INTEGER"
+            ")"
+            "DUPLICATE KEY (id)"
+            "PROPERTIES("
+            f'    "colocate_with"={rendered_value}'
+            ")",
+        )
