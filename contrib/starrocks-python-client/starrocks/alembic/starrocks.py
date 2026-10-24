@@ -297,23 +297,44 @@ class StarRocksImpl(MySQLImpl):
         *,
         server_default: Any = False,
         existing_server_default: Any = None,
+        name: Optional[str] = None,
+        schema: Optional[str] = None,
         **kw: Any,
     ) -> None:
         """Alter a column, refusing a change of its default value, which StarRocks cannot make.
 
         A ``server_default`` that equals ``existing_server_default`` is no change, so it is passed on to the
         MODIFY COLUMN that keeps the default; any other one raises CompileError.
+
+        StarRocks takes a RENAME COLUMN only in an ALTER TABLE of its own, so a new ``name`` is applied after the
+        column's other changes, which keep the old name.
         """
         if server_default is not False and self._unquoted_default(server_default) != self._unquoted_default(
             existing_server_default
         ):
             raise column_default_change_error(table_name, column_name)
-        super().alter_column(
-            table_name,
-            column_name,
-            server_default=server_default,
-            existing_server_default=existing_server_default,
-            **kw,
+        renamed = name is not None and name != column_name
+        if not renamed or self._changes_besides_the_name(server_default, kw):
+            super().alter_column(
+                table_name,
+                column_name,
+                server_default=server_default,
+                existing_server_default=existing_server_default,
+                schema=schema,
+                **kw,
+            )
+        if renamed:
+            self._exec(alembic_base.ColumnName(table_name, column_name, name, schema=schema))
+
+    @staticmethod
+    def _changes_besides_the_name(server_default: Any, kw: Mapping[str, Any]) -> bool:
+        """Whether an alter_column call changes more than the column's name."""
+        return (
+            server_default is not False
+            or kw.get("nullable") is not None
+            or kw.get("type_") is not None
+            or kw.get("autoincrement") is not None
+            or kw.get("comment", False) is not False
         )
 
     def correct_for_autogen_constraints(

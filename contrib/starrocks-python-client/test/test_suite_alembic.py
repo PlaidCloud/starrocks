@@ -28,9 +28,6 @@ from sqlalchemy import testing
 from sqlalchemy.testing.fixtures import TestBase
 
 
-RENAME_COMBINED_WITH_MODIFY = testing.fails_on(
-    "starrocks", "the dialect combines MODIFY COLUMN with RENAME COLUMN, which StarRocks rejects as conflicting"
-)
 MODIFY_KEY_COLUMN_WITHOUT_KEY = testing.fails_on(
     "starrocks", "the dialect leaves KEY out of MODIFY COLUMN for a key column, so StarRocks finds no key column left"
 )
@@ -88,7 +85,6 @@ class BackendAlterColumnTest(_BackendAlterColumnTest):
     )
     test_modify_nullable_to_non = NULLABLE_TO_NOT_NULL(_BackendAlterColumnTest.test_modify_nullable_to_non)
     test_modify_type_int_str = MODIFY_KEY_COLUMN_WITHOUT_KEY(_BackendAlterColumnTest.test_modify_type_int_str)
-    test_rename_column = RENAME_COMBINED_WITH_MODIFY(_BackendAlterColumnTest.test_rename_column)
 
 
 def _require_sqlalchemy_2(namespace: dict[str, object]) -> None:

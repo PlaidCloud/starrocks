@@ -18,7 +18,14 @@ from textwrap import dedent
 import time
 from typing import TYPE_CHECKING, Any, Collection, Dict, Final, List, Optional, Tuple, Type, Union
 
-from alembic.ddl.base import RenameTable, alter_table, format_column_name, format_server_default, format_table_name
+from alembic.ddl.base import (
+    ColumnName,
+    RenameTable,
+    alter_table,
+    format_column_name,
+    format_server_default,
+    format_table_name,
+)
 from alembic.ddl.mysql import (
     MySQLAlterDefault,
     MySQLChangeColumn,
@@ -2982,18 +2989,17 @@ def _starrocks_modify_column(element: MySQLModifyColumn, compiler: StarRocksDDLC
 
 @compiles(MySQLChangeColumn, DialectName)
 def _starrocks_change_column(element: MySQLChangeColumn, compiler: StarRocksDDLCompiler, **kw: Any) -> str:
-    """
-    It's a must for RENAMEing a column, because MODIFY COLUMN does not support changing the name.
-    And in StarRocks, there should be two alter clauses if both RENAME and MODIFY
+    """Compile MySQL's CHANGE COLUMN as StarRocks' MODIFY COLUMN, or its RENAME COLUMN.
 
-    NOTE: Currently, MySQL will pass column_type even for RENAME COLUMN. SO, it will also generate
-    an MODIFY COLUMN clause, because we don't know whether the column_type is changed, and StarRocks
-    doesn't support CHANGE COLUMN.
+    StarRocks has no CHANGE COLUMN, and refuses MODIFY COLUMN and RENAME COLUMN in one ALTER TABLE, so a
+    CHANGE that does both raises; ``op.alter_column`` sends the two separately. Alembic's MySQL impl sends a
+    CHANGE to the same name for every DATETIME column, which is a MODIFY alone.
     """
+    renamed = element.newname is not None and element.newname != element.column_name
     rename_clause = "RENAME COLUMN %s TO %s" % (
         format_column_name(compiler, element.column_name),
         format_column_name(compiler, element.newname),
-    ) if element.newname else None
+    ) if renamed else None
 
     modify_clause = "MODIFY COLUMN %s %s" % (
         format_column_name(compiler, element.column_name),
@@ -3013,11 +3019,21 @@ def _starrocks_change_column(element: MySQLChangeColumn, compiler: StarRocksDDLC
 
     alter_claus_header: str = alter_table(compiler, element.table_name, element.schema)
     if rename_clause and modify_clause:
-        return "%s %s, %s" % (alter_claus_header, modify_clause, rename_clause)
-    elif rename_clause:
-        return "%s %s" % (alter_claus_header, rename_clause)
-    else:
-        return "%s %s" % (alter_claus_header, modify_clause)
+        raise exc.CompileError(
+            f"StarRocks cannot MODIFY and RENAME column {element.column_name!r} in one ALTER TABLE; "
+            "op.alter_column sends them separately"
+        )
+    return "%s %s" % (alter_claus_header, rename_clause or modify_clause)
+
+
+@compiles(ColumnName, DialectName)
+def _starrocks_rename_column(element: ColumnName, compiler: StarRocksDDLCompiler, **kw: Any) -> str:
+    """StarRocks renames a column with ``RENAME COLUMN``, where Alembic's default leaves out ``COLUMN``."""
+    return "%s RENAME COLUMN %s TO %s" % (
+        alter_table(compiler, element.table_name, element.schema),
+        format_column_name(compiler, element.column_name),
+        format_column_name(compiler, element.newname),
+    )
 
 
 @compiles(RenameTable, DialectName)
