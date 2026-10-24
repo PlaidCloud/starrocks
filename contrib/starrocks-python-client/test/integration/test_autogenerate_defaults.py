@@ -21,7 +21,7 @@ from sqlalchemy.testing import fixtures
 
 import starrocks.alembic  # noqa: F401
 from starrocks.common.utils import unquote_sql_string_literal
-from starrocks.datatype import BITMAP, HLL, INTEGER, PERCENTILE, VARCHAR
+from starrocks.datatype import BITMAP, DATE, HLL, INTEGER, JSON, PERCENTILE, VARCHAR
 
 
 class _DefaultsTestBase(fixtures.TestBase):
@@ -126,3 +126,46 @@ class ServerDefaultComparisonTest(_DefaultsTestBase):
         ops = self._diff_ops(connection, model, "default_changed")
 
         assert [op[0] for op in ops[0]] == ["modify_default"]
+
+
+class ServerAddedPropertiesTest(_DefaultsTestBase):
+    """Properties StarRocks adds next to the ones a model sets are left alone without a warning."""
+
+    @testing.combinations(
+        (
+            "dynamic_partition",
+            {
+                "dynamic_partition.enable": "true",
+                "dynamic_partition.time_unit": "DAY",
+                "dynamic_partition.start": "-3",
+                "dynamic_partition.end": "3",
+                "dynamic_partition.prefix": "p",
+                "dynamic_partition.buckets": "1",
+            },
+            "dynamic_partition.time_zone",
+        ),
+        ("flat_json", {"flat_json.enable": "true"}, "flat_json.null.factor"),
+        argnames="properties, added_key",
+        id_="iaa",
+    )
+    @testing.requires.sqlalchemy_2
+    def test_added_properties_do_not_warn(self, connection, metadata, caplog, properties, added_key):
+        Table(
+            "server_added_properties",
+            metadata,
+            Column("d", DATE),
+            Column("j", JSON),
+            starrocks_duplicate_key="d",
+            starrocks_partition_by="RANGE(d)()",
+            starrocks_distributed_by="HASH(d) BUCKETS 1",
+            starrocks_properties={"replication_num": "1", **properties},
+        )
+        metadata.create_all(connection)
+        reported = inspect(connection).get_table_options("server_added_properties")["starrocks_properties"]
+        caplog.set_level("WARNING")
+
+        ops = self._diff_ops(connection, metadata, "server_added_properties")
+
+        assert added_key in reported
+        assert ops == []
+        assert "no default is defined" not in caplog.text

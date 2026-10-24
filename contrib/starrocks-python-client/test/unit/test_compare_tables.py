@@ -1382,6 +1382,11 @@ class PropertiesChangesTest(fixtures.TestBase):
         ("bucket_size", "1073741824"),
         ("fast_schema_evolution", "false"),
         ("compression", "ZSTD"),
+        ("dynamic_partition.time_zone", "Asia/Shanghai"),
+        ("dynamic_partition.history_partition_num", "3"),
+        ("flat_json.null.factor", "0.5"),
+        ("flat_json.sparsity.factor", "0.5"),
+        ("flat_json.column.max", "50"),
         argnames="prop_key, non_default_value",
     )
     def test_properties_non_default_to_none(self, prop_key, non_default_value, caplog):

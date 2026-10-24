@@ -65,6 +65,16 @@ class ReflectionTableDefaults(ReflectionDefaults):
         'mutable_bucket_num': '0',
         'primary_index_cache_expire_sec': '0',
         'storage_type': 'column',
+
+        # Added when a dynamic_partition.* property is set, whatever it is (even enable=false).
+        # time_zone is the FE time zone, so any value here only marks the key as known.
+        'dynamic_partition.history_partition_num': '0',
+        'dynamic_partition.time_zone': 'Etc/UTC',
+
+        # Added when flat_json.enable is true.
+        'flat_json.null.factor': '0.3',
+        'flat_json.sparsity.factor': '0.3',
+        'flat_json.column.max': '100',
         # 'bloom_filter_columns': None,
         # 'colocate_with': None,
     }
