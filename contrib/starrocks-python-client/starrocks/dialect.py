@@ -1227,7 +1227,10 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             colspec.append("NULL" if nullable else "NOT NULL")
 
         if autoincrement:
-            colspec.append("AUTO_INCREMENT")
+            raise exc.CompileError(
+                f"StarRocks cannot set AUTO_INCREMENT in MODIFY COLUMN (column {name!r}); "
+                "op.alter_column leaves an unchanged AUTO_INCREMENT out, which StarRocks keeps"
+            )
         # DEFAULT: include if provided (even if 0 or empty string), but not when False
         elif default is not False and default is not None:
             default = format_server_default(self, default)

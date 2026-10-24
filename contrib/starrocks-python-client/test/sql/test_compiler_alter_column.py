@@ -23,7 +23,7 @@ from sqlalchemy.testing import expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
 import starrocks.alembic  # noqa: F401
-from starrocks.datatype import DATETIME, INTEGER, STRING
+from starrocks.datatype import BIGINT, DATETIME, INTEGER, STRING
 from starrocks.dialect import StarRocksDialect
 
 
@@ -76,13 +76,12 @@ class AlterColumnCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "ALTER TABLE `my schema`.`order` MODIFY COLUMN `select` INTEGER NOT NULL",
         )
 
-    def test_modify_autoincrement(self):
-        self.assert_compile(
+    def test_modify_autoincrement_is_refused(self):
+        """StarRocks answers "Column 'c' can not be AUTO_INCREMENT when MODIFY COLUMN"."""
+        with expect_raises_message(exc.CompileError, "cannot set AUTO_INCREMENT in MODIFY COLUMN"):
             MySQLModifyColumn(
                 "t", "c", schema=None, type_=INTEGER(), nullable=False, default=False, autoincrement=True, comment=False
-            ),
-            "ALTER TABLE t MODIFY COLUMN c INTEGER NOT NULL AUTO_INCREMENT",
-        )
+            ).compile(dialect=self.__dialect__)
 
     def test_change_to_the_same_name_is_a_modify(self):
         """Alembic's MySQL impl sends every DATETIME change as a CHANGE COLUMN to the column's own name."""
@@ -158,6 +157,23 @@ class AlterColumnDefaultOperationTest(fixtures.TestBase):
         context = op_fixture("starrocks")
         op.alter_column("t", "c", type_=INTEGER(), existing_server_default="y", nullable=True)
         context.assert_("ALTER TABLE t MODIFY COLUMN c INTEGER NULL DEFAULT 'y'")
+
+
+class AlterColumnAutoincrementOperationTest(fixtures.TestBase):
+    """``op.alter_column`` leaves an unchanged AUTO_INCREMENT out of MODIFY COLUMN and refuses a changed one."""
+
+    def test_unchanged_autoincrement_is_left_out(self):
+        context = op_fixture("starrocks")
+        op.alter_column("t", "id", comment="key", existing_type=BIGINT(), existing_nullable=False,
+                        autoincrement=True, existing_autoincrement=True)
+        context.assert_("ALTER TABLE t MODIFY COLUMN id BIGINT NOT NULL COMMENT 'key'")
+
+    @testing.combinations((True, None), (True, False), (False, True), argnames="autoincrement,existing")
+    def test_changed_autoincrement_is_refused(self, autoincrement, existing):
+        op_fixture("starrocks")
+        with expect_raises_message(exc.CompileError, "AUTO_INCREMENT on column 'id'"):
+            op.alter_column("t", "id", existing_type=BIGINT(), existing_nullable=False,
+                            autoincrement=autoincrement, existing_autoincrement=existing)
 
 
 class AlterColumnRenameOperationTest(fixtures.TestBase):

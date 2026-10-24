@@ -19,7 +19,7 @@ from typing import Any, Collection, Mapping, Optional, Sequence, Tuple, Union
 
 from alembic.ddl import base as alembic_base
 from alembic.ddl.mysql import MySQLChangeColumn, MySQLImpl, MySQLModifyColumn
-from sqlalchemy import Column, ForeignKeyConstraint, Index, MetaData, Table, UniqueConstraint, text, util
+from sqlalchemy import Column, ForeignKeyConstraint, Index, MetaData, Table, UniqueConstraint, exc, text, util
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.sql import Executable
@@ -352,11 +352,21 @@ class StarRocksImpl(MySQLImpl):
 
         StarRocks takes a RENAME COLUMN only in an ALTER TABLE of its own, so a new ``name`` is applied after the
         column's other changes, which keep the old name.
+
+        StarRocks refuses AUTO_INCREMENT in MODIFY COLUMN, and keeps it on a column whose MODIFY leaves it out, so
+        an unchanged ``autoincrement`` is left out and a changed one raises CompileError.
         """
         if server_default is not False and self._unquoted_default(server_default) != self._unquoted_default(
             existing_server_default
         ):
             raise column_default_change_error(table_name, column_name)
+        autoincrement = kw.pop("autoincrement", None)
+        existing_autoincrement = kw.pop("existing_autoincrement", None)
+        if autoincrement is not None and bool(autoincrement) != bool(existing_autoincrement):
+            raise exc.CompileError(
+                f"StarRocks cannot {'add' if autoincrement else 'remove'} AUTO_INCREMENT on column {column_name!r} "
+                f"of table {table_name!r}; recreate the table to change it"
+            )
         renamed = name is not None and name != column_name
         if not renamed or self._changes_besides_the_name(server_default, kw):
             super().alter_column(
