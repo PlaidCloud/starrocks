@@ -110,6 +110,11 @@ class ReflectionTableDefaults(ReflectionDefaults):
         'write_quorum',
     })
 
+    # Properties that hold a set of column names, which StarRocks reports in its own order.
+    _COLUMN_SET_PROPERTIES: frozenset = frozenset({
+        'bloom_filter_columns',
+    })
+
     # Default table options
     # engine -> key -> comment -> partition -> distribution -> order by -> properties
 
@@ -184,10 +189,13 @@ class ReflectionTableDefaults(ReflectionDefaults):
     @classmethod
     def normalize_property_value(cls, key: str, value: Optional[str]) -> Optional[str]:
         """Normalize a property value for comparison: booleans and the enums in
-        ``_CASE_INSENSITIVE_PROPERTIES`` compare case-insensitively.
+        ``_CASE_INSENSITIVE_PROPERTIES`` compare case-insensitively, and the column sets of
+        ``_COLUMN_SET_PROPERTIES`` in any order and case, as StarRocks column names are.
         """
         if value is None:
             return None
+        if key in cls._COLUMN_SET_PROPERTIES:
+            return ", ".join(sorted({name.strip().strip('`').lower() for name in value.split(",") if name.strip()}))
         if key in cls._CASE_INSENSITIVE_PROPERTIES or value.lower() in ('true', 'false'):
             return value.lower()
         return value
