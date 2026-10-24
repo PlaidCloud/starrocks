@@ -397,12 +397,14 @@ class MaterializedView(View):
                 - starrocks_order_by: Order by columns (e.g., 'user_id, created_at')
                 - starrocks_refresh: Refresh mode (e.g., 'ASYNC', 'MANUAL', 'IMMEDIATE ASYNC')
                     Format: [IMMEDIATE|DEFERRED] [ASYNC|MANUAL]
+                    Required unless starrocks_distributed_by is given, because with neither StarRocks would build
+                    a synchronous materialized view, which the dialect cannot reflect or compare.
                 - starrocks_properties: Additional properties dict (e.g., {'replication_num': '3'})
                 - Other dialect-specific parameters with starrocks_ prefix
 
         Examples:
-            # Basic materialized view
-            MaterializedView('mv1', metadata, definition='SELECT * FROM users')
+            # Basic materialized view, refreshed when its base tables change
+            MaterializedView('mv1', metadata, definition='SELECT * FROM users', starrocks_refresh='ASYNC')
 
             # With partition and refresh
             MaterializedView('user_stats_mv', metadata,

@@ -40,17 +40,30 @@ class CreateMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             CreateMaterializedView(mv, or_replace=True).compile(dialect=self.__dialect__)
 
     def test_create_mv(self):
-        mv = MaterializedView("my_mv", MetaData(), definition="SELECT * FROM my_table")
-        self.assert_compile(CreateMaterializedView(mv), "CREATE MATERIALIZED VIEW my_mv" "AS" "SELECT * FROM my_table")
+        mv = MaterializedView("my_mv", MetaData(), definition="SELECT * FROM my_table", starrocks_refresh="MANUAL")
+        self.assert_compile(
+            CreateMaterializedView(mv), "CREATE MATERIALIZED VIEW my_mv" "REFRESH MANUAL" "AS" "SELECT * FROM my_table"
+        )
+
+    def test_synchronous_mv_raises(self):
+        """With neither a refresh scheme nor a distribution, StarRocks would build a synchronous materialized view."""
+        mv = MaterializedView("my_mv", MetaData(), definition="SELECT * FROM my_table", comment="no refresh")
+        with expect_raises_message(exc.CompileError, "Materialized view 'my_mv' needs starrocks_refresh"):
+            CreateMaterializedView(mv).compile(dialect=self.__dialect__)
 
     @testing.combinations(
-        ("if_not_exists", {}, {"if_not_exists": True}, "CREATE MATERIALIZED VIEW IF NOT EXISTS mv"),
-        ("schema", {"schema": "test_db"}, {}, "CREATE MATERIALIZED VIEW test_db.mv"),
+        (
+            "if_not_exists",
+            {"starrocks_refresh": "MANUAL"},
+            {"if_not_exists": True},
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS mv" "REFRESH MANUAL",
+        ),
+        ("schema", {"schema": "test_db", "starrocks_refresh": "MANUAL"}, {}, "CREATE MATERIALIZED VIEW test_db.mv" "REFRESH MANUAL"),
         (
             "comment",
-            {"comment": "This is a test comment"},
+            {"comment": "This is a test comment", "starrocks_refresh": "MANUAL"},
             {},
-            "CREATE MATERIALIZED VIEW mv" "COMMENT 'This is a test comment'",
+            "CREATE MATERIALIZED VIEW mv" "COMMENT 'This is a test comment'" "REFRESH MANUAL",
         ),
         ("refresh_async", {"starrocks_refresh": "ASYNC"}, {}, "CREATE MATERIALIZED VIEW mv" "REFRESH ASYNC"),
         ("refresh_manual", {"starrocks_refresh": "MANUAL"}, {}, "CREATE MATERIALIZED VIEW mv" "REFRESH MANUAL"),
@@ -61,28 +74,33 @@ class CreateMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "CREATE MATERIALIZED VIEW mv" "REFRESH ASYNC START('2025-01-01 00:00:00') EVERY(INTERVAL 1 DAY)",
         ),
         (
-            "distribution",
+            "distribution_without_refresh",
             {"starrocks_distributed_by": "HASH(id) BUCKETS 16"},
             {},
             "CREATE MATERIALIZED VIEW mv" "DISTRIBUTED BY HASH(id) BUCKETS 16",
         ),
         (
             "partition",
-            {"starrocks_partition_by": "date_trunc('day', event_date)"},
+            {"starrocks_partition_by": "date_trunc('day', event_date)", "starrocks_refresh": "MANUAL"},
             {},
-            "CREATE MATERIALIZED VIEW mv" "PARTITION BY date_trunc('day', event_date)",
+            "CREATE MATERIALIZED VIEW mv" "PARTITION BY date_trunc('day', event_date)" "REFRESH MANUAL",
         ),
         (
             "order_by",
-            {"starrocks_order_by": "user_id, event_date"},
+            {"starrocks_order_by": "user_id, event_date", "starrocks_refresh": "MANUAL"},
             {},
-            "CREATE MATERIALIZED VIEW mv" "ORDER BY (user_id, event_date)",
+            "CREATE MATERIALIZED VIEW mv" "ORDER BY (user_id, event_date)" "REFRESH MANUAL",
         ),
         (
             "properties",
-            {"starrocks_properties": {"replication_num": "1", "storage_medium": "SSD"}},
+            {"starrocks_properties": {"replication_num": "1", "storage_medium": "SSD"}, "starrocks_refresh": "MANUAL"},
             {},
-            "CREATE MATERIALIZED VIEW mv" "PROPERTIES(" '    "replication_num"="1",' '    "storage_medium"="SSD"' ")",
+            "CREATE MATERIALIZED VIEW mv"
+            "REFRESH MANUAL"
+            "PROPERTIES("
+            '    "replication_num"="1",'
+            '    "storage_medium"="SSD"'
+            ")",
         ),
         argnames="mv_kwargs, create_kwargs, expected_header",
         id_="iaaa",

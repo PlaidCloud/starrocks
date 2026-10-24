@@ -1140,6 +1140,22 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         return text
 
     @staticmethod
+    def _refuse_synchronous_mv(mv: Table) -> None:
+        """Refuse a MaterializedView that StarRocks would build as a synchronous materialized view.
+
+        Without a REFRESH or DISTRIBUTED BY clause, StarRocks creates a synchronous materialized view, a rollup that
+        ``information_schema`` does not list. The dialect could neither reflect nor compare it, and autogenerate
+        would try to create it on every run.
+        """
+        opts = utils.extract_dialect_options_as_case_insensitive(mv)
+        if not opts.get(TableInfoKey.REFRESH) and not opts.get(TableInfoKey.DISTRIBUTED_BY):
+            raise exc.CompileError(
+                f"Materialized view {mv.name!r} needs starrocks_refresh, for example 'ASYNC' or 'MANUAL': without "
+                "a refresh scheme or a distribution StarRocks builds a synchronous materialized view, which the "
+                "dialect cannot reflect or compare"
+            )
+
+    @staticmethod
     def _view_security_keyword(view: Table, security: str) -> str:
         """Return the view's SECURITY keyword, refusing anything but the NONE and INVOKER that StarRocks has."""
         keyword = str(security).upper()
@@ -1231,6 +1247,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         definition = table.info.get(TableObjectInfoKey.DEFINITION)
         if not definition:
             raise ValueError(f"Materialized view '{table.name}' requires a definition.")
+        self._refuse_synchronous_mv(table)
 
         if getattr(create, "or_replace", False):
             raise exc.CompileError(
