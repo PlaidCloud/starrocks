@@ -255,6 +255,24 @@ class TransactionTest(fixtures.TablesTest):
                 conn.exec_driver_sql("DROP TABLE IF EXISTS txn_text_created")
 
     @TRANSACTIONS_NEED_3_5
+    @testing.combinations(
+        ("read_first", "SELECT 1; INSERT INTO txn_keyed VALUES (5, 5)"),
+        ("write_first", "INSERT INTO txn_keyed VALUES (5, 5); INSERT INTO txn_logged VALUES (5, 5)"),
+        argnames="statements",
+        id_="ia",
+    )
+    def test_text_holding_several_statements_is_refused_under_read_committed(self, statements):
+        with expect_raises_message(exc.InvalidRequestError, "Text holding several statements"):
+            with self._read_committed_engine().begin() as conn:
+                conn.exec_driver_sql(statements)
+        eq_(self._ids("txn_keyed"), [])
+
+    def test_text_holding_several_statements_runs_under_autocommit(self):
+        with config.db.begin() as conn:
+            conn.exec_driver_sql("INSERT INTO txn_keyed VALUES (1, 1); INSERT INTO txn_keyed VALUES (2, 2)")
+        eq_(self._ids("txn_keyed"), [1, 2])
+
+    @TRANSACTIONS_NEED_3_5
     def test_a_text_commit_ends_the_transaction_and_the_next_dml_opens_another(self):
         keyed = self.tables.txn_keyed
         with expect_raises(_RollBack):

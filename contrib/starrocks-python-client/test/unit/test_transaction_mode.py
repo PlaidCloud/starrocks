@@ -138,6 +138,23 @@ class StatementKeywordTest(fixtures.TestBase):
         eq_(bool(StarRocksDialect._TRANSACTION_END.match(statement, position)), ends)
 
 
+class SeveralStatementsTest(fixtures.TestBase):
+    @testing.combinations(
+        ("one", "SELECT 1", False),
+        ("terminated", "INSERT INTO t VALUES (1);", False),
+        ("terminated_and_commented", "INSERT INTO t VALUES (1); -- done\n", False),
+        ("semicolon_in_literal", "SELECT ';' AS a; ", False),
+        ("semicolon_in_name", "SELECT 1 AS `a;b`", False),
+        ("semicolon_in_comment", "/* a; b */ SELECT 1", False),
+        ("two", "SELECT 1; INSERT INTO t VALUES (1)", True),
+        ("two_after_a_comment", "SET query_timeout = 300; /* c */ DELETE FROM t WHERE id = 1", True),
+        id_="iaa",
+        argnames="statement,several",
+    )
+    def test_several(self, statement, several):
+        eq_(StarRocksDialect._holds_several_statements(statement), several)
+
+
 class DeleteTargetTest(fixtures.TestBase):
     @testing.combinations(
         ("DELETE FROM t WHERE id = 1", ("t", None)),

@@ -2029,6 +2029,8 @@ class StarRocksDialect(MySQLDialect_pymysql):
           which the SQLAlchemy commit or rollback ends. Reads open none.
         - StarRocks refuses DDL inside a transaction, so DDL first commits the open one, as MySQL does.
         - A BEGIN or START TRANSACTION sent as text is refused before StarRocks 3.5, which accepts it and ignores it.
+        - Text holding several statements is refused on a ``READ COMMITTED`` connection or with a transaction
+          open: see :meth:`_refuse_several_statements_in_transaction`.
 
         A statement compiled from a construct is classified by the construct, and text by its first keyword.
         """
@@ -2037,6 +2039,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
         info = self._pool_info(context.root_connection.connection)
         if info is None:
             return
+        self._refuse_several_statements_in_transaction(statement, context, info)
         keyword = self._statement_keyword(statement)
         if context.isinsert or context.isupdate or context.isdelete or keyword in self._DML_KEYWORDS:
             self._open_transaction_for_dml(cursor, statement, keyword, context, info)
@@ -2045,6 +2048,40 @@ class StarRocksDialect(MySQLDialect_pymysql):
             del info[self._TRANSACTION_OPEN]
         elif self._TRANSACTION_START.match(statement, self._LEADING_COMMENTS.match(statement).end()):
             self._require_transactions("A transaction (BEGIN)")
+
+    def _refuse_several_statements_in_transaction(
+        self, statement: str, context: ExecutionContext, info: Dict[str, Any]
+    ) -> None:
+        """Refuse text holding several statements on a ``READ COMMITTED`` connection or with a transaction open.
+
+        StarRocks runs each statement of such text, but the dialect can open, commit or refuse a transaction only
+        for the first, and the driver reads the later statements' results only when the cursor closes, where it
+        logs their errors instead of raising them. So ``SELECT 1; INSERT ...`` would commit its insert at once,
+        and a refused second statement would be dropped without an error. A DDL construct that compiles to several
+        statements commits the open transaction first, as any DDL does.
+        """
+        if context.isddl or not self._holds_several_statements(statement):
+            return
+        if info.get(self._TRANSACTION_OPEN) or not self._driver_autocommits(context.root_connection.connection):
+            raise exc.InvalidRequestError(
+                "Text holding several statements can't run on a READ COMMITTED connection or inside a transaction: "
+                "the dialect would open the transaction for the first statement only, and the driver drops the "
+                "errors of the others; execute each statement on its own"
+            )
+
+    @classmethod
+    def _holds_several_statements(cls, statement: str) -> bool:
+        """Return whether a statement is followed by another, past a ``;`` outside quotes and comments."""
+        ended = False
+        for token in cls._STATEMENT_TOKEN.finditer(statement):
+            text = token.group(0)
+            if text.startswith(("/*", "--", "#")):
+                continue
+            if text == ";":
+                ended = True
+            elif ended:
+                return True
+        return False
 
     def _track_transaction_control(self, statement: str, context: Optional[ExecutionContext]) -> None:
         """Note a BEGIN, START TRANSACTION, COMMIT or ROLLBACK sent as text, once StarRocks has accepted it.
