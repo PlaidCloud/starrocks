@@ -52,13 +52,14 @@ from sqlalchemy.dialects.mysql.base import (
 )
 from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
 from sqlalchemy.dialects.mysql.reserved_words import RESERVED_WORDS_MYSQL
+import sqlalchemy.dialects.mysql.types as mysql_types
 from sqlalchemy.engine import URL, Connection, reflection
 from sqlalchemy.engine.interfaces import ExecutionContext
 
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
 from sqlalchemy.engine.row import Row
 from sqlalchemy.sql import bindparam, operators, sqltypes
-from sqlalchemy.sql.elements import BinaryExpression, Grouping
+from sqlalchemy.sql.elements import BinaryExpression, Grouping, TypeClause
 from sqlalchemy.sql.expression import Delete, Insert, Select, TableClause, Update
 
 from starrocks.common import utils
@@ -542,20 +543,47 @@ class StarRocksSQLCompiler(MySQLCompiler):
 
     def visit_typeclause(
         self,
-        typeclause,
-        type_=None,
+        typeclause: TypeClause,
+        type_: Optional[sqltypes.TypeEngine] = None,
         **kw: Any,
-    ):
+    ) -> str:
         """Render a CAST target; booleans, integers and ARRAY, MAP and STRUCT are cast to StarRocks' own types.
 
-        MySQL casts integers to ``SIGNED INTEGER``, which StarRocks reads as INT on 3.3 and as BIGINT on 4.1, so a
-        BIGINT or LARGEINT cast lost its range on one version or the other.
+        MySQL casts integers to ``SIGNED INTEGER``, which StarRocks reads as INT on 3.3 and 3.5 and as BIGINT on
+        4.1, so a BIGINT or LARGEINT cast lost its range on one version or the other. See
+        :meth:`_integer_cast_target` for the integer types.
         """
         if type_ is None:
             type_ = typeclause.type.dialect_impl(self.dialect)
-        if isinstance(type_, (sqltypes.Boolean, sqltypes.Integer, StructuredType)):
+        if isinstance(type_, sqltypes.Integer):
+            return self._integer_cast_target(type_)
+        if isinstance(type_, (sqltypes.Boolean, StructuredType)):
             return self.dialect.type_compiler.process(type_)
         return super().visit_typeclause(typeclause, type_, **kw)
+
+    _INTEGER_CAST_TARGETS: Final[Tuple[Tuple[Type[sqltypes.Integer], str, str], ...]] = (
+        (mysql_types.TINYINT, "TINYINT", "SMALLINT"),
+        (sqltypes.SmallInteger, "SMALLINT", "INT"),
+        (mysql_types.MEDIUMINT, "INT", "INT"),
+        (sqltypes.INTEGER, "INT", "BIGINT"),
+        (sqltypes.BigInteger, "BIGINT", "LARGEINT"),
+        (LARGEINT, "LARGEINT", "LARGEINT"),
+    )
+    """Each integer type with the StarRocks type a cast to it names, signed and unsigned."""
+
+    _GENERIC_INTEGER_CAST_TARGET: Final[str] = "INT"
+
+    def _integer_cast_target(self, type_: sqltypes.Integer) -> str:
+        """Name the StarRocks integer type of the same width, without a display width, UNSIGNED or ZEROFILL.
+
+        StarRocks has no unsigned integers and refuses those keywords, and MEDIUMINT, in a CAST. An unsigned type
+        is widened to the next signed type that holds its whole range, and MEDIUMINT is INT.
+        """
+        unsigned = bool(getattr(type_, "unsigned", False))
+        for integer_type, signed_target, unsigned_target in self._INTEGER_CAST_TARGETS:
+            if isinstance(type_, integer_type):
+                return unsigned_target if unsigned else signed_target
+        return self._GENERIC_INTEGER_CAST_TARGET
 
     def visit_insert_into_files(self, insert_into, **kw):
         return (

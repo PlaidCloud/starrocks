@@ -171,15 +171,35 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(sa.cast(x, target_type), expected)
 
     @testing.combinations(
-        (sa.Integer(), "CAST(t.x AS INTEGER)"),
+        (sa.Integer(), "CAST(t.x AS INT)"),
+        (sa.INTEGER(), "CAST(t.x AS INT)"),
         (sa.BigInteger(), "CAST(t.x AS BIGINT)"),
         (sa.SmallInteger(), "CAST(t.x AS SMALLINT)"),
         (LARGEINT(), "CAST(t.x AS LARGEINT)"),
+        (TINYINT(4), "CAST(t.x AS TINYINT)"),
+        (INTEGER(11), "CAST(t.x AS INT)"),
+        (BIGINT(20), "CAST(t.x AS BIGINT)"),
         argnames="target_type, expected",
         id_="ra",
     )
     def test_cast_to_an_integer_names_its_width(self, target_type, expected):
-        """MySQL's ``SIGNED INTEGER`` is INT on StarRocks 3.3 and BIGINT on 4.1, so a cast names the type itself."""
+        """MySQL's ``SIGNED INTEGER`` is INT on StarRocks 3.3 and 3.5 and BIGINT on 4.1, so a cast names the type itself."""
+        x = sa.column("x", sa.String, _selectable=sa.table("t"))
+        self.assert_compile(sa.cast(x, target_type), expected)
+
+    @testing.combinations(
+        ("tinyint_unsigned", mysql.TINYINT(unsigned=True), "CAST(t.x AS SMALLINT)"),
+        ("smallint_unsigned", mysql.SMALLINT(unsigned=True), "CAST(t.x AS INT)"),
+        ("integer_unsigned", mysql.INTEGER(unsigned=True), "CAST(t.x AS BIGINT)"),
+        ("bigint_unsigned", mysql.BIGINT(unsigned=True), "CAST(t.x AS LARGEINT)"),
+        ("integer_zerofill", mysql.INTEGER(display_width=5, zerofill=True), "CAST(t.x AS INT)"),
+        ("mediumint", mysql.MEDIUMINT(), "CAST(t.x AS INT)"),
+        ("mediumint_unsigned", mysql.MEDIUMINT(unsigned=True), "CAST(t.x AS INT)"),
+        argnames="target_type, expected",
+        id_="iaa",
+    )
+    def test_cast_to_a_mysql_integer_names_a_starrocks_type(self, target_type, expected):
+        """StarRocks refuses UNSIGNED, ZEROFILL and MEDIUMINT in a CAST; an unsigned type widens to hold its range."""
         x = sa.column("x", sa.String, _selectable=sa.table("t"))
         self.assert_compile(sa.cast(x, target_type), expected)
 
@@ -253,13 +273,27 @@ class SysdateExecutionTest(fixtures.TestBase):
 
 
 class IntegerCastExecutionTest(fixtures.TestBase):
-    """A cast to BIGINT or LARGEINT keeps values beyond 32 bits on every supported StarRocks version."""
+    """An integer cast keeps the whole range of its target type on every supported StarRocks version."""
 
     __backend__ = True
     __only_on__ = "starrocks"
 
     @testing.combinations((sa.BigInteger(), 5000000000), (LARGEINT(), 2**100), argnames="target_type, value")
     def test_cast_keeps_a_wide_value(self, connection, target_type, value):
+        eq_(int(connection.scalar(sa.select(sa.cast(sa.literal(str(value)), target_type)))), value)
+
+    @testing.combinations(
+        ("tinyint_unsigned", mysql.TINYINT(unsigned=True), 255),
+        ("smallint_unsigned", mysql.SMALLINT(unsigned=True), 65535),
+        ("integer_unsigned", mysql.INTEGER(unsigned=True), 4294967295),
+        ("bigint_unsigned", mysql.BIGINT(unsigned=True), 18446744073709551615),
+        ("integer_zerofill", mysql.INTEGER(display_width=5, zerofill=True), 7),
+        ("mediumint", mysql.MEDIUMINT(), -8388608),
+        ("mediumint_unsigned", mysql.MEDIUMINT(unsigned=True), 16777215),
+        argnames="target_type, value",
+        id_="iaa",
+    )
+    def test_cast_to_a_mysql_integer_keeps_its_whole_range(self, connection, target_type, value):
         eq_(int(connection.scalar(sa.select(sa.cast(sa.literal(str(value)), target_type)))), value)
 
 
