@@ -22,7 +22,7 @@ from sqlalchemy.testing import expect_raises, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
 from starrocks import INTEGER, VARCHAR
-from starrocks.alembic.ops import AlterTableColumnsOp, _combine_column_alters
+from starrocks.alembic.ops import AlterTableColumnsOp, AlterTableOrderOp, _combine_column_alters
 from starrocks.alembic.render import _render_alter_table_columns
 from starrocks.dialect import StarRocksDialect
 from starrocks.sql.ddl import AlterTableColumns
@@ -74,6 +74,25 @@ class CombineColumnAltersTest(fixtures.TestBase):
         assert [c.name for c in res.ops[0].adds] == ["a"]
         assert [c.name for c in res.ops[0].drops] == ["c"]
         assert res.ops[1] is other
+
+    def test_adds_go_before_a_sort_key_change_and_drops_after_it(self):
+        """The new sort key needs its column, and the old sort key column can only go once the key has moved."""
+        order = AlterTableOrderOp("t5", "x")
+        mto = ops.ModifyTableOps(
+            "t5",
+            ops=[
+                ops.DropColumnOp("t5", "v"),
+                order,
+                ops.AddColumnOp("t5", Column("x", INTEGER)),
+                ops.AddColumnOp("t5", Column("y", INTEGER)),
+            ],
+        )
+        res = _combine_column_alters(None, None, mto)
+
+        assert [type(o).__name__ for o in res.ops] == ["AlterTableColumnsOp", "AlterTableOrderOp", "AlterTableColumnsOp"]
+        assert ([c.name for c in res.ops[0].adds], res.ops[0].drops) == (["x", "y"], [])
+        assert res.ops[1] is order
+        assert (res.ops[2].adds, [c.name for c in res.ops[2].drops]) == ([], ["v"])
 
     def test_only_drops_still_collapse(self):
         mto = ops.ModifyTableOps(

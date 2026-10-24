@@ -1098,6 +1098,10 @@ def _combine_column_alters(context, revision, op: ops.ModifyTableOps):
     operations keep their relative position. With fewer than two column changes
     there is nothing to combine and the container is returned unchanged.
 
+    A sort key change needs its new columns added before it and its old columns dropped after it, so when the
+    table's operations include an ``AlterTableOrderOp``, the adds are combined before the first one and the
+    drops after the last.
+
     Index operations stay separate and keep their position. Removing an indexed
     column yields a ``DropIndexOp`` before the column drop; the dialect waits
     for the index job before the combined ``ALTER TABLE``, which also drops any
@@ -1126,13 +1130,21 @@ def _combine_column_alters(context, revision, op: ops.ModifyTableOps):
     if len(adds) + len(drops) < 2:
         return op
 
-    # Drop the combined op into the placeholder slot, preserving the position of
-    # any non-column operations relative to the column changes.
-    new_ops[combined_pos] = AlterTableColumnsOp(
-        table_name=op.table_name,
-        adds=adds,
-        drops=drops,
-        schema=op.schema,
-    )
+    order_changes = [index for index, inner in enumerate(new_ops) if isinstance(inner, AlterTableOrderOp)]
+    if not order_changes:
+        new_ops[combined_pos] = AlterTableColumnsOp(table_name=op.table_name, adds=adds, drops=drops, schema=op.schema)
+        op.ops = new_ops
+        return op
+    del new_ops[combined_pos]
+    first_order, last_order = (index - (index > combined_pos) for index in (order_changes[0], order_changes[-1]))
+    if drops:
+        new_ops.insert(
+            last_order + 1, AlterTableColumnsOp(table_name=op.table_name, adds=[], drops=drops, schema=op.schema)
+        )
+    if adds:
+        new_ops.insert(
+            min(combined_pos, first_order),
+            AlterTableColumnsOp(table_name=op.table_name, adds=adds, drops=[], schema=op.schema),
+        )
     op.ops = new_ops
     return op
