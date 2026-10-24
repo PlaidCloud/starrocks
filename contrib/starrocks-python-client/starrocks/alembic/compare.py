@@ -33,7 +33,7 @@ from alembic.operations.ops import (
     UpgradeOps,
 )
 from alembic.util import to_list
-from sqlalchemy import Column
+from sqlalchemy import Column, __version__ as _sqlalchemy_version
 from sqlalchemy.engine import Dialect
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.exc import ArgumentError
@@ -243,6 +243,8 @@ def compare_complex_type(impl: DefaultImpl, inspector_type: sqltypes.TypeEngine,
     return True
 
 
+_SQLALCHEMY_2 = int(_sqlalchemy_version.split(".")[0]) >= 2
+
 try:
     from alembic.util import DispatchPriority
 
@@ -358,6 +360,25 @@ def check_similar_string_and_warn(
         )
 
 
+def _left_alone_before_sqlalchemy_2(object_names: Set[Tuple[Optional[str], str]], kind: str) -> bool:
+    """Return whether autogenerate leaves the database's views or materialized views alone, as on SQLAlchemy 1.4.
+
+    ``View`` and ``MaterializedView`` need SQLAlchemy 2.0, so a 1.4 model has none, and comparing would reflect
+    each one into an object 1.4 cannot build. The objects are left alone, and a warning names them.
+    """
+    if _SQLALCHEMY_2:
+        return False
+    if object_names:
+        logger.warning(
+            "SQLAlchemy 1.4 cannot build a %s, so autogenerate leaves the database's alone: %s",
+            kind,
+            ", ".join(utils.gen_simple_qualified_name(name, schema) for schema, name in sorted(
+                object_names, key=lambda key: (key[0] or "", key[1])
+            )),
+        )
+    return True
+
+
 def _build_name_to_table(
     metadata: List[sa_schema.MetaData],
     default_schema: Optional[str],
@@ -447,6 +468,8 @@ def _autogen_for_views(
                 UserWarning,
             )
 
+    if _left_alone_before_sqlalchemy_2(conn_view_names, "view"):
+        return
     _compare_views(
         conn_view_names,
         metadata_view_names,
@@ -1029,6 +1052,8 @@ def _autogen_for_mvs(
                 UserWarning,
             )
 
+    if _left_alone_before_sqlalchemy_2(conn_mv_names, "materialized view"):
+        return
     _compare_mvs(
         conn_mv_names,
         metadata_mv_names,
