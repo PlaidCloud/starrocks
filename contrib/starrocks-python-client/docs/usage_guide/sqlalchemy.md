@@ -47,10 +47,12 @@ StarRocks restricts what a transaction can do, and refuses the statement when th
 
 - The tables a transaction changes must all be in one database.
 - A transaction can't read a table it has changed, so an ORM `Session` fails when a query reads a table its flush has written. Use `AUTOCOMMIT` with the ORM, or commit before reading back.
-- On shared-nothing clusters, a transaction can write each table once. A large `executemany` that the driver splits into several INSERT statements counts as several writes.
+- On shared-nothing clusters, a transaction can write each table once. The driver sends some `executemany` calls as one statement per row, and each row then counts as a write, so the second row fails. That happens for every `executemany` of an UPDATE or DELETE, for an INSERT `executemany` with a JSON, ARRAY, MAP or STRUCT column, and for a large INSERT `executemany` that the driver splits into several statements. An ORM flush that updates two objects of one class is such an `executemany`.
 - UPDATE and DELETE inside a transaction are refused by StarRocks 3.5. StarRocks documents them for shared-data clusters from 4.0, and 4.1 accepts them on shared-nothing clusters as well.
 - `INSERT OVERWRITE` can't run inside a transaction.
-- Alembic's version table is updated in the migration's transaction, so a `READ COMMITTED` migration needs a StarRocks that accepts UPDATE inside a transaction.
+- Alembic's version table is updated in the migration's transaction, and deleted from on a downgrade to base, so a `READ COMMITTED` migration needs a StarRocks that accepts UPDATE and DELETE inside a transaction. On 3.5, a downgrade to base fails at that DELETE, after the downgrade's DDL has run.
+
+A transaction covers the statements that go through SQLAlchemy. A statement sent through a raw DBAPI cursor, from `connection.connection.cursor()`, opens no transaction, so on a `READ COMMITTED` connection its DML commits at once, and a rollback doesn't undo it.
 
 The dialect adds rules of its own:
 
