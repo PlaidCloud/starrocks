@@ -18,9 +18,9 @@ The dialect puts each materialized view clause and ``AS`` on lines of their own;
 breaks, so each expected string literal below is one line of the generated DDL.
 """
 
-from sqlalchemy import Column, MetaData, Table, select, testing
+from sqlalchemy import Column, MetaData, Table, exc, select, testing
 from sqlalchemy.schema import DropTable
-from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
 from starrocks.datatype import INTEGER, VARCHAR
@@ -33,12 +33,17 @@ class CreateMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = StarRocksDialect()
     __requires__ = ("sqlalchemy_2",)
 
+    def test_create_or_replace_raises(self):
+        """No StarRocks release has CREATE OR REPLACE MATERIALIZED VIEW."""
+        mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_refresh="MANUAL")
+        with expect_raises_message(exc.CompileError, "StarRocks has no CREATE OR REPLACE MATERIALIZED VIEW"):
+            CreateMaterializedView(mv, or_replace=True).compile(dialect=self.__dialect__)
+
     def test_create_mv(self):
         mv = MaterializedView("my_mv", MetaData(), definition="SELECT * FROM my_table")
         self.assert_compile(CreateMaterializedView(mv), "CREATE MATERIALIZED VIEW my_mv" "AS" "SELECT * FROM my_table")
 
     @testing.combinations(
-        ("or_replace", {}, {"or_replace": True}, "CREATE OR REPLACE MATERIALIZED VIEW mv"),
         ("if_not_exists", {}, {"if_not_exists": True}, "CREATE MATERIALIZED VIEW IF NOT EXISTS mv"),
         ("schema", {"schema": "test_db"}, {}, "CREATE MATERIALIZED VIEW test_db.mv"),
         (

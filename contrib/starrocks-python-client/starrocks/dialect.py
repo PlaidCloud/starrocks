@@ -1232,11 +1232,14 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         if not definition:
             raise ValueError(f"Materialized view '{table.name}' requires a definition.")
 
-        # Handle or_replace and if_not_exists flags
-        or_replace_clause = "OR REPLACE " if getattr(create, 'or_replace', False) else ""
+        if getattr(create, "or_replace", False):
+            raise exc.CompileError(
+                f"StarRocks has no CREATE OR REPLACE MATERIALIZED VIEW (materialized view {table.name!r}); "
+                "drop it and create it again"
+            )
         if_not_exists_clause = "IF NOT EXISTS " if getattr(create, 'if_not_exists', False) else ""
 
-        text = f"CREATE {or_replace_clause}MATERIALIZED VIEW {if_not_exists_clause}{mv_name}"
+        text = f"CREATE MATERIALIZED VIEW {if_not_exists_clause}{mv_name}"
 
         # Add column definitions if present (only name and comment are supported, same as View)
         if table.columns:
