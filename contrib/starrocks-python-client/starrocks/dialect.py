@@ -14,8 +14,9 @@
 # limitations under the License.
 import logging
 import re
+import time
 from textwrap import dedent
-from typing import Any, Collection, Dict, Final, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Collection, Dict, Final, List, Optional, Tuple, Union
 
 from alembic.ddl.base import RenameTable, alter_table, format_column_name, format_server_default, format_table_name
 from alembic.ddl.mysql import (
@@ -46,6 +47,7 @@ from sqlalchemy.dialects.mysql.base import (
 )
 from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
 from sqlalchemy.engine import reflection
+from sqlalchemy.engine.interfaces import ExecutionContext
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
 from sqlalchemy.engine.row import Row
 from sqlalchemy.sql import sqltypes, bindparam
@@ -72,6 +74,10 @@ from starrocks.common.types import (
 )
 from starrocks.common.utils import TableAttributeNormalizer
 from starrocks.sql.schema import View
+
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine.interfaces import DBAPICursor
 
 from . import reflection as _reflection
 from .datatype import (
@@ -1689,6 +1695,95 @@ class StarRocksDialect(MySQLDialect_pymysql):
         if self.run_mode is None:
             self.run_mode = self._get_run_mode(connection)
             logger.debug("system run mode: %s" % self.run_mode)
+
+    _SCHEMA_CHANGE_JOB_KINDS: Final[Tuple[str, ...]] = ("COLUMN", "OPTIMIZE")
+    _SCHEMA_CHANGE_ENDED_STATES: Final[frozenset[str]] = frozenset({"FINISHED", "CANCELLED"})
+    _SCHEMA_CHANGE_POLL_SECONDS: Final[float] = 1.0
+
+    def do_execute(
+        self,
+        cursor: "DBAPICursor",
+        statement: str,
+        parameters: Any,
+        context: Optional[ExecutionContext] = None,
+    ) -> None:
+        """Execute a statement, first waiting for any schema change running on the table it alters to end.
+
+        StarRocks builds an index, changes most columns and redistributes a table in an asynchronous job, and
+        rejects every other change to that table, with "A schema change operation is in progress", until the job
+        ends. ``create_all`` creates a table's indexes one after another, and a migration alters a table one
+        statement at a time, so each ALTER TABLE, CREATE INDEX and DROP INDEX compiled from a DDL construct first
+        waits for the job before it.
+        """
+        self._wait_for_schema_change_blocking(cursor, statement, context)
+        super().do_execute(cursor, statement, parameters, context)
+
+    def do_execute_no_params(
+        self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext] = None
+    ) -> None:
+        self._wait_for_schema_change_blocking(cursor, statement, context)
+        super().do_execute_no_params(cursor, statement, context)
+
+    def _wait_for_schema_change_blocking(
+        self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext]
+    ) -> None:
+        altered = self._table_altered_by(statement, context)
+        if altered is not None:
+            self.wait_while_schema_change_runs(cursor, *altered)
+
+    @staticmethod
+    def _table_altered_by(
+        statement: str, context: Optional[ExecutionContext]
+    ) -> Optional[Tuple[str, Optional[str]]]:
+        """Return the (name, schema) of the existing table a compiled DDL statement changes, if it changes one."""
+        if context is None or not context.isddl:
+            return None
+        ddl = context.compiled.statement
+        if isinstance(ddl, (sa_schema.CreateIndex, sa_schema.DropIndex)):
+            table = ddl.element.table
+            return (table.name, table.schema) if table is not None else None
+        if statement.lstrip()[:11].upper() != "ALTER TABLE":
+            return None
+        if isinstance(getattr(ddl, "table_name", None), str):
+            return ddl.table_name, getattr(ddl, "schema", None)
+        element = getattr(ddl, "element", None)
+        if isinstance(element, Table):
+            return element.name, element.schema
+        return None
+
+    def wait_while_schema_change_runs(self, cursor: "DBAPICursor", table_name: str, schema: Optional[str]) -> None:
+        """Block until the table's newest COLUMN and OPTIMIZE jobs, if any is still running, have ended.
+
+        A job that ends CANCELLED counts as ended: the statement waiting for it reports its own errors.
+        """
+        quoted_name = table_name.replace("\\", "\\\\").replace("'", "\\'")
+        for kind in self._SCHEMA_CHANGE_JOB_KINDS:
+            query = self.gen_show_alter_table_statement(
+                quoted_name, kind, schema=schema, state=None, order_by="JobId DESC", limit=1
+            )
+            state = self._newest_job_state(cursor, query)
+            while state is not None and state not in self._SCHEMA_CHANGE_ENDED_STATES:
+                logger.info("Waiting for the %s job on table %r to end (state: %s).", kind, table_name, state)
+                self._pause(self._SCHEMA_CHANGE_POLL_SECONDS)
+                state = self._newest_job_state(cursor, query)
+
+    def _newest_job_state(self, cursor: "DBAPICursor", query: str) -> Optional[str]:
+        """Return the State of the job the query lists, or None when it lists none or fails.
+
+        A failure, such as an unknown database, is left for the statement that waits to report.
+        """
+        try:
+            cursor.execute(query)
+            row = cursor.fetchone()
+        except self.dbapi.Error:
+            return None
+        if row is None:
+            return None
+        names = [column[0] for column in cursor.description]
+        return row[names.index("State")] if "State" in names else None
+
+    def _pause(self, seconds: float) -> None:
+        time.sleep(seconds)
 
     def _get_server_version_info(self, connection: Connection) -> Tuple[int, ...]:
         # get database server version info explicitly over the wire

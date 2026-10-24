@@ -605,7 +605,7 @@ def downgrade():
 
 **Notes and limitations:**
 
-- Only `ADD COLUMN` and `DROP COLUMN` are coalesced. `MODIFY COLUMN` (type/nullability changes) and property/distribution changes remain separate statements. If a table has both a combined add/drop *and* a modify in the same revision, they are still two schema-change jobs — enable the wait option below, or split them into separate revisions.
+- Only `ADD COLUMN` and `DROP COLUMN` are coalesced. `MODIFY COLUMN` (type/nullability changes) and property/distribution changes remain separate statements. If a table has both a combined add/drop *and* a modify in the same revision, they are still two schema-change jobs, which run one after the other (see below).
 - The combined operation compiles to a single `ALTER TABLE`, so its column ordering within one statement does not matter to StarRocks.
 - **Known gap — RANGE-distributed tables (StarRocks 4.2 / CelerData 26.2, private preview).** In shared-data mode with the FE config `enable_range_distribution = true`, a table declared with an explicit key type or `ORDER BY` and no `DISTRIBUTED BY` clause is distributed by range. On such a table, StarRocks routes a change that shifts the range sort key — adding a key column, or dropping a sort-key column — to a dedicated rewrite job that it refuses to run alongside any other clause:
 
@@ -619,7 +619,7 @@ def downgrade():
 
 #### Waiting for schema changes to reach a terminal state (opt-in)
 
-Even with coalescing, `ALTER TABLE` returns *before* the async job finishes, so a later operation on the same table (in the same `alembic upgrade` run) can still collide. To make your migration pipeline stay 100% in sync with the cluster, opt in to blocking until each column schema change reaches a terminal state (`FINISHED`/`CANCELLED`):
+Even with coalescing, `ALTER TABLE` returns *before* the async job finishes, and StarRocks rejects any other change to the table until it has. The dialect therefore holds back a later `ALTER TABLE`, `CREATE INDEX` or `DROP INDEX` on the same table until the table's running `COLUMN` or `OPTIMIZE` job has ended, so the operations of one `alembic upgrade` run do not collide. That wait does not look at how the job ended. To make your migration pipeline stay 100% in sync with the cluster, opt in to blocking until each column schema change reaches a terminal state (`FINISHED`/`CANCELLED`), and stopping when one is cancelled:
 
 ```python
 context.configure(

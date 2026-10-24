@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Optional, Union
 
 from sqlalchemy.connectors.asyncio import AsyncIODBAPIConnection
@@ -50,6 +51,10 @@ class StarRocksDialect_asyncmy(StarRocksDialect):
 
     def do_terminate(self, dbapi_connection: DBAPIConnection) -> None:
         dbapi_connection.terminate()
+
+    def _pause(self, seconds: float) -> None:
+        """Wait between schema-change polls without blocking the event loop."""
+        util.await_only(asyncio.sleep(seconds))
 
     def create_connect_args(self, url: URL) -> ConnectArgsType:  # type: ignore[override]  # noqa: E501
         return super().create_connect_args(

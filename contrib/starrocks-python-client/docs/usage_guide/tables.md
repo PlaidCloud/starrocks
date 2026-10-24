@@ -467,26 +467,23 @@ This ensures that your model definitions correctly map to StarRocks's native dat
 
 #### Handling Time-Consuming ALTER TABLE Operations
 
-StarRocks schema change operations (like `ALTER TABLE ... MODIFY COLUMN`) can be time-consuming. Because one table can have only one ongoing schema change operation at a time, StarRocks does not allow other schema change jobs to be submitted for the same table.
+StarRocks schema change operations (like `ALTER TABLE ... MODIFY COLUMN`, building a secondary index, or changing the distribution) run as asynchronous jobs and can be time-consuming. Because one table can have only one ongoing schema change operation at a time, StarRocks rejects any other change to the table, with "A schema change operation is in progress", until the job has ended.
 
-> Some other operations, such as rename, comment, partition, index and swap, are synchronous operations, a command return indicates that the execution is finished. Then, the next operation can be submitted.
+> Rename, comment, partition and swap operations are synchronous: when the statement returns, the change is done.
 
 Alembic's `autogenerate` feature may produce an `upgrade()` function that contains multiple consecutive `op.alter_column()` or other `ALTER TABLE` calls for a single table. For example:
 
 ```python
 def upgrade():
-    # Potentially problematic if schema changes are slow
     op.alter_column('my_table', 'col1', ...)
     op.alter_column('my_table', 'col2', ...)
 ```
 
-If the first `alter_column` operation takes a long time to complete, the second one will fail when Alembic tries to execute it immediately after the first.
+The dialect holds back each `ALTER TABLE`, `CREATE INDEX` and `DROP INDEX` until the job running on its table has ended, so these run one after the other, and `metadata.create_all()` can create several indexes on one table. The wait lasts as long as the job does; INFO logging on the `starrocks.dialect` logger shows what a statement is waiting for.
 
 **Recommendation:**
 
-For potentially slow `ALTER TABLE` operations, it is recommended to modify only **one column or one table property at a time**. After `autogenerate` creates a migration script, review it. If you see multiple `ALTER` operations for the same table that you suspect might be slow, you should split them into separate migration scripts.
-
-However, operations that are typically fast, such as adding or dropping multiple columns, can often be executed together without issue.
+Each slow schema change rewrites the table's data, so on a large table prefer one statement over several where StarRocks allows it: the `combine_column_alters` rewriter in the [Alembic guide](alembic.md#44-coalescing-column-changes-into-a-single-alter-table) folds a table's added and dropped columns into one `ALTER TABLE`.
 
 #### Limitations on Modifying Complex Type Columns
 
