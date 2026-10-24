@@ -97,6 +97,25 @@ class CompareMaterializedViewTest(fixtures.TestBase):
         assert op.properties is None
         assert op.existing_properties is None
 
+    def test_an_omitted_refresh_is_left_alone(self):
+        """An MV with a distribution may omit its refresh; StarRocks then reports MANUAL, which is no change."""
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", distributed_by="RANDOM", refresh="MANUAL")
+        meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_distributed_by="RANDOM")
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        eq_(upgrade_ops.ops, [])
+
+    def test_a_refresh_the_database_does_not_report_has_no_downgrade_value(self):
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1")
+        meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_refresh="MANUAL")
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        eq_([(op.refresh, op.existing_refresh) for op in upgrade_ops.ops], [("MANUAL", None)])
+
     def test_alter_mv_properties_changed(self):
         """ALTER: Properties changed (generates AlterMaterializedViewOp)."""
         upgrade_ops = ops.UpgradeOps([])

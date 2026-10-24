@@ -1263,11 +1263,14 @@ def _compare_mv_refresh(
     Compare MV refresh schemes and add AlterMaterializedViewOp if changed.
 
     This is a mutable attribute that can be altered using ALTER MATERIALIZED VIEW. The refresh moment
-    (IMMEDIATE or DEFERRED) is not part of the comparison, see `_compare_mv_refresh_moment`.
+    (IMMEDIATE or DEFERRED) is not part of the comparison, see `_compare_mv_refresh_moment`. A model that states no
+    refresh, which an MV with a distribution may omit, leaves the database's alone.
     """
     conn_refresh_raw = conn_mv_attributes.get(TableInfoKey.REFRESH)
     meta_refresh_raw = meta_mv_attributes.get(TableInfoKey.REFRESH)
     logger.debug("Compare mv refresh: conn_refresh_raw=%s, meta_refresh_raw=%s", conn_refresh_raw, meta_refresh_raw)
+    if meta_refresh_raw is None:
+        return
 
     conn_refresh = _normalize_refresh_scheme(conn_refresh_raw)
     meta_refresh = _normalize_refresh_scheme(meta_refresh_raw)
@@ -1281,7 +1284,7 @@ def _compare_mv_refresh(
                 schema=schema,
                 refresh=str(meta_refresh_raw),
                 properties=None,
-                existing_refresh=str(conn_refresh_raw),
+                existing_refresh=str(conn_refresh_raw) if conn_refresh_raw is not None else None,
                 existing_properties=None,
             )
         )
