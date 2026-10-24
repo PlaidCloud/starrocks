@@ -55,6 +55,7 @@ from starrocks.datatype import (
     VARBINARY,
     VARCHAR,
 )
+from test.util import DECIMAL256_NEEDS_4_0, STRUCT_FIELD_NAMES_UNQUOTED
 
 
 logger = logging.getLogger(__name__)
