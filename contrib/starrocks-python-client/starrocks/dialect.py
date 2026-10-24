@@ -58,7 +58,7 @@ from sqlalchemy.engine.interfaces import ExecutionContext
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
 from sqlalchemy.engine.row import Row
 from sqlalchemy.sql import bindparam, operators, sqltypes
-from sqlalchemy.sql.elements import BinaryExpression
+from sqlalchemy.sql.elements import BinaryExpression, Grouping
 from sqlalchemy.sql.expression import Delete, Insert, Select, TableClause, Update
 
 from starrocks.common import utils
@@ -437,13 +437,23 @@ class StarRocksSQLCompiler(MySQLCompiler):
         return access
 
     def _json_document_and_paths(self, binary: Any, **kw: Any) -> Tuple[str, List[str]]:
-        """Return the JSON document a chain of accesses starts from, and the path of each access in order."""
-        left = binary.left
+        """Return the JSON document a chain of accesses starts from, and the path of each access in order.
+
+        SQLAlchemy groups the inner access when the chain mixes an index with a path, as ``j[("a", 2)][1]``
+        does, so the grouping is looked through to find it.
+        """
+        left = self._ungrouped(binary.left)
         if isinstance(left, BinaryExpression) and left.operator in self._JSON_ACCESS_OPERATORS:
             document, paths = self._json_document_and_paths(left, **kw)
         else:
-            document, paths = self.process(left, **kw), []
+            document, paths = self.process(binary.left, **kw), []
         return document, [*paths, self.process(binary.right, **kw)]
+
+    @staticmethod
+    def _ungrouped(element: Any) -> Any:
+        while isinstance(element, Grouping):
+            element = element.element
+        return element
 
     def _json_access_function(self, access_type: sqltypes.TypeEngine) -> str:
         affinity = access_type._type_affinity

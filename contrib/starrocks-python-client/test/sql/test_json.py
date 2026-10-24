@@ -70,6 +70,8 @@ class JsonAccessCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             lambda: DATA["a"]["b"]["c"].as_string(),
             "get_json_string(documents.data, concat(%s, substring(%s, 2), substring(%s, 2)))",
         ),
+        ("path_then_index", lambda: DATA[("a", 2)][1], "json_query(documents.data, concat(%s, substring(%s, 2)))"),
+        ("index_then_path", lambda: DATA["a"][(2, 1)], "json_query(documents.data, concat(%s, substring(%s, 2)))"),
         id_="iaa",
         argnames="expression_factory, expected",
     )
@@ -127,6 +129,7 @@ class JsonAccessTest(fixtures.TablesTest):
         "nothing": None,
         "nested": {"deep": {"leaf": 7}},
         "items": [10, 20, 30],
+        "grid": [[1, 2], [3, {"deep": 4}]],
     }
 
     @classmethod
@@ -203,6 +206,14 @@ class JsonAccessTest(fixtures.TablesTest):
         eq_(self._scalar(connection, data["items"][1]), 20)
         eq_(self._scalar(connection, data["nested"]["deep"]["leaf"]), 7)
         eq_(self._scalar(connection, data["items"][2].as_integer()), 30)
+
+    def test_chained_access_mixing_paths_and_indexes(self, connection):
+        """A chain that mixes a path with an index is joined too; nested calls read another element on 4.1."""
+        data = self.tables.json_access.c.data
+        eq_(self._scalar(connection, data[("grid", 1)][0]), 3)
+        eq_(self._scalar(connection, data[("grid", 1)][1]["deep"]), 4)
+        eq_(self._scalar(connection, data["grid"][(1, 1, "deep")].as_integer()), 4)
+        eq_(self._scalar(connection, data[("nested",)][("deep", "leaf")]), 7)
 
     @testing.combinations(("empty", ""), ("double_quote", 'q"uote'), id_="ia", argnames="key")
     def test_a_key_a_path_cannot_name_is_refused(self, connection, key):
