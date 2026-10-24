@@ -2517,7 +2517,12 @@ class StarRocksDialect(MySQLDialect_pymysql):
             if row.Extra
         }
 
+        generated_partition_columns = self._generated_partition_columns(show_create_table)
+        if generated_partition_columns:
+            column_rows = [row for row in column_rows if row.COLUMN_NAME not in generated_partition_columns]
         partition_clause = self._get_partition_clause_from_create_table(show_create_table)
+        for name, expression in generated_partition_columns.items() if partition_clause else ():
+            partition_clause = partition_clause.replace(self.identifier_preparer.quote_identifier(name), expression)
         # Add the partition info into table_config row for convenience
         # But the row object is immutable, so we convert it to a dictionary to modify it.
         table_config_dict = dict(table_config_row)
@@ -2687,6 +2692,21 @@ class StarRocksDialect(MySQLDialect_pymysql):
         }
         # logger.debug("get auto increment info from show create table: %s", col_autoinc)
         return col_autoinc
+
+    _GENERATED_PARTITION_COLUMN: Final[re.Pattern[str]] = re.compile(
+        r'^\s*`(__generated_partition_column_\d+)`\s.*?\sAS\s(.+?)\sCOMMENT\s"', re.MULTILINE
+    )
+
+    @classmethod
+    def _generated_partition_columns(cls, create_table: str) -> Dict[str, str]:
+        """Return the hidden columns StarRocks generated for an expression partition, with their expressions.
+
+        StarRocks 3.5 partitions by an expression such as ``substr(s, 1, 2)`` or ``time_slice(dt, ..., ceil)``
+        through a generated column ``__generated_partition_column_N``, which SHOW CREATE TABLE and information_schema
+        list and PARTITION BY names. The model has neither, so reflection leaves the column out and puts its
+        expression back into the partition clause. StarRocks 4.1 hides the column itself.
+        """
+        return {match.group(1): match.group(2) for match in cls._GENERATED_PARTITION_COLUMN.finditer(create_table)}
 
     def _get_partition_clause_from_create_table(self, create_table: str) -> Optional[str]:
         """
