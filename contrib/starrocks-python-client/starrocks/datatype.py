@@ -17,14 +17,17 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from inspect import isclass
 import json
+import math
 import re
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple, Type, Union
 
-from sqlalchemy import cast, func, literal_column, util
+from sqlalchemy import func, literal_column, util
 import sqlalchemy.dialects.mysql.types as mysql_types
 from sqlalchemy.engine import Dialect
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import sqltypes
 from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.visitors import InternalTraversal
 from sqlalchemy.types import UserDefinedType
 
 
@@ -276,22 +279,32 @@ class StructuredType(UserDefinedType):
 
     def bind_processor(self, dialect: Dialect) -> Callable[[Optional[Any]], Optional[str]]:
         """
-        Encode Python values (list, dict, ...) as JSON text for binding.
+        Encode a Python value (list, dict, ...) as one JSON document for binding.
 
-        The DBAPI driver has no native encoding for structured types, so
-        values are sent as a JSON string and cast to the target structured
-        type at bind time; see ``bind_expression``.
+        Every leaf is encoded by its declared element type, as text for everything
+        but JSON elements, so the server-side expression built by ``bind_expression``
+        casts it back losslessly; see ``StructuredBindExpression``.
         """
         def process(value: Optional[Any]) -> Optional[str]:
             if value is None:
                 return None
-            return json.dumps(value, default=str)
+            return json.dumps(encode_structured_value(self, value, dialect))
+
+        return process
+
+    def literal_processor(self, dialect: Dialect) -> Callable[[Optional[Any]], str]:
+        """Render the JSON document ``bind_processor`` builds as an escaped SQL string literal."""
+        encode = self.bind_processor(dialect)
+        quote = sqltypes.String().literal_processor(dialect)
+
+        def process(value: Optional[Any]) -> str:
+            return quote(encode(value))
 
         return process
 
     def bind_expression(self, bindvalue: ColumnElement) -> ColumnElement:
-        """Cast the JSON-encoded bind parameter to this structured type."""
-        return cast(bindvalue, self)
+        """Turn the bound JSON document into a value of this type, evaluated by the server."""
+        return StructuredBindExpression(bindvalue, self)
 
 
 class ARRAY(StructuredType):
@@ -369,14 +382,6 @@ class MAP(StructuredType):
             types.update(self.value_type.get_sub_item_types())
         return types
 
-    def bind_expression(self, bindvalue: ColumnElement) -> ColumnElement:
-        """Cast the JSON-encoded bind parameter to this MAP type.
-
-        Unlike ``ARRAY``, StarRocks does not support casting a VARCHAR
-        directly to ``MAP``; the value must be parsed to ``JSON`` first.
-        """
-        return cast(func.parse_json(bindvalue), self)
-
 
 _PLAIN_FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -452,13 +457,216 @@ class STRUCT(StructuredType):
                 types.update(type_.get_sub_item_types())
         return types
 
-    def bind_expression(self, bindvalue: ColumnElement) -> ColumnElement:
-        """Cast the JSON-encoded bind parameter to this STRUCT type.
 
-        Unlike ``ARRAY``, StarRocks does not support casting a VARCHAR
-        directly to ``STRUCT``; the value must be parsed to ``JSON`` first.
+def _structured_leaf_kind(type_: sqltypes.TypeEngine, dialect: Dialect) -> str:
+    """Classify a non-structured element type by how its values travel inside the bound JSON document."""
+    impl = type_.dialect_impl(dialect)
+    if isinstance(impl, sqltypes.JSON):
+        return "json"
+    if isinstance(impl, sqltypes.Boolean):
+        return "boolean"
+    if isinstance(impl, (sqltypes.Integer, sqltypes.Numeric)):
+        return "number"
+    if isinstance(impl, sqltypes.DateTime):
+        return "datetime"
+    if isinstance(impl, sqltypes.Date):
+        return "date"
+    if isinstance(impl, sqltypes._Binary):
+        return "binary"
+    if isinstance(impl, sqltypes.String):
+        return "string"
+    return "other"
+
+
+def _encode_number(value: Any) -> str:
+    if isinstance(value, bool):
+        return str(int(value))
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError("cannot store %r in a numeric element" % (value,))
+        return format(value, "f")
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("cannot store %r in a numeric element" % (value,))
+        return repr(value)
+    return str(value)
+
+
+def _encode_datetime(value: Any) -> str:
+    if isinstance(value, datetime):
+        if value.utcoffset() is not None:
+            raise ValueError(
+                "StarRocks DATETIME has no time zone; convert %r to a naive "
+                "datetime in the intended zone" % (value,)
+            )
+        return value.isoformat(sep=" ")
+    return value.isoformat() if isinstance(value, date) else str(value)
+
+
+def _encode_structured_leaf(kind: str, value: Any) -> Any:
+    if kind == "json":
+        return value
+    if kind == "boolean":
+        return "true" if value else "false"
+    if kind == "number":
+        return _encode_number(value)
+    if kind in ("datetime", "date"):
+        return _encode_datetime(value)
+    if kind == "binary":
+        return bytes(value).hex()
+    return value if isinstance(value, str) else str(value)
+
+
+def _struct_values_in_field_order(type_: "STRUCT", value: Any) -> List[Any]:
+    """Order a STRUCT value by the declared fields; a missing field is NULL and an unknown one is an error."""
+    names = [name for name, _ in type_.field_tuples]
+    if isinstance(value, (list, tuple)):
+        if len(value) != len(names):
+            raise ValueError("expected %d STRUCT fields %s, got %r" % (len(names), names, value))
+        return list(value)
+    if not isinstance(value, Mapping):
+        raise ValueError("expected a STRUCT value as a dict, got %r" % (value,))
+    by_lower_name = {name.lower(): name for name in names}
+    values: Dict[str, Any] = {}
+    for key, item in value.items():
+        name = key if key in names else by_lower_name.get(str(key).lower())
+        if name is None or name in values:
+            raise ValueError("%r is not a field of %r, which has %s" % (key, type_, names))
+        values[name] = item
+    return [values.get(name) for name in names]
+
+
+def encode_structured_value(type_: sqltypes.TypeEngine, value: Any, dialect: Dialect) -> Any:
+    """Encode a Python value as the JSON-ready form the bind expression of ``type_`` decodes.
+
+    An ARRAY is a list of its encoded items, a MAP is ``[keys, values]``, and a STRUCT is the list of its
+    fields in declared order, so no name or key is ever looked up in the document. A leaf is a string
+    (a number as exact text) unless it is JSON, which is nested as is. ``None`` stays JSON null.
+    """
+    type_ = StructuredType._check_subtype(type_)
+    if value is None:
+        return None
+    if isinstance(type_, ARRAY):
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("expected an ARRAY value as a list, got %r" % (value,))
+        return [encode_structured_value(type_.item_type, item, dialect) for item in value]
+    if isinstance(type_, MAP):
+        if not isinstance(value, Mapping):
+            raise ValueError("expected a MAP value as a dict, got %r" % (value,))
+        return [
+            [encode_structured_value(type_.key_type, key, dialect) for key in value],
+            [encode_structured_value(type_.value_type, item, dialect) for item in value.values()],
+        ]
+    if isinstance(type_, STRUCT):
+        values = _struct_values_in_field_order(type_, value)
+        return [
+            encode_structured_value(field_type, item, dialect)
+            for (_, field_type), item in zip(type_.field_tuples, values)
+        ]
+    return _encode_structured_leaf(_structured_leaf_kind(type_, dialect), value)
+
+
+class StructuredBindExpression(ColumnElement):
+    """SQL that builds an ARRAY, MAP or STRUCT value from the one JSON document a bind parameter carries.
+
+    The server's own text-to-ARRAY cast is not a JSON parser and its JSON-to-DECIMAL/DATE/MAP/STRUCT casts
+    are missing or version-dependent, so each element is taken out of the parsed document as JSON and cast
+    on its own: ``CAST(CAST(element AS VARCHAR) AS type)``, nested through ``array_map``, ``map_from_arrays``
+    and ``named_struct``. Only ``CAST(.. AS ARRAY<JSON>)``, ``parse_json`` and these functions are needed,
+    which every supported StarRocks version provides. The expression is rendered at compile time because it
+    depends on the declared element types.
+    """
+
+    inherit_cache = True
+    _traverse_internals = [
+        ("bindvalue", InternalTraversal.dp_clauseelement),
+        ("type", InternalTraversal.dp_type),
+    ]
+
+    def __init__(self, bindvalue: ColumnElement, type_: StructuredType) -> None:
+        self.bindvalue = bindvalue
+        self.type = type_
+
+
+class _StructuredExpressionRenderer:
+    """Render the SQL that ``StructuredBindExpression`` compiles to; lambda variables are numbered to stay unique."""
+
+    def __init__(self, compiler: Any) -> None:
+        self.dialect = compiler.dialect
+        self.type_compiler = getattr(self.dialect, "type_compiler_instance", None) or self.dialect.type_compiler
+        self.quote_string = sqltypes.String().literal_processor(self.dialect)
+        self.variable_count = 0
+
+    def render(self, type_: StructuredType, bound_sql: str) -> str:
+        return self.convert(type_, f"parse_json({bound_sql})")
+
+    def new_variable(self) -> str:
+        self.variable_count += 1
+        return f"e{self.variable_count}"
+
+    def convert(self, type_: sqltypes.TypeEngine, json_sql: str) -> str:
+        type_ = StructuredType._check_subtype(type_)
+        if isinstance(type_, ARRAY):
+            return self.convert_array(type_.item_type, f"CAST({json_sql} AS ARRAY<JSON>)")
+        if isinstance(type_, MAP):
+            return self.build_unless_null(json_sql, lambda name: self.convert_map(type_, name))
+        if isinstance(type_, STRUCT):
+            return self.build_unless_null(json_sql, lambda name: self.convert_struct(type_, name))
+        return self.convert_leaf(type_, json_sql)
+
+    def build_unless_null(self, json_sql: str, build: Callable[[str], str]) -> str:
+        """Build a MAP or STRUCT from ``json_sql`` under a lambda variable, or NULL when it is NULL.
+
+        ``named_struct`` of NULL fields is a struct of NULLs, not NULL; ``IF(.., NULL, named_struct(..))`` is
+        refused before 3.5; and a NULL ``map_from_arrays`` result crashes the backend of 3.3 and 3.4 when it
+        is a constant in ``INSERT .. VALUES``. So the single-element array holding the document is filtered
+        down to nothing for a NULL document, and ``element_at`` of the empty array is a typed NULL.
         """
-        return cast(func.parse_json(bindvalue), self)
+        name = self.new_variable()
+        present = self.new_variable()
+        present_only = f"array_filter({present} -> {present} IS NOT NULL, [{json_sql}])"
+        return f"element_at(array_map({name} -> {build(name)}, {present_only}), 1)"
+
+    def convert_array(self, item_type: sqltypes.TypeEngine, items_sql: str) -> str:
+        item_type = StructuredType._check_subtype(item_type)
+        if _is_json_leaf(item_type, self.dialect):
+            return items_sql
+        name = self.new_variable()
+        return f"array_map({name} -> {self.convert(item_type, name)}, {items_sql})"
+
+    def convert_map(self, type_: MAP, name: str) -> str:
+        pair = f"CAST({name} AS ARRAY<JSON>)"
+        keys = self.convert_array(type_.key_type, f"CAST({pair}[1] AS ARRAY<JSON>)")
+        values = self.convert_array(type_.value_type, f"CAST({pair}[2] AS ARRAY<JSON>)")
+        return f"map_from_arrays({keys}, {values})"
+
+    def convert_struct(self, type_: STRUCT, name: str) -> str:
+        fields = ", ".join(
+            f"{self.quote_string(field_name)}, {self.convert(field_type, f'CAST({name} AS ARRAY<JSON>)[{position}]')}"
+            for position, (field_name, field_type) in enumerate(type_.field_tuples, start=1)
+        )
+        return f"named_struct({fields})"
+
+    def convert_leaf(self, type_: sqltypes.TypeEngine, json_sql: str) -> str:
+        kind = _structured_leaf_kind(type_, self.dialect)
+        if kind == "json":
+            return json_sql
+        text = f"CAST({json_sql} AS VARCHAR)"
+        if kind == "string":
+            return text
+        if kind == "binary":
+            return f"to_binary({text}, 'hex')"
+        return f"CAST({text} AS {self.type_compiler.process(type_)})"
+
+
+def _is_json_leaf(type_: sqltypes.TypeEngine, dialect: Dialect) -> bool:
+    return not isinstance(type_, StructuredType) and _structured_leaf_kind(type_, dialect) == "json"
+
+
+@compiles(StructuredBindExpression)
+def compile_structured_bind_expression(element: StructuredBindExpression, compiler: Any, **kw: Any) -> str:
+    bound_sql = compiler.process(element.bindvalue, **kw)
+    return _StructuredExpressionRenderer(compiler).render(element.type, bound_sql)
 
 
 class JSON(sqltypes.JSON):

@@ -24,10 +24,26 @@ rejects as invalid syntax for a structured-type literal.
 
 Each class inserts its rows once, through ``insert_data``, and its tests read them back.
 """
-from sqlalchemy import Column, Integer, Table, select
+from datetime import date, datetime
+from decimal import Decimal
+
+from sqlalchemy import Column, Integer, Table, select, testing
 from sqlalchemy.testing import fixtures
 
-from starrocks.datatype import ARRAY, INTEGER, MAP, STRUCT, VARCHAR
+from starrocks.datatype import (
+    ARRAY,
+    BOOLEAN,
+    DATE,
+    DATETIME,
+    DECIMAL,
+    DOUBLE,
+    INTEGER,
+    JSON,
+    LARGEINT,
+    MAP,
+    STRUCT,
+    VARCHAR,
+)
 
 
 class _InsertedRowsTest(fixtures.TablesTest):
@@ -173,3 +189,96 @@ class StructBindExpressionTest(_InsertedRowsTest):
         rows = self._rows(connection, self.tables.test_bind_struct)
         assert rows[2].info is None
         assert rows[2].nested is None
+
+
+_BIG = 170141183460469231731687303715884105727
+
+
+class ComplexValueRoundTripTest(fixtures.TestBase):
+    """Every value bound to an ARRAY, MAP or STRUCT column must come back exactly, whatever its element types.
+
+    The server's text-to-ARRAY cast mis-splits a string holding a quote and turns quoted decimals and dates
+    into NULL, and its JSON casts to MAP and STRUCT are refused or missing on older versions, so each value
+    is rebuilt element by element on the server. Each case is bound once through ``insert().values`` and
+    twice through ``executemany``.
+    """
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @testing.combinations(
+        (
+            "array_of_awkward_strings",
+            ARRAY(VARCHAR(50)),
+            ["a", "b'c", None, 'q"r', "back\\slash", "uni \u00e9\u4e2d \U0001f600", "null", "", "100%", "[x]"],
+        ),
+        ("array_of_decimal", ARRAY(DECIMAL(10, 2)), [Decimal("1.25"), None, Decimal("-0.01")]),
+        ("array_of_date", ARRAY(DATE()), [date(2024, 2, 29), None]),
+        (
+            "array_of_datetime",
+            ARRAY(DATETIME()),
+            [datetime(2024, 2, 29, 10, 11, 12, 123456), datetime(2024, 1, 1)],
+        ),
+        ("array_of_boolean", ARRAY(BOOLEAN()), [True, False, None]),
+        ("array_of_json", ARRAY(JSON()), [{"a": [1, None]}, 1, "1", None, [2]]),
+        ("array_of_largeint", ARRAY(LARGEINT()), [_BIG, -_BIG - 1, 0]),
+        ("array_of_double", ARRAY(DOUBLE()), [0.1, 1e-07, -3.5e20]),
+        ("empty_array", ARRAY(INTEGER()), []),
+        ("array_of_nulls", ARRAY(INTEGER()), [None, None]),
+        ("array_of_array_of_decimal", ARRAY(ARRAY(DECIMAL(10, 2))), [[Decimal("1.10")], [], None]),
+        ("map_of_decimal", MAP(INTEGER(), DECIMAL(10, 2)), {1: Decimal("1.25"), 2: None}),
+        ("map_of_array_of_date", MAP(VARCHAR(20), ARRAY(DATE())), {"k'1": [date(2024, 1, 2)], "k2": []}),
+        ("empty_map", MAP(VARCHAR(20), INTEGER()), {}),
+        (
+            "struct_with_nested_struct_and_array",
+            STRUCT(a=INTEGER(), b=STRUCT(c=VARCHAR(10), d=ARRAY(DATE()))),
+            {"a": 1, "b": {"c": "x'y", "d": [date(2024, 1, 2), None]}},
+        ),
+        ("struct_of_nulls", STRUCT(a=INTEGER(), b=VARCHAR(10)), {"a": None, "b": None}),
+        (
+            "array_of_struct",
+            ARRAY(STRUCT(a=INTEGER(), s=VARCHAR(10))),
+            [{"a": 1, "s": "x"}, None, {"a": 2, "s": None}],
+        ),
+        (
+            "map_of_struct_with_map",
+            MAP(VARCHAR(10), STRUCT(a=INTEGER(), m=MAP(INTEGER(), VARCHAR(5)))),
+            {"q": {"a": 1, "m": {1: "z"}}},
+        ),
+        argnames="type_,value",
+        id_="iaa",
+    )
+    def test_value_round_trips(self, connection, metadata, type_, value):
+        table = Table(
+            "test_bind_round_trip",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("v", type_),
+            starrocks_distributed_by="HASH(id) BUCKETS 1",
+            starrocks_properties={"replication_num": "1"},
+        )
+        table.create(connection)
+        connection.execute(table.insert().values(id=1, v=value))
+        connection.execute(table.insert(), [{"id": 2, "v": value}, {"id": 3, "v": value}])
+        connection.execute(table.insert().values(id=4, v=None))
+
+        rows = connection.execute(select(table.c.v).order_by(table.c.id)).scalars().all()
+
+        assert rows == [value, value, value, None]
+
+    def test_literal_binds_value_round_trips(self, connection, metadata):
+        type_ = ARRAY(STRUCT(s=VARCHAR(20), d=ARRAY(DECIMAL(10, 2))))
+        value = [{"s": "it's 100%", "d": [Decimal("1.25"), None]}, None]
+        table = Table(
+            "test_bind_literal",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("v", type_),
+            starrocks_distributed_by="HASH(id) BUCKETS 1",
+            starrocks_properties={"replication_num": "1"},
+        )
+        table.create(connection)
+        statement = table.insert().values(id=1, v=value)
+        connection.exec_driver_sql(str(statement.compile(connection, compile_kwargs={"literal_binds": True})))
+
+        assert connection.execute(select(table.c.v)).scalar_one() == value

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import json
 import warnings
@@ -332,12 +332,17 @@ def _bind(type_obj, value):
     return proc(value)
 
 
-class StructuredTypeBindProcessorTest(fixtures.TestBase):
-    """bind_processor must JSON-encode Python values for parameter binding.
+def _insert_sql(type_obj, **compile_kwargs):
+    table = Table("t", MetaData(), Column("v", type_obj))
+    return str(insert(table).compile(dialect=_DIALECT, **compile_kwargs))
 
-    Without this, the DBAPI driver falls back to escaping lists/dicts as SQL
+
+class StructuredTypeBindProcessorTest(fixtures.TestBase):
+    """bind_processor must encode a value as one JSON document the bind expression can decode exactly.
+
+    Without it, the DBAPI driver falls back to escaping lists/dicts as SQL
     tuples (e.g. ``('a', 'b')``), which is invalid syntax for structured
-    literals.
+    literals. Leaves travel as text, so no number or date is quoted into NULL.
     """
 
     def test_array_encodes_list_as_json(self):
@@ -347,59 +352,157 @@ class StructuredTypeBindProcessorTest(fixtures.TestBase):
         assert _bind(datatype.ARRAY(datatype.INTEGER), None) is None
 
     def test_nested_array_encodes_as_json(self):
-        assert _bind(datatype.ARRAY(datatype.ARRAY(datatype.INTEGER)), [[1, 2], [3]]) == "[[1, 2], [3]]"
+        assert _bind(datatype.ARRAY(datatype.ARRAY(datatype.INTEGER)), [[1, 2], [3]]) == '[["1", "2"], ["3"]]'
 
-    def test_map_encodes_dict_as_json(self):
-        assert _bind(datatype.MAP(datatype.VARCHAR(10), datatype.INTEGER), {"a": 1}) == '{"a": 1}'
+    def test_map_encodes_keys_and_values_as_two_lists(self):
+        assert _bind(datatype.MAP(datatype.VARCHAR(10), datatype.INTEGER), {"a": 1}) == '[["a"], ["1"]]'
 
     def test_map_null_returns_none(self):
         assert _bind(datatype.MAP(datatype.VARCHAR(10), datatype.INTEGER), None) is None
 
-    def test_struct_encodes_dict_as_json(self):
+    def test_struct_encodes_fields_in_declared_order(self):
         t = datatype.STRUCT(name=datatype.VARCHAR(10), age=datatype.INTEGER)
-        assert _bind(t, {"name": "Alice", "age": 30}) == '{"name": "Alice", "age": 30}'
+        assert _bind(t, {"age": 30, "name": "Alice"}) == '["Alice", "30"]'
+
+    def test_struct_missing_field_is_null(self):
+        t = datatype.STRUCT(name=datatype.VARCHAR(10), age=datatype.INTEGER)
+        assert _bind(t, {"name": "Alice"}) == '["Alice", null]'
+
+    def test_struct_field_names_match_case_insensitively(self):
+        t = datatype.STRUCT(Name=datatype.VARCHAR(10))
+        assert _bind(t, {"name": "Alice"}) == '["Alice"]'
+
+    def test_struct_unknown_field_is_rejected(self):
+        t = datatype.STRUCT(name=datatype.VARCHAR(10))
+        with testing.expect_raises_message(ValueError, "'nmae' is not a field"):
+            _bind(t, {"nmae": "Alice"})
 
     def test_struct_null_returns_none(self):
         t = datatype.STRUCT(name=datatype.VARCHAR(10))
         assert _bind(t, None) is None
 
-    def test_decimal_values_are_encoded_via_default_str(self):
-        # json.dumps can't serialize Decimal natively; bind_processor must
-        # fall back to str() rather than raising.
-        result = _bind(datatype.ARRAY(datatype.DECIMAL(9, 3)), [Decimal("1.500")])
-        assert json.loads(result) == ["1.500"]
+    @testing.combinations(
+        (datatype.ARRAY(datatype.DECIMAL(9, 3)), [Decimal("1.500"), Decimal("1E+2"), None], ["1.500", "100", None]),
+        (datatype.ARRAY(datatype.DATE()), [date(2024, 2, 29)], ["2024-02-29"]),
+        (
+            datatype.ARRAY(datatype.DATETIME()),
+            [datetime(2024, 2, 29, 10, 11, 12, 123456), datetime(2024, 1, 1)],
+            ["2024-02-29 10:11:12.123456", "2024-01-01 00:00:00"],
+        ),
+        (datatype.ARRAY(datatype.BOOLEAN()), [True, False], ["true", "false"]),
+        (datatype.ARRAY(datatype.LARGEINT()), [2**127 - 1], [str(2**127 - 1)]),
+        (datatype.ARRAY(datatype.DOUBLE()), [0.1, 1e-07], ["0.1", "1e-07"]),
+        (datatype.ARRAY(datatype.VARBINARY()), [b"\x00\xff"], ["00ff"]),
+        (datatype.ARRAY(datatype.JSON()), [{"a": [1, None]}, 1, "1"], [{"a": [1, None]}, 1, "1"]),
+        (datatype.ARRAY(datatype.VARCHAR(20)), ["b'c", 'q"r', "s\\t", "\u00e9\u4e2d"], ["b'c", 'q"r', "s\\t", "\u00e9\u4e2d"]),
+        argnames="type_obj,value,encoded",
+    )
+    def test_leaves_are_encoded_by_declared_type(self, type_obj, value, encoded):
+        assert json.loads(_bind(type_obj, value)) == encoded
+
+    def test_aware_datetime_is_rejected(self):
+        with testing.expect_raises_message(ValueError, "has no time zone"):
+            _bind(datatype.ARRAY(datatype.DATETIME()), [datetime(2024, 1, 1, tzinfo=timezone.utc)])
+
+    @testing.combinations(
+        (datatype.ARRAY(datatype.DOUBLE()), [float("nan")]),
+        (datatype.ARRAY(datatype.DECIMAL(9, 3)), [Decimal("Infinity")]),
+        argnames="type_obj,value",
+    )
+    def test_non_finite_number_is_rejected(self, type_obj, value):
+        with testing.expect_raises_message(ValueError, "cannot store"):
+            _bind(type_obj, value)
+
+    @testing.combinations(
+        (datatype.ARRAY(datatype.INTEGER()), {"a": 1}),
+        (datatype.MAP(datatype.INTEGER(), datatype.INTEGER()), [1, 2]),
+        (datatype.STRUCT(a=datatype.INTEGER()), 5),
+        argnames="type_obj,value",
+    )
+    def test_value_of_the_wrong_shape_is_rejected(self, type_obj, value):
+        with testing.expect_raises_message(ValueError, "expected"):
+            _bind(type_obj, value)
 
 
 class StructuredTypeBindExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
-    """bind_expression must wrap bind params in a CAST the compiler can render.
+    """The bind parameter must become the declared type through casts the server evaluates correctly.
 
-    The MySQL/MariaDB SQL compiler that StarRocksSQLCompiler inherits from
-    only knows how to CAST to a hardcoded set of types and silently drops
-    the cast (with a warning) for anything else. StarRocksSQLCompiler must
-    recognize StructuredType so this doesn't happen for ARRAY/MAP/STRUCT.
+    The server's text-to-ARRAY cast is not a JSON parser, and its JSON casts to ARRAY<DECIMAL/DATE/DATETIME>,
+    MAP and STRUCT are refused or depend on the version, so every element is cast on its own from the parsed
+    document.
     """
 
     __dialect__ = _DIALECT
 
-    def test_array_casts_bind_param_directly(self):
-        """ARRAY supports casting a JSON-encoded VARCHAR directly; no parse_json needed."""
-        table = Table("t", MetaData(), Column("fruits", datatype.ARRAY(datatype.VARCHAR(50))))
-        self.assert_compile(insert(table), "INSERT INTO t (fruits) VALUES (CAST(%s AS ARRAY<VARCHAR(50)>))")
-
-    def test_map_casts_via_parse_json(self):
-        table = Table("t", MetaData(), Column("kv", datatype.MAP(datatype.VARCHAR(10), datatype.INTEGER)))
-        self.assert_compile(
-            insert(table), "INSERT INTO t (kv) VALUES (CAST(parse_json(%s) AS MAP<VARCHAR(10), INTEGER>))"
+    def test_array_casts_each_element(self):
+        assert _insert_sql(datatype.ARRAY(datatype.VARCHAR(50))) == (
+            "INSERT INTO t (v) VALUES (array_map(e1 -> CAST(e1 AS VARCHAR), CAST(parse_json(%s) AS ARRAY<JSON>)))"
         )
 
-    def test_struct_casts_via_parse_json(self):
-        table = Table(
-            "t", MetaData(), Column("info", datatype.STRUCT(name=datatype.VARCHAR(10), age=datatype.INTEGER))
+    def test_array_of_decimal_casts_through_text(self):
+        assert _insert_sql(datatype.ARRAY(datatype.DECIMAL(10, 2))) == (
+            "INSERT INTO t (v) VALUES (array_map(e1 -> CAST(CAST(e1 AS VARCHAR) AS DECIMAL(10, 2)), "
+            "CAST(parse_json(%s) AS ARRAY<JSON>)))"
         )
-        self.assert_compile(
-            insert(table),
-            "INSERT INTO t (info) VALUES (CAST(parse_json(%s) AS STRUCT<name VARCHAR(10), age INTEGER>))",
+
+    def test_array_of_json_keeps_the_parsed_elements(self):
+        assert _insert_sql(datatype.ARRAY(datatype.JSON())) == (
+            "INSERT INTO t (v) VALUES (CAST(parse_json(%s) AS ARRAY<JSON>))"
         )
+
+    def test_array_of_binary_decodes_hex(self):
+        assert _insert_sql(datatype.ARRAY(datatype.VARBINARY())) == (
+            "INSERT INTO t (v) VALUES (array_map(e1 -> to_binary(CAST(e1 AS VARCHAR), 'hex'), "
+            "CAST(parse_json(%s) AS ARRAY<JSON>)))"
+        )
+
+    def test_map_builds_from_key_and_value_arrays(self):
+        assert _insert_sql(datatype.MAP(datatype.INTEGER(), datatype.DECIMAL(10, 2))) == (
+            "INSERT INTO t (v) VALUES (element_at(array_map(e1 -> map_from_arrays("
+            "array_map(e3 -> CAST(CAST(e3 AS VARCHAR) AS INTEGER), CAST(CAST(e1 AS ARRAY<JSON>)[1] AS ARRAY<JSON>)), "
+            "array_map(e4 -> CAST(CAST(e4 AS VARCHAR) AS DECIMAL(10, 2)), CAST(CAST(e1 AS ARRAY<JSON>)[2] AS ARRAY<JSON>))), "
+            "array_filter(e2 -> e2 IS NOT NULL, [parse_json(%s)])), 1))"
+        )
+
+    def test_struct_builds_with_named_struct_and_null_stays_null(self):
+        assert _insert_sql(datatype.STRUCT(name=datatype.VARCHAR(10), age=datatype.INTEGER())) == (
+            "INSERT INTO t (v) VALUES (element_at(array_map(e1 -> named_struct("
+            "'name', CAST(CAST(e1 AS ARRAY<JSON>)[1] AS VARCHAR), "
+            "'age', CAST(CAST(CAST(e1 AS ARRAY<JSON>)[2] AS VARCHAR) AS INTEGER)), "
+            "array_filter(e2 -> e2 IS NOT NULL, [parse_json(%s)])), 1))"
+        )
+
+    def test_struct_field_name_is_an_escaped_literal(self):
+        sql = _insert_sql(datatype.STRUCT(**{"it's": datatype.INTEGER()}))
+        assert "named_struct('it''s', " in sql
+
+    def test_array_of_struct_nests_lambdas_without_reusing_variables(self):
+        sql = _insert_sql(datatype.ARRAY(datatype.STRUCT(a=datatype.INTEGER(), b=datatype.ARRAY(datatype.DATE()))))
+        assert sql == (
+            "INSERT INTO t (v) VALUES (array_map(e1 -> element_at(array_map(e2 -> named_struct("
+            "'a', CAST(CAST(CAST(e2 AS ARRAY<JSON>)[1] AS VARCHAR) AS INTEGER), "
+            "'b', array_map(e4 -> CAST(CAST(e4 AS VARCHAR) AS DATE), CAST(CAST(e2 AS ARRAY<JSON>)[2] AS ARRAY<JSON>))), "
+            "array_filter(e3 -> e3 IS NOT NULL, [e1])), 1), CAST(parse_json(%s) AS ARRAY<JSON>)))"
+        )
+
+    @testing.combinations(
+        (datatype.ARRAY(datatype.VARCHAR(5)), ["it's", "100%", "back\\slash"]),
+        (datatype.MAP(datatype.VARCHAR(5), datatype.INTEGER()), {"it's": 1}),
+        (datatype.STRUCT(a=datatype.VARCHAR(5)), {"a": "it's"}),
+        argnames="type_obj,value",
+    )
+    def test_literal_binds_renders_the_escaped_document(self, type_obj, value):
+        table = Table("t", MetaData(), Column("v", type_obj))
+        sql = str(insert(table).values(v=value).compile(dialect=_DIALECT, compile_kwargs={"literal_binds": True}))
+        document = json.dumps(datatype.encode_structured_value(type_obj, value, _DIALECT))
+        escaped = document.replace("\\", "\\\\").replace("'", "''").replace("%", "%%")
+        assert "parse_json('%s')" % escaped in sql
+        assert "%s" not in sql.replace("%%", "")
+
+    def test_literal_binds_renders_null(self):
+        table = Table("t", MetaData(), Column("v", datatype.ARRAY(datatype.INTEGER())))
+        sql = str(insert(table).values(v=None).compile(dialect=_DIALECT, compile_kwargs={"literal_binds": True}))
+        assert "CAST(parse_json(NULL) AS ARRAY<JSON>)" in sql
 
     def test_no_cast_is_skipped_warning(self):
         """Regression guard: casting a structured type must not warn/skip."""
