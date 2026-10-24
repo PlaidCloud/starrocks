@@ -1522,8 +1522,6 @@ class StarRocksDialect(MySQLDialect_pymysql):
     construct_arguments = [
         (Table, {variant: None for k in TableInfoKey.ALL for variant in (k.lower(), k.upper())}),
         (Column, {variant: None for k in ColumnAggInfoKey.ALL for variant in (k.lower(), k.upper())}),
-        (Update, {"limit": None}),
-        (Delete, {"limit": None}),
         (sa_schema.PrimaryKeyConstraint, {"using": None}),
         (
             sa_schema.Index,

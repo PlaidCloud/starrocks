@@ -14,8 +14,8 @@
 
 """UPDATE, DELETE and INSERT compilation."""
 
-from sqlalchemy import Column, Integer, MetaData, Table, delete, update
-from sqlalchemy.testing import fixtures
+from sqlalchemy import Column, Integer, MetaData, Table, delete, exc, testing, update
+from sqlalchemy.testing import expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
 from starrocks.dialect import StarRocksDialect
@@ -56,3 +56,19 @@ class MultiTableDmlCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             delete(A).where(A.c.id == B.c.id).where(B.c.id == C.c.id),
             "DELETE FROM a USING b, c WHERE a.id = b.id AND b.id = c.id",
         )
+
+
+class UnsupportedLimitTest(fixtures.TestBase):
+    """StarRocks has no ``UPDATE ... LIMIT`` or ``DELETE ... LIMIT``, so the dialect must not accept one."""
+
+    @testing.combinations(
+        (lambda: update(A).values(v=1), "Update"),
+        (lambda: delete(A), "Delete"),
+        argnames="statement_factory, statement_class",
+    )
+    def test_starrocks_limit_is_rejected(self, statement_factory, statement_class):
+        with expect_raises_message(
+            exc.ArgumentError,
+            f"Argument 'starrocks_limit' is not accepted by dialect 'starrocks' on behalf of .*{statement_class}",
+        ):
+            statement_factory().with_dialect_options(starrocks_limit=3)
