@@ -15,9 +15,10 @@
 """``MetaData.create_all()`` and ``drop_all()`` with views and materialized views next to tables."""
 
 from sqlalchemy import Column, MetaData, Table, inspect, literal, select, testing, text
+from sqlalchemy.schema import CreateTable
 from sqlalchemy.testing import fixtures
 
-from starrocks.datatype import INTEGER
+from starrocks.datatype import INTEGER, VARCHAR
 from starrocks.sql.schema import MaterializedView, View
 
 
@@ -72,6 +73,7 @@ class MetaDataCreateDropTest(fixtures.TestBase):
 
         metadata.drop_all(connection)
         assert not {"zz_base", "aa_view", "ab_mv"} & self._names(connection)
+
     @testing.requires.sqlalchemy_2
     def test_a_view_of_a_select_reads_its_columns(self, connection):
         """A ``select()`` definition names a mixed-case and a reserved column as StarRocks reads them, and keeps a
@@ -93,3 +95,47 @@ class MetaDataCreateDropTest(fixtures.TestBase):
         finally:
             metadata.drop_all(connection)
 
+
+class ReflectedTableRecreateTest(fixtures.TestBase):
+    """A reflected table's CREATE TABLE runs again on every version, with its partition, distribution and sort key."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    def test_a_reflected_table_is_created_again(self, connection):
+        connection.exec_driver_sql(
+            "CREATE TABLE reflected_to_recreate (k INT, d DATE) DUPLICATE KEY(k) PARTITION BY date_trunc('day', d) "
+            "DISTRIBUTED BY HASH(k) BUCKETS 2 ORDER BY (k) PROPERTIES('replication_num' = '1')"
+        )
+        try:
+            reflected = Table("reflected_to_recreate", MetaData(), autoload_with=connection)
+            connection.exec_driver_sql(
+                str(CreateTable(reflected).compile(connection)).replace("reflected_to_recreate", "recreated", 1)
+            )
+            options = inspect(connection).get_table_options("recreated")
+            assert "date_trunc" in str(options["starrocks_partition_by"]), options
+        finally:
+            connection.exec_driver_sql("DROP TABLE IF EXISTS recreated")
+            connection.exec_driver_sql("DROP TABLE IF EXISTS reflected_to_recreate")
+
+    def test_a_reflected_column_list_partition_is_created_again(self, metadata, connection):
+        Table(
+            "partitioned_by_columns",
+            metadata,
+            Column("k", INTEGER),
+            Column("s", VARCHAR(10)),
+            starrocks_partition_by="k, s",
+            starrocks_distributed_by="HASH(k)",
+            starrocks_properties={"replication_num": "1"},
+        )
+        metadata.create_all(connection)
+        reflected = Table("partitioned_by_columns", MetaData(), autoload_with=connection)
+        recreate = str(CreateTable(reflected).compile(connection)).replace(
+            "partitioned_by_columns", "partitioned_by_columns_again", 1
+        )
+        connection.exec_driver_sql(recreate)
+        try:
+            options = inspect(connection).get_table_options("partitioned_by_columns_again")
+            assert "`s`" in str(options["starrocks_partition_by"]), options
+        finally:
+            connection.exec_driver_sql("DROP TABLE IF EXISTS partitioned_by_columns_again")

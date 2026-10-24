@@ -217,6 +217,13 @@ class AlterMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             'ALTER MATERIALIZED VIEW my_mv SET ("replication_num" = "2")',
         )
 
+    def test_alter_mv_property_quoting(self):
+        """Values are quoted as in ALTER TABLE: backslashes doubled, then double quotes escaped."""
+        self.assert_compile(
+            AlterMaterializedView("my_mv", properties={"resource_group": r'rg\"1'}),
+            r'ALTER MATERIALIZED VIEW my_mv SET ("resource_group" = "rg\\\"1")',
+        )
+
     def test_alter_mv_refresh_and_properties_are_separate_statements(self):
         self.assert_compile(
             AlterMaterializedView("my_mv", schema="test_db", refresh="MANUAL", properties={"replication_num": "3"}),

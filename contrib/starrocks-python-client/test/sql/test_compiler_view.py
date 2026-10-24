@@ -18,7 +18,7 @@ The dialect puts the column list, each view clause and ``AS`` on lines of their 
 line breaks, so each expected string literal below is one line of the generated DDL.
 """
 
-from sqlalchemy import Column, MetaData, Table, exc, select, testing
+from sqlalchemy import Column, MetaData, Table, exc, func, literal, select, testing
 from sqlalchemy.schema import CreateTable, DropTable
 from sqlalchemy.testing import eq_, expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
@@ -47,6 +47,20 @@ class CreateViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             CreateView(view),
             "CREATE VIEW active_users" "AS" "SELECT users.id, users.name FROM users WHERE users.id > 100",
+        )
+
+    def test_selectable_definition_is_compiled_for_starrocks(self):
+        """Names are backquoted as StarRocks reads them, not double-quoted, and a ``%`` is single in the definition."""
+        orders = Table("orders", MetaData(), Column("Id", INTEGER), Column("select", VARCHAR(10)), Column("d", VARCHAR(10)))
+        view = View(
+            "v_orders",
+            MetaData(),
+            definition=select(orders.c.Id, orders.c.select, func.date_format(orders.c.d, literal("%Y")).label("y")),
+        )
+        eq_(view.definition, "SELECT orders.`Id`, orders.`select`, date_format(orders.d, '%Y') AS y \nFROM orders")
+        self.assert_compile(
+            CreateView(view),
+            "CREATE VIEW v_orders" "AS" "SELECT orders.`Id`, orders.`select`, date_format(orders.d, '%%Y') AS y FROM orders",
         )
 
     @testing.combinations(

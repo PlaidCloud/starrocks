@@ -47,6 +47,7 @@ from sqlalchemy.dialects.mysql.base import (
     colspecs as base_colspecs,
 )
 from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
+from sqlalchemy.dialects.mysql.reserved_words import RESERVED_WORDS_MYSQL
 import sqlalchemy.dialects.mysql.types as mysql_types
 from sqlalchemy.engine import reflection
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
@@ -69,6 +70,7 @@ from starrocks.common.params import (
 )
 from starrocks.common.types import ColumnAggType, SystemRunMode, TableEngine, TableType, ViewSecurityType
 from starrocks.common.utils import TableAttributeNormalizer
+from starrocks.reserved_words import STARROCKS_RESERVED_WORDS
 from starrocks.sql.schema import View
 
 from . import reflection as _reflection
@@ -662,6 +664,111 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         else:
             return self._compile_create_table_original(table, create, **kw)
 
+    INDEX_TYPES: Final[Tuple[str, ...]] = ("BITMAP", "GIN", "NGRAMBF", "VECTOR")
+
+    @staticmethod
+    def quoted_property(value: Any) -> str:
+        """Quote a PROPERTIES key or value as the double-quoted string StarRocks reads back unchanged.
+
+        StarRocks unescapes the string once, as MySQL does, so each backslash is doubled before double quotes are
+        escaped; otherwise ``\\d+`` is stored as ``d+`` and a ``"`` ends the string early.
+        """
+        return '"%s"' % str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+    def quoted_property_pair(self, key: Any, value: Any, separator: str = " = ") -> str:
+        return self.sql_text(f"{self.quoted_property(key)}{separator}{self.quoted_property(value)}")
+
+    _COLUMN_LIST: Final[re.Pattern[str]] = re.compile(
+        r"\s*(?:`(?:[^`]|``)+`|\w+)(?:\s*,\s*(?:`(?:[^`]|``)+`|\w+))+\s*"
+    )
+
+    @classmethod
+    def _partition_clause(cls, partition_by: Any) -> str:
+        """Return a PARTITION BY clause, with a bare list of columns, such as ``k, s``, in parentheses.
+
+        StarRocks 3.3 refuses ``PARTITION BY k, s`` and takes ``PARTITION BY (k, s)``, which later versions take
+        too. Reflection gives the list without its parentheses. A list of expressions is left as written: 3.3
+        refuses it either way, and 3.5 refuses it in parentheses.
+        """
+        text = str(partition_by)
+        return f"({text.strip()})" if cls._COLUMN_LIST.fullmatch(text) else text
+
+    def sql_text(self, text: Any) -> str:
+        """Return SQL given as text, such as a view definition or a PARTITION BY clause, ready to splice into DDL.
+
+        SQLAlchemy's ``post_process_text``, which its ``DDL`` and ``text()`` constructs use too, doubles each
+        ``%``, as in ``str2date(s, '%Y-%m-%d')``, for a driver that formats parameters into the statement with
+        ``%``. A reflected clause object gives its text.
+        """
+        return self.sql_compiler.post_process_text(str(text))
+    def visit_create_index(self, create: sa_schema.CreateIndex, **kw: Any) -> str:  # type: ignore[override]
+        """Compile ``CREATE INDEX name ON table (columns) [USING <type> [(properties)]] [COMMENT '...']``.
+
+        ``starrocks_using`` names the type, ``starrocks_properties`` its properties (for example NGRAMBF's
+        ``gram_num``) and ``starrocks_comment`` the comment.
+
+        StarRocks indexes are BITMAP, GIN, NGRAMBF or VECTOR indexes on one plain column. It has no unique,
+        multi-column or expression indexes and no ``IF NOT EXISTS``, so those raise here rather than at the
+        server, and the index type is a keyword, never a quoted identifier.
+        """
+        index = create.element
+        self._verify_index_table(index)
+        if index.unique:
+            raise exc.CompileError(
+                f"StarRocks has no unique indexes (index {index.name!r}); use a PRIMARY KEY or UNIQUE KEY table"
+            )
+        if create.if_not_exists:
+            raise exc.CompileError(f"StarRocks has no CREATE INDEX IF NOT EXISTS (index {index.name!r})")
+        if len(index.expressions) != 1:
+            raise exc.CompileError(f"A StarRocks index covers one column; index {index.name!r} lists several")
+        columns = ", ".join(self._indexed_column_name(index, expression) for expression in index.expressions)
+        text = "CREATE INDEX %s ON %s (%s)" % (
+            self._prepared_index_name(index),
+            self.preparer.format_table(index.table),
+            columns,
+        )
+        options = index.dialect_options[DialectName]
+        if options["using"] is not None:
+            text += " USING " + self._index_type_keyword(index, options["using"])
+        if options["properties"]:
+            text += " " + self._index_property_list(index, options["using"], options["properties"])
+        if options["comment"] is not None:
+            text += " COMMENT " + self.sql_compiler.render_literal_value(options["comment"], sqltypes.String())
+        return text
+
+    def visit_drop_index(self, drop: sa_schema.DropIndex, **kw: Any) -> str:  # type: ignore[override]
+        """Compile ``DROP INDEX name ON table``; StarRocks has no ``IF EXISTS`` for it, so that raises here."""
+        if getattr(drop, "if_exists", False):
+            raise exc.CompileError(f"StarRocks has no DROP INDEX IF EXISTS (index {drop.element.name!r})")
+        return super().visit_drop_index(drop, **kw)
+
+    def _index_property_list(self, index: sa_schema.Index, index_type: Optional[str], properties: Dict[str, Any]) -> str:
+        """Render ``("key" = "value", ...)``, which StarRocks accepts only after an index type such as NGRAMBF."""
+        if index_type is None:
+            raise exc.CompileError(
+                f"Index {index.name!r} has starrocks_properties but no starrocks_using; StarRocks takes index "
+                "properties only after an index type"
+            )
+        return "(%s)" % ", ".join(
+            f"{self.quoted_property(key)} = {self.quoted_property(value)}" for key, value in properties.items()
+        )
+
+    def _indexed_column_name(self, index: sa_schema.Index, expression: Any) -> str:
+        """Return the quoted name of an indexed column, refusing expressions, which StarRocks cannot index."""
+        if not isinstance(expression, sa_schema.Column):
+            raise exc.CompileError(f"StarRocks indexes plain columns only; index {index.name!r} has {expression}")
+        return self.preparer.format_column(expression)
+
+    def _index_type_keyword(self, index: sa_schema.Index, index_type: str) -> str:
+        """Return the index type as the upper-case keyword StarRocks expects, refusing unknown types."""
+        keyword = index_type.upper()
+        if keyword not in self.INDEX_TYPES:
+            raise exc.CompileError(
+                f"Unknown StarRocks index type {index_type!r} for index {index.name!r}; "
+                f"use one of {', '.join(self.INDEX_TYPES)}"
+            )
+        return keyword
+
     def _compile_create_table_original(
             self,
             table: sa_schema.Table,
@@ -872,7 +979,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         # Partition
         if partition_by := opts.get(TableInfoKey.PARTITION_BY):
-            table_opts.append(f'PARTITION BY {partition_by}')
+            table_opts.append(f'PARTITION BY {self.sql_text(self._partition_clause(partition_by))}')
 
         # Distribution
         distributed_by = opts.get(TableInfoKey.DISTRIBUTED_BY)
@@ -901,16 +1008,18 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             distributed_by = None
 
         if distributed_by:
-            table_opts.append(f'DISTRIBUTED BY {distributed_by}')
+            table_opts.append(f'DISTRIBUTED BY {self.sql_text(distributed_by)}')
 
         # Order By
         if order_by := opts.get(TableInfoKey.ORDER_BY):
+            if isinstance(order_by, (list, tuple)):
+                order_by = ", ".join(str(item) for item in order_by)
             order_by = TableAttributeNormalizer.remove_outer_parentheses(order_by)
-            table_opts.append(f'ORDER BY ({order_by})')
+            table_opts.append(f'ORDER BY ({self.sql_text(order_by)})')
 
         # Handle MV-specific REFRESH clause
         if refresh := opts.get(TableInfoKey.REFRESH):
-            table_opts.append(f"REFRESH {self._refresh_scheme(refresh)}")
+            table_opts.append(f"REFRESH {self.sql_text(self._refresh_scheme(refresh))}")
 
         # Properties
         properties = opts.get(TableInfoKey.PROPERTIES)
@@ -925,7 +1034,9 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         # if self.dialect.test_replication_num and "replication_num" not in props_dict:
         #     props_dict.setdefault("replication_num", str(self.dialect.test_replication_num))
         if props_dict:
-            props = ",\n".join([f'{self.indent}"{k}"="{v}"' for k, v in props_dict.items()])
+            props = ",\n".join(
+                f"{self.indent}{self.quoted_property(k)}={self.quoted_property(v)}" for k, v in props_dict.items()
+            )
             table_opts.append(f"PROPERTIES(\n{props}\n)")
 
         logger.debug("table opts for table: %s, schema: %s, processed opts: %r", table.name, table.schema, table_opts)
@@ -1246,7 +1357,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         # StarRocks does not support altering COMMENT or SECURITY via ALTER VIEW.
         # TODO: we can optimize it when StarRocks supports it in the future
         # Only redefine the SELECT statement.
-        text += f"AS\n{view.definition}"
+        text += f"AS\n{self.sql_text(view.definition)}"
 
         logger.debug("Compiled SQL for AlterView: \n%s", text)
         return text
@@ -1308,7 +1419,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             text += "\nCOMMENT " + self.sql_compiler.render_literal_value(table.comment, sqltypes.String())
         if security:
             text += "\nSECURITY " + self._view_security_keyword(table, security)
-        text += f"\nAS\n{definition}"
+        text += f"\nAS\n{self.sql_text(definition)}"
 
         logger.debug("Compiled SQL for CreateView: \n%s", text)
         return text
@@ -1400,11 +1511,15 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         # ALTER REFRESH
         if alter.refresh is not None:
-            statements.append(f"ALTER MATERIALIZED VIEW {mv_name} REFRESH {self._refresh_scheme(alter.refresh)}")
+            statements.append(
+                f"ALTER MATERIALIZED VIEW {mv_name} REFRESH {self.sql_text(self._refresh_scheme(alter.refresh))}"
+            )
 
         # ALTER PROPERTIES
         if alter.properties is not None:
-            props_str = ", ".join([f'"{k}" = "{v}"' for k, v in alter.properties.items()])
+            props_str = ", ".join(
+                f"{self.quoted_property(k)} = {self.quoted_property(v)}" for k, v in alter.properties.items()
+            )
             statements.append(f"ALTER MATERIALIZED VIEW {mv_name} SET ({props_str})")
 
         if not statements:
@@ -1454,7 +1569,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         if clauses:
             text += "\n" + "\n".join(clauses)
 
-        text += f"\nAS\n{definition}"
+        text += f"\nAS\n{self.sql_text(definition)}"
 
         logger.debug("Compiled SQL for CreateMaterializedView: \n%s", text)
         return text
@@ -1497,7 +1612,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         Not supported in StarRocks yet.
         """
         table_name = format_table_name(self, alter.table_name, alter.schema)
-        return f"ALTER TABLE {table_name} PARTITION BY {alter.partition_by}"
+        return f"ALTER TABLE {table_name} PARTITION BY {self.sql_text(alter.partition_by)}"
 
     def visit_alter_table_columns(self, alter: AlterTableColumns, **kw: Any) -> str:
         """Compile a combined ALTER TABLE ADD/DROP COLUMN DDL for StarRocks.
@@ -1536,7 +1651,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             raise exc.CompileError(
                 f"Cannot ALTER table {table_name} to RANGE distribution: StarRocks has no "
                 "DISTRIBUTED BY RANGE syntax. Range distribution can only be set when the table is created.")
-        distribution_clause = f"DISTRIBUTED BY {alter.distribution_method}"
+        distribution_clause = f"DISTRIBUTED BY {self.sql_text(alter.distribution_method)}"
         if alter.buckets is not None:
             distribution_clause += f" BUCKETS {alter.buckets}"
 
@@ -1563,7 +1678,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         logger.info(f"You probably should use ({show_clause}) to check the execution status "
                     f"of altering ORDER before doing another ALTER TABLE statement.")
 
-        return f"ALTER TABLE {table_name} ORDER BY ({order_by})"
+        return f"ALTER TABLE {table_name} ORDER BY ({self.sql_text(order_by)})"
 
     def visit_alter_table_properties(self, alter: AlterTableProperties, **kw: Any) -> str:
         """Compile ALTER TABLE SET (...) DDL for StarRocks.
@@ -1575,24 +1690,22 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         table_name = format_table_name(self, alter.table_name, alter.schema)
         # logger.debug("ALTER TABLE %r SET (%s)", table_name, alter.properties)
 
-        # Escape double quotes in property values
-        def escape_value(value: str) -> str:
-            return value.replace('"', '\\"')
-
-        multi_set_statement = "; ".join([f'ALTER TABLE {table_name} SET ("{k}" = "{escape_value(v)}")' for k, v in alter.properties.items()])
+        multi_set_statement = "; ".join(
+            f"ALTER TABLE {table_name} SET ({self.quoted_property(k)} = {self.quoted_property(v)})"
+            for k, v in alter.properties.items()
+        )
         logger.debug("Compiled SQL for AlterTableProperties: \n%s", multi_set_statement)
         return multi_set_statement
 
 
 class StarRocksIdentifierPreparer(MySQLIdentifierPreparer):
-    """
-    We can add some starrocks specific identifier behavior here if needed.
+    """Quote an identifier only where StarRocks needs it, a reserved word of StarRocks or of MySQL included.
 
-    Currently, we don't force to use quote for identifier.
-
-    for reserved words, we can use the same as MySQL, and add some starrocks specific reserved words later.
-    such as: reserved_words = STARROCKS_RESERVED_WORDS | RESERVED_WORDS_MYSQL
+    StarRocks reserves words MySQL does not, such as ``files``, ``text`` and ``json``, and refuses them unquoted,
+    so a table or column of that name needs backquotes.
     """
+
+    reserved_words = RESERVED_WORDS_MYSQL | STARROCKS_RESERVED_WORDS
 
     def __init__(self, dialect, **kwargs):
         kwargs.pop("server_ansiquotes", None)
@@ -1619,6 +1732,8 @@ class StarRocksDialect(MySQLDialect_pymysql):
             sa_schema.Index,
             {
                 "using": None,
+                "properties": None,
+                "comment": None,
                 "length": None,
                 "prefix": None,
                 "with_parser": None,
