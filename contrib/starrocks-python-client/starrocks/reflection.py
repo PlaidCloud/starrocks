@@ -691,6 +691,7 @@ class StarRocksTableDefinitionParser(object):
         mv_row: _DecodingRow,
         table_row: Optional[_DecodingRow],
         config_row: Optional[_DecodingRow],
+        column_rows: Optional[List[_DecodingRow]] = None,
     ) -> ReflectedMVState:
         """
         Parses all raw reflection data for a Materialized View into a ReflectedMVState.
@@ -700,6 +701,7 @@ class StarRocksTableDefinitionParser(object):
             mv_row: A row from `information_schema.materialized_views`.
             table_row: An optional row from `information_schema.tables` for the same mv
             config_row: An optional row from `information_schema.tables_config` for the same mv
+            column_rows: Optional rows from `information_schema.columns` for the same mv
         Returns:
             A ReflectedMVState object.
         """
@@ -716,6 +718,9 @@ class StarRocksTableDefinitionParser(object):
             logger.warning(f"Failed to parse DDL for MV '{mv_row.TABLE_SCHEMA}.{mv_row.TABLE_NAME}', reflection may be incomplete: {e}")
             parsed_state = ReflectedMVState(table_name=mv_row.TABLE_NAME, definition=ddl)
         # logger.debug("partial parsed mv state. mv: %s, state: %s", mv_fqn, parsed_state)
+
+        if column_rows:
+            parsed_state.columns = [self._parse_column(col) for col in self._sort_columns(column_rows)]
 
         # 2. Augment/overwrite with more reliable info from other sources.
         self._merge_table_options(

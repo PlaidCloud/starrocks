@@ -2306,9 +2306,17 @@ class StarRocksDialect(MySQLDialect_pymysql):
             except Exception as e:
                 self.logger.info(f"Could not retrieve config for MV '{schema}.{view_name}': {e}")
 
-            # 4. Pass all raw data to the parser
+            # 4. Get the columns from information_schema.columns, as the view path does
+            column_rows: List[_DecodingRow] = self._read_from_information_schema(
+                connection=connection,
+                inf_sch_table="columns",
+                table_schema=schema,
+                table_name=view_name,
+            )
+
+            # 5. Pass all raw data to the parser
             parser = self._tabledef_parser
-            return parser.parse_mv(mv_row, table_row, config_row)
+            return parser.parse_mv(mv_row, table_row, config_row, column_rows)
 
         except Exception as e:
             self.logger.warning(f"Failed to get materialized view info for '{schema}.{view_name}': {e}")
