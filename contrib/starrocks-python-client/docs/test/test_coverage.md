@@ -14,7 +14,7 @@ This suite verifies that Python schema definitions are correctly compiled into S
 - **`test_compiler_view.py`**: Covers `CREATE`, `ALTER`, and `DROP VIEW` statements.
 - **`test_compiler_mv.py`**: Covers `CREATE`, `ALTER`, and `DROP MATERIALIZED VIEW` statements.
 - **`test_compiler_type.py`**: Covers data type compilation.
-- **`test_compiler_dml.py`**: Covers multi-table UPDATE and DELETE, `INSERT OVERWRITE` and `WITH LABEL`, and runs them.
+- **`test_compiler_dml.py`**: Compiles multi-table UPDATE and DELETE, and runs `INSERT OVERWRITE` and `WITH LABEL` against the server, including the refusal of an `executemany` of either.
 - **`test_compiler_version_gates.py`**: Covers the features refused on servers older than they need.
 - **`test_json.py`**: Covers JSON path access and JSON scalar round trips, against the server.
 
@@ -27,9 +27,9 @@ These integration tests ensure that the dialect can accurately inspect a live St
 - **`test_reflection_data_types.py`**: Verifies reflection of various data types.
 - **`test_reflection_view.py`**: Verifies reflection of views.
 - **`test_reflection_mv.py`**: Verifies reflection of materialized views.
-- **`test_reflection_indexes.py`**: Verifies reflection of BITMAP, NGRAMBF, GIN and VECTOR indexes.
+- **`test_reflection_indexes.py`**: Verifies reflection of BITMAP indexes through the inspector, creating BITMAP and NGRAMBF indexes, and dropping an index with its column or with `if_exists`. No test reflects GIN or VECTOR indexes, which need FE settings the test servers don't have.
 
-Other integration tests (`test/integration/`) cover binding and reading ARRAY, MAP and STRUCT values (`test_bind_processor.py`, `test_result_processor.py`), `create_all` and `drop_all` with views (`test_metadata_create_drop.py`), RANGE distribution (`test_range_distribution.py`), the run mode (`test_run_mode.py`), the wait for schema changes (`test_schema_change_wait.py`), column-change coalescing (`test_combine_column_alters*.py`), and transactions (`test_transactions.py`).
+Other integration tests (`test/integration/`) cover binding and reading ARRAY, MAP and STRUCT values (`test_bind_processor.py`, `test_result_processor.py`), `create_all` and `drop_all` with views (`test_metadata_create_drop.py`), RANGE distribution (`test_range_distribution.py`), the run mode (`test_run_mode.py`), the wait for schema changes (`test_schema_change_wait.py`), column-change coalescing (`test_combine_column_alters*.py`), transactions (`test_transactions.py`), `op.alter_column` on key and aggregate columns (`test_alter_column_key_and_aggregate.py`), the error of every statement a DDL construct compiles to (`test_ddl_results.py`), DDL text holding a `%` (`test_ddl_percent_signs.py`), names StarRocks reserves (`test_reserved_words.py`), Alembic's offline literals of ARRAY, MAP and STRUCT values (`test_alembic_offline_literals.py`), and binary values bound through asyncmy (`test_asyncmy_binary.py`).
 
 ## 3. Alembic `autogenerate` Comparison (`test/integration/test_autogenerate_*.py`)
 
@@ -81,6 +81,11 @@ Tests the comparison logic that detects differences between database state and m
 - **`test_schema_change_blocking.py`**: Tests which statements wait for a running schema change.
 - **`test_reflection_mv_columns.py`**, **`test_reflection_mv_properties.py`** and **`test_reflection_mv_refresh.py`**: Test parsing a materialized view's DDL.
 - **`test_transaction_mode.py`**: Tests the isolation levels and how statements are classified for transactions.
+- **`test_alter_columns.py`**: Tests coalescing several ADD and DROP COLUMN operations into one `ALTER TABLE`.
+- **`test_view_op_order.py`**: Tests where autogenerate puts view and materialized view operations, in the upgrade and in its reversed downgrade.
+- **`test_reflection_generated_partition.py`**: Tests leaving out the hidden column StarRocks 3.5 generates for an expression partition.
+- **`test_range_distribution.py`**, **`test_reflect_time_and_variant.py`**, **`test_interfaces_hashable.py`**: Test reflecting RANGE distribution, TIME and VARIANT columns, and that reflected dataclasses are hashable.
+- **`test_run_mode.py`**, **`test_schema_change_wait_unit.py`**, **`test_sql_canonical.py`**, **`test_temp_view_schema_config.py`**, **`test_render_mvs.py`**: Test run-mode detection, the schema-change wait, SQL canonicalization, the `starrocks_temp_view_schema` option, and rendering materialized view operations.
 
 ## 5. End-to-End System Tests (`test/system/`)
 
@@ -177,15 +182,14 @@ The following MV features need more testing:
 
 ### 6.2 `AUTO_INCREMENT` Property
 
-- Full reflection of the `AUTO_INCREMENT` property on columns. Current tests are marked as `xfail`.
-- `autogenerate` comparison to produce an `ALTER` operation for adding/removing `AUTO_INCREMENT` (currently only a warning is logged).
+- `AUTO_INCREMENT` is reflected (`test_reflection_columns.py`). StarRocks can't add or remove it, so autogenerate warns and `op.alter_column` refuses a change; no test covers a migration that recreates the table to change it.
 
 ### 6.3 Complex Mixed-Operation Scenarios
 
 While individual operations are well-tested, the following complex scenarios need coverage:
 
 - Migration scripts that combine multiple, different types of operations in a single revision (e.g., adding a table, altering a column, dropping a view, and modifying MV properties all in one migration).
-- Cross-object dependencies in migrations (e.g., dropping a table that a view depends on).
+- Cross-object dependencies beyond views and materialized views over tables and each other, which `test_view_lifecycle.py` covers in both directions.
 - Schema-qualified objects across multiple schemas in a single migration.
 
 ### 6.4 Performance and Scale Testing
