@@ -94,6 +94,23 @@ class CombineColumnAltersTest(fixtures.TestBase):
         assert res.ops[1] is order
         assert (res.ops[2].adds, [c.name for c in res.ops[2].drops]) == ([], ["v"])
 
+    def test_an_index_drop_stays_separate_from_the_combined_column_changes(self):
+        """An index operation keeps its own statement; the impl skips a drop_index for an index its column took."""
+        drop_index = ops.DropIndexOp("ix_old", table_name="t6")
+        mto = ops.ModifyTableOps(
+            "t6",
+            ops=[
+                ops.AddColumnOp("t6", Column("new", INTEGER)),
+                drop_index,
+                ops.DropColumnOp("t6", "old"),
+            ],
+        )
+        res = _combine_column_alters(None, None, mto)
+
+        assert [type(o).__name__ for o in res.ops] == ["AlterTableColumnsOp", "DropIndexOp"]
+        assert ([c.name for c in res.ops[0].adds], [c.name for c in res.ops[0].drops]) == (["new"], ["old"])
+        assert res.ops[1] is drop_index
+
     def test_only_drops_still_collapse(self):
         mto = ops.ModifyTableOps(
             "t4",
