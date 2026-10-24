@@ -166,15 +166,11 @@ So, we extract the SECURITY info from MV definition now.
 
 ### Modifying the SECURITY TYPE
 
-The `ALTER VIEW` statement in StarRocks **does not** support changing the `SECURITY` type of an existing view. If you need to change the security type, you must drop and recreate the view with the desired `SECURITY` type.
+`ALTER VIEW ... SET SECURITY {NONE | INVOKER}` changes the security of an existing view, and `op.alter_view(..., starrocks_security=...)` (or `security=`) emits it. `CREATE OR REPLACE VIEW` keeps the view's existing security whatever it says, so the dialect never relies on it for security.
 
 ### ALTER Support and Limitations
 
-- Only the following attribute can be altered for a View:
-  - **definition** (the SELECT statement). Column aliases change is allowed only together with definition.
-- The following attributes are not supported to be altered by StarRocks:
-  - comment
-  - security
-  - columns-only change (without definition change)
+- StarRocks has no ALTER for a view's comment, and `ALTER VIEW ... AS` drops it. So a change to the definition, the columns or the comment is applied as `CREATE OR REPLACE VIEW` with the full definition, columns and comment, whenever the migration states a comment or an existing one. A migration that states neither, such as a hand-written `op.alter_view('v', 'SELECT ...')`, is a plain `ALTER VIEW ... AS`, which leaves the view without a comment.
+- A security change is a separate `ALTER VIEW ... SET SECURITY` statement. Autogenerate compares security only when the model states `starrocks_security`; a view whose model omits it keeps the security it has.
 
 Autogenerate will warn or raise for immutable changes instead of producing ALTER statements. Decide explicitly (usually DROP + CREATE) for those cases.

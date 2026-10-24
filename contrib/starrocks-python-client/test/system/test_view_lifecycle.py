@@ -15,7 +15,6 @@
 import logging
 import re
 
-import pytest
 from sqlalchemy import Column, MetaData, Table, inspect, text
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.testing import expect_raises_message
@@ -208,31 +207,37 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
             starrocks_security='INVOKER'
         )
 
-        with pytest.warns(UserWarning) as record:
-            alembic_env.harness.generate_autogen_revision(
-                metadata=AlteredBase.metadata, message="Alter comment and security"
-            )
+        alembic_env.harness.generate_autogen_revision(
+            metadata=AlteredBase.metadata, message="Alter comment and security"
+        )
 
-        # Check that both warnings were issued
-        messages = [str(w.message) for w in record]
-        assert any("does not support altering view comments" in m for m in messages)
-        assert any("does not support altering view security" in m for m in messages)
-
-        # 3. Verify ALTER is generated
+        # 3. Verify ALTER is generated, and carries the existing definition the comment change recreates the view from
         script_content = ScriptContentParser.check_script_content(alembic_env, 1, "alter_comment_and_security")
         upgrade_content = ScriptContentParser.extract_upgrade_content(script_content)
         upgrade_content = normalize_sql(upgrade_content)
         assert 'op.alter_view("user_view"' in upgrade_content
         assert 'comment="Modified comment"' in upgrade_content
         assert 'security="INVOKER"' in upgrade_content
-        assert "SELECT id FROM user" not in upgrade_content
+        assert "existing_definition=" in upgrade_content
 
         downgrade_content = ScriptContentParser.extract_downgrade_content(script_content)
         downgrade_content = normalize_sql(downgrade_content)
         assert 'op.alter_view("user_view"' in downgrade_content
         assert 'comment="Initial comment"' in downgrade_content
         assert 'security="NONE"' in downgrade_content or 'security=None' in downgrade_content
-        assert "SELECT id FROM user" not in downgrade_content
+
+        # 4. Apply it and undo it
+        def view_ddl() -> str:
+            with sr_engine.connect() as connection:
+                return connection.exec_driver_sql("SHOW CREATE VIEW user_view").fetchone()[1]
+
+        alembic_env.harness.upgrade("head")
+        assert 'COMMENT "Modified comment"' in view_ddl()
+        assert "SECURITY INVOKER" in view_ddl()
+
+        alembic_env.harness.downgrade("-1")
+        assert 'COMMENT "Initial comment"' in view_ddl()
+        assert "SECURITY NONE" in view_ddl()
 
     @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_alter_view_definition(self, database, alembic_env, sr_engine):

@@ -32,6 +32,14 @@ class AlterView(ExecutableDDLElement):
         self.element = element
 
 
+class AlterViewSecurity(ExecutableDDLElement):
+    """Represents an ALTER VIEW ... SET SECURITY DDL statement."""
+    __visit_name__ = "alter_view_security"
+    def __init__(self, element: View, security: str) -> None:
+        self.element = element
+        self.security = security
+
+
 class CreateView(ExecutableDDLElement):
     """Represents a CREATE VIEW DDL statement."""
     __visit_name__ = "create_view"

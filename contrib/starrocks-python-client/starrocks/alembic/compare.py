@@ -581,13 +581,14 @@ def compare_view(
         schema=resolved_schema,
         temp_view_schema=temp_view_schema,
     )
-    comment_changed = _compare_view_comment(
-        alter_view_op, view_fqn, conn_view, metadata_view
-    )
+    comment_changed = _compare_view_comment(view_fqn, conn_view, metadata_view)
     security_changed = _compare_view_security(
         alter_view_op, view_fqn, conn_view, metadata_view,
         conn_view_attributes, meta_view_attributes
     )
+
+    if definition_changed or comment_changed:
+        _carry_view_content_for_replace(alter_view_op, conn_view, metadata_view)
 
     # If any attribute has changed, append the operation
     if definition_changed or comment_changed or security_changed:
@@ -603,6 +604,24 @@ def compare_view(
             changed_attrs.append("security")
 
         logger.debug(f"Detected changed view attributes ({', '.join(changed_attrs)}) on {view_fqn!r}")
+
+def _carry_view_content_for_replace(alter_view_op: AlterViewOp, conn_view: View, metadata_view: View) -> None:
+    """Put on the op what the migration needs to recreate the view and to undo that.
+
+    ALTER VIEW ... AS drops the view's comment and nothing alters a comment alone, so a change to the
+    definition, the columns or the comment is applied as CREATE OR REPLACE VIEW with the full content. The
+    comment goes on the op whenever either side has one, and the database's definition and columns go on it
+    so that a comment-only change, and the downgrade, still have a definition to recreate the view with.
+    """
+    from starrocks.sql.schema import extract_view_columns
+
+    if conn_view.comment or metadata_view.comment:
+        alter_view_op.comment = metadata_view.comment
+        alter_view_op.existing_comment = conn_view.comment
+    if alter_view_op.existing_definition is None:
+        alter_view_op.existing_definition = conn_view.info.get(TableObjectInfoKey.DEFINITION)
+        alter_view_op.existing_columns = extract_view_columns(conn_view)
+
 
 def _configured_temp_view_schema(autogen_context) -> Optional[str]:
     """Return the schema configured by user, or ``None`` when it is not set"""
@@ -783,16 +802,17 @@ def _compare_view_definition_and_columns(
 
 
 def _compare_view_comment(
-    alter_view_op: AlterViewOp,
     view_fqn: str,
     conn_view: View,
     metadata_view: View,
 ) -> bool:
     """
-    Compare view comment and update AlterViewOp if changed.
+    Compare view comment.
+
+    StarRocks has no ALTER for a view's comment, so a change is applied by recreating the view, see
+    `_carry_view_content_for_replace`.
 
     Args:
-        alter_view_op: AlterViewOp object to update
         view_fqn: Fully qualified view name for logging
         conn_view: View reflected from database
         metadata_view: View defined in metadata
@@ -807,21 +827,9 @@ def _compare_view_comment(
 
     comment_changed = conn_comment != meta_comment
 
-    # logger.debug("compare_view_comment: %s, comment_changed=%s", view_fqn, comment_changed)
     if comment_changed:
-        # logger.debug("Comment change for %s Database: %r, Metadata: %r", view_fqn, conn_comment, meta_comment)
-
-        # Warn about comment changes (not supported via ALTER VIEW)
-        warnings.warn(
-            f"Detected COMMENT change on view {view_fqn!r}, from '{conn_comment}' (in database) to '{meta_comment}' (in metadata). "
-            f"But StarRocks does not support altering view comments via ALTER VIEW. "
-            f"Consider using DROP + CREATE to apply this change if you want to change the comment.",
-            UserWarning,
-        )
-
-        # Set comment in AlterViewOp for future compatibility
-        alter_view_op.comment = metadata_view.comment
-        alter_view_op.existing_comment = conn_view.comment
+        logger.info(f"Detected COMMENT change on view {view_fqn!r}, "
+                    f"from {conn_comment!r} (in database) to {meta_comment!r} (in metadata).")
 
     return comment_changed
 
@@ -836,6 +844,9 @@ def _compare_view_security(
 ) -> bool:
     """
     Compare view security attribute and update AlterViewOp if changed.
+
+    A view whose metadata states no ``starrocks_security`` keeps the security it has in the database, as other
+    attributes the metadata omits do.
 
     Args:
         alter_view_op: AlterViewOp object to update
@@ -856,24 +867,15 @@ def _compare_view_security(
         meta_view_attributes.get(TableInfoKey.SECURITY)
     )
     logger.debug("Compare view security: conn_security=%s, meta_security=%s", conn_security, meta_security)
+    if meta_security is None:
+        return False
 
     conn_security = (conn_security or ReflectionViewDefaults.security())
-    meta_security = (meta_security or ReflectionViewDefaults.security())
     security_changed = conn_security != meta_security
 
-    # logger.debug("compare_view_security: %s, security_changed=%s", view_fqn, security_changed,)
     if security_changed:
-        # logger.debug("Security change for %s Database: %r, Metadata: %r", view_fqn, conn_security, meta_security)
-
-        # Warn about security changes (not supported via ALTER VIEW)
-        warnings.warn(
-            f"Detected SECURITY change on view {view_fqn!r}, from '{conn_security}' (in database) to '{meta_security}' (in metadata).     "
-            f"But StarRocks does not support altering view security via ALTER VIEW. "
-            f"Consider using DROP + CREATE to apply this change if you want to change the security.",
-            UserWarning,
-        )
-
-        # Set security in AlterViewOp for future compatibility
+        logger.info(f"Detected SECURITY change on view {view_fqn!r}, "
+                    f"from {conn_security!r} (in database) to {meta_security!r} (in metadata).")
         alter_view_op.security = meta_security
         alter_view_op.existing_security = conn_security
 

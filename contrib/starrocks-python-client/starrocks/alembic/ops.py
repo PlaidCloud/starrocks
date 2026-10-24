@@ -135,8 +135,23 @@ class AlterViewOp(ops.MigrateOperation):
         existing_columns: Union[List[Dict], None] = None,
         existing_comment: Optional[str] = None,
         existing_security: Optional[str] = None,
+        starrocks_security: Optional[str] = None,
     ):
-        """Invoke an ALTER VIEW operation."""
+        """Invoke an ALTER VIEW operation.
+
+        ``starrocks_security`` is ``security`` spelled as ``op.create_view`` does; give one of them.
+
+        ALTER VIEW ... AS drops a view's comment, so an operation that gives ``comment`` or ``existing_comment``
+        recreates the view with CREATE OR REPLACE VIEW, from ``definition`` and ``columns``, or from
+        ``existing_definition`` and ``existing_columns`` when it gives no definition.
+        """
+        if starrocks_security is not None:
+            if security is not None and str(security).upper() != str(starrocks_security).upper():
+                raise TypeError(
+                    f"alter_view got security={security!r} and starrocks_security={starrocks_security!r}, "
+                    "which are the same option; give one."
+                )
+            security = starrocks_security
         op = cls(
             view_name,
             definition,

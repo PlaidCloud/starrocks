@@ -442,7 +442,7 @@ def downgrade():
   - New views/MVs in metadata: emits `op.create_view(...)` or `op.create_materialized_view(...)`.
   - Dropped views/MVs from metadata: emits `op.drop_view(...)` or `op.drop_materialized_view(...)`.
   - Definition changes: emits `op.alter_view(...)` or `op.alter_materialized_view(...)`.
-- **StarRocks Limitation:** `ALTER VIEW` only supports redefining the `AS SELECT` clause. It does not support changing `COMMENT` or `SECURITY` directly. If only `COMMENT`/`SECURITY` change, no operation is emitted; if the definition also changes, those attributes are ignored and only `ALTER VIEW` is generated.
+- **View comment and security:** `ALTER VIEW ... AS` drops the view's comment and StarRocks has no ALTER for it, so `op.alter_view` applies a definition, column or comment change as `CREATE OR REPLACE VIEW` with the full definition, columns and comment. A security change is applied with `ALTER VIEW ... SET SECURITY`. Autogenerate emits an `op.alter_view` that carries all of this.
 - **Definition Comparison:** View/MV definition comparison uses normalization: remove identifier backticks, strip comments, collapse whitespace, and compare case-insensitively. But, it's still recommended to give the definition with a good and unified SQL style.
 
 #### Caveats: SQL rewriting and quoted strings

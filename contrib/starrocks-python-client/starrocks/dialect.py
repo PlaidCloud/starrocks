@@ -121,6 +121,7 @@ from .sql.ddl import (
     AlterTablePartition,
     AlterTableProperties,
     AlterView,
+    AlterViewSecurity,
     CreateMaterializedView,
     CreateView,
     DropMaterializedView,
@@ -1265,13 +1266,15 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         if view.columns:
             text += self._get_view_column_clauses(view)
 
-        # StarRocks does not support altering COMMENT or SECURITY via ALTER VIEW.
-        # TODO: we can optimize it when StarRocks supports it in the future
-        # Only redefine the SELECT statement.
         text += f"AS\n{view.definition}"
 
         logger.debug("Compiled SQL for AlterView: \n%s", text)
         return text
+
+    def visit_alter_view_security(self, alter: AlterViewSecurity, **kw: Any) -> str:
+        """Compile ALTER VIEW ... SET SECURITY, the only way to change a view's security."""
+        keyword = self._view_security_keyword(alter.element, alter.security)
+        return f"ALTER VIEW {self.preparer.format_table(alter.element)} SET SECURITY {keyword}"
 
     def _get_view_column_clauses(self, view: View) -> str:
         """
