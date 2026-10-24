@@ -20,8 +20,22 @@ drops the line breaks, so each expected string literal below is one line of the 
 
 import logging
 
-from sqlalchemy import BigInteger, Column, Computed, Date, DateTime, Integer, MetaData, String, Table, exc, testing
-from sqlalchemy.schema import CreateTable
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    Computed,
+    Date,
+    DateTime,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    exc,
+    func,
+    testing,
+)
+from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlalchemy.testing import expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
@@ -405,3 +419,52 @@ class CreateTableCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             '    "dynamic_partition.prefix"="p"'
             ")",
         )
+
+
+class CreateIndexCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    """``CREATE INDEX`` follows StarRocks' grammar: plain columns, and the index type as an unquoted keyword."""
+
+    __dialect__ = StarRocksDialect()
+
+    @staticmethod
+    def _table():
+        return Table("events", MetaData(), Column("id", Integer), Column("city", String(20)), Column("tags", String(50)))
+
+    @testing.combinations(
+        ("no_type", {}, "CREATE INDEX ix_city ON events (city)"),
+        ("bitmap", {"starrocks_using": "BITMAP"}, "CREATE INDEX ix_city ON events (city) USING BITMAP"),
+        ("lower_case_type", {"starrocks_using": "ngrambf"}, "CREATE INDEX ix_city ON events (city) USING NGRAMBF"),
+        ("gin", {"starrocks_using": "GIN"}, "CREATE INDEX ix_city ON events (city) USING GIN"),
+        argnames="kwargs, expected",
+        id_="iaa",
+    )
+    def test_index_type(self, kwargs, expected):
+        table = self._table()
+        self.assert_compile(CreateIndex(Index("ix_city", table.c.city, **kwargs)), expected)
+
+    def test_several_columns(self):
+        table = self._table()
+        self.assert_compile(
+            CreateIndex(Index("ix_city_tags", table.c.city, table.c.tags)),
+            "CREATE INDEX ix_city_tags ON events (city, tags)",
+        )
+
+    def test_unknown_index_type_raises(self):
+        table = self._table()
+        with expect_raises_message(exc.CompileError, "Unknown StarRocks index type 'BTREE'"):
+            CreateIndex(Index("ix_city", table.c.city, starrocks_using="BTREE")).compile(dialect=self.__dialect__)
+
+    def test_unique_index_raises(self):
+        table = self._table()
+        with expect_raises_message(exc.CompileError, "StarRocks has no unique indexes"):
+            CreateIndex(Index("ix_city", table.c.city, unique=True)).compile(dialect=self.__dialect__)
+
+    def test_if_not_exists_raises(self):
+        table = self._table()
+        with expect_raises_message(exc.CompileError, "StarRocks has no CREATE INDEX IF NOT EXISTS"):
+            CreateIndex(Index("ix_city", table.c.city), if_not_exists=True).compile(dialect=self.__dialect__)
+
+    def test_expression_index_raises(self):
+        table = self._table()
+        with expect_raises_message(exc.CompileError, "StarRocks indexes plain columns only"):
+            CreateIndex(Index("ix_lower_city", func.lower(table.c.city))).compile(dialect=self.__dialect__)

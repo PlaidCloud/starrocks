@@ -399,6 +399,50 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         else:
             return self._compile_create_table_original(table, create, **kw)
 
+    INDEX_TYPES: Final[Tuple[str, ...]] = ("BITMAP", "GIN", "NGRAMBF", "VECTOR")
+
+    def visit_create_index(self, create: sa_schema.CreateIndex, **kw: Any) -> str:  # type: ignore[override]
+        """Compile ``CREATE INDEX name ON table (columns) [USING <type>]`` in StarRocks' grammar.
+
+        StarRocks indexes are BITMAP, GIN, NGRAMBF or VECTOR indexes on plain columns. It has no unique or
+        expression indexes and no ``IF NOT EXISTS``, so those raise here rather than at the server, and the
+        index type is a keyword, never a quoted identifier.
+        """
+        index = create.element
+        self._verify_index_table(index)
+        if index.unique:
+            raise exc.CompileError(
+                f"StarRocks has no unique indexes (index {index.name!r}); use a PRIMARY KEY or UNIQUE KEY table"
+            )
+        if create.if_not_exists:
+            raise exc.CompileError(f"StarRocks has no CREATE INDEX IF NOT EXISTS (index {index.name!r})")
+        columns = ", ".join(self._indexed_column_name(index, expression) for expression in index.expressions)
+        text = "CREATE INDEX %s ON %s (%s)" % (
+            self._prepared_index_name(index),
+            self.preparer.format_table(index.table),
+            columns,
+        )
+        index_type = index.dialect_options[DialectName]["using"]
+        if index_type is not None:
+            text += " USING " + self._index_type_keyword(index, index_type)
+        return text
+
+    def _indexed_column_name(self, index: sa_schema.Index, expression: Any) -> str:
+        """Return the quoted name of an indexed column, refusing expressions, which StarRocks cannot index."""
+        if not isinstance(expression, sa_schema.Column):
+            raise exc.CompileError(f"StarRocks indexes plain columns only; index {index.name!r} has {expression}")
+        return self.preparer.format_column(expression)
+
+    def _index_type_keyword(self, index: sa_schema.Index, index_type: str) -> str:
+        """Return the index type as the upper-case keyword StarRocks expects, refusing unknown types."""
+        keyword = index_type.upper()
+        if keyword not in self.INDEX_TYPES:
+            raise exc.CompileError(
+                f"Unknown StarRocks index type {index_type!r} for index {index.name!r}; "
+                f"use one of {', '.join(self.INDEX_TYPES)}"
+            )
+        return keyword
+
     def _compile_create_table_original(
             self,
             table: sa_schema.Table,
