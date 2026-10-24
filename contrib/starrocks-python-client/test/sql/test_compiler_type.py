@@ -231,6 +231,9 @@ class SysdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_sysdate_compiles_to_now(self):
         self.assert_compile(sa.func.sysdate(), "now()")
 
+    def test_sysdate_keeps_its_precision(self):
+        self.assert_compile(sa.func.sysdate(6), "now(6)", literal_binds=True)
+
 
 class SysdateExecutionTest(fixtures.TestBase):
     """``func.sysdate()`` runs on the server and returns a datetime."""
@@ -240,6 +243,9 @@ class SysdateExecutionTest(fixtures.TestBase):
 
     def test_sysdate_returns_a_datetime(self, connection):
         assert isinstance(connection.scalar(sa.select(sa.func.sysdate())), datetime.datetime)
+
+    def test_sysdate_with_a_precision_returns_microseconds(self, connection):
+        assert isinstance(connection.scalar(sa.select(sa.func.sysdate(6))), datetime.datetime)
 
 
 class IntegerCastExecutionTest(fixtures.TestBase):

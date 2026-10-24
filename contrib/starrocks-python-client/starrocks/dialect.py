@@ -354,8 +354,8 @@ class StarRocksSQLCompiler(MySQLCompiler):
     render_table_with_column_in_update_from = False
 
     def visit_sysdate_func(self, fn: Any, **kw: Any) -> str:
-        """StarRocks has no SYSDATE(); NOW() is its current-timestamp function."""
-        return "now()"
+        """StarRocks has no SYSDATE(); NOW() is its current-timestamp function, and takes the same precision."""
+        return "now" + self.function_argspec(fn, **kw)
 
     def visit_delete(self, delete_stmt: Delete, **kw: Any) -> str:
         result: str = super().visit_delete(delete_stmt, **kw)
