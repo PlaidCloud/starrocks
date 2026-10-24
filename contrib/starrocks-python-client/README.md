@@ -394,7 +394,7 @@ Tests are classes derived from `sqlalchemy.testing.fixtures.TestBase`, with meth
 
 SQLAlchemy's plugin adds its own options, which `pytest --help` lists. Besides `--dburi`, these are the useful ones:
 
-- `--dropfirst` drops the views and tables earlier runs left in the configured database and the two extra schemas, for example after an interrupted `-n0` run.
+- `--dropfirst` drops the materialized views, views and tables earlier runs left in the configured database and the two extra schemas, for example after an interrupted `-n0` run.
 - `--log-info=sqlalchemy.engine` logs each statement the tests execute, and `--log-debug=sqlalchemy.engine` adds the rows. `pyproject.toml` turns on pytest's live log at INFO, so they show as the tests run.
 
 For the dialect's own debug messages too, add `--log-cli-level=DEBUG`.

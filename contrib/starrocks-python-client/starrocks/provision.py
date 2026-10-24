@@ -14,11 +14,18 @@
 
 
 import time
+from typing import Any
 
 from sqlalchemy import MetaData, Table, inspect, text
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.schema import sort_tables_and_constraints
-from sqlalchemy.testing.provision import configure_follower, create_db, drop_db, temp_table_keyword_args
+from sqlalchemy.testing.provision import (
+    configure_follower,
+    create_db,
+    drop_all_schema_objects_pre_tables,
+    drop_db,
+    temp_table_keyword_args,
+)
 
 from starrocks.dialect import StarRocksDialect
 
@@ -96,6 +103,22 @@ def _starrocks_drop_db(cfg, eng, ident):
         conn.exec_driver_sql("DROP DATABASE %s_test_schema" % ident)
         conn.exec_driver_sql("DROP DATABASE %s_test_schema_2" % ident)
         conn.exec_driver_sql("DROP DATABASE %s" % ident)
+
+@drop_all_schema_objects_pre_tables.for_db("starrocks")
+def _starrocks_drop_materialized_views(cfg: Any, eng: Engine) -> None:
+    """Drop the materialized views earlier runs left, which ``--dropfirst`` cleans up along with tables and views.
+
+    SQLAlchemy's own cleanup drops materialized views only for a dialect whose ``materialized_views`` requirement
+    is open, and with DROP VIEW, which StarRocks refuses for one.
+    """
+    inspector = inspect(eng)
+    preparer = eng.dialect.identifier_preparer
+    with eng.begin() as conn:
+        for schema in (None, cfg.test_schema, cfg.test_schema_2):
+            for name in inspector.get_materialized_view_names(schema=schema):
+                qualified_name = ".".join(preparer.quote(part) for part in (schema, name) if part)
+                conn.exec_driver_sql(f"DROP MATERIALIZED VIEW IF EXISTS {qualified_name}")
+
 
 @temp_table_keyword_args.for_db("starrocks")
 def _starrocks_temp_table_keyword_args(cfg, eng):
