@@ -51,6 +51,7 @@ from sqlalchemy.dialects.mysql.base import (
     colspecs as base_colspecs,
 )
 from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
+from sqlalchemy.dialects.mysql.reserved_words import RESERVED_WORDS_MYSQL
 from sqlalchemy.engine import URL, Connection, reflection
 from sqlalchemy.engine.interfaces import ExecutionContext
 
@@ -81,6 +82,7 @@ from starrocks.common.types import (
     ViewSecurityType,
 )
 from starrocks.common.utils import TableAttributeNormalizer
+from starrocks.reserved_words import STARROCKS_RESERVED_WORDS
 from starrocks.sql.schema import View
 
 
@@ -1729,14 +1731,13 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
 
 class StarRocksIdentifierPreparer(MySQLIdentifierPreparer):
-    """
-    We can add some starrocks specific identifier behavior here if needed.
+    """Quote an identifier only where StarRocks needs it, a reserved word of StarRocks or of MySQL included.
 
-    Currently, we don't force to use quote for identifier.
-
-    for reserved words, we can use the same as MySQL, and add some starrocks specific reserved words later.
-    such as: reserved_words = STARROCKS_RESERVED_WORDS | RESERVED_WORDS_MYSQL
+    StarRocks reserves words MySQL does not, such as ``files``, ``text`` and ``json``, and refuses them unquoted,
+    so a table or column of that name needs backquotes.
     """
+
+    reserved_words = RESERVED_WORDS_MYSQL | STARROCKS_RESERVED_WORDS
 
     def __init__(self, dialect, **kwargs):
         kwargs.pop("server_ansiquotes", None)
