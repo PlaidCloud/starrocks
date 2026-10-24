@@ -246,11 +246,16 @@ class StructuredType(UserDefinedType):
         """
         Check if the subtype is a valid structured type.
         return: an instance of a type, rather than a type itself
+
+        SQLAlchemy's generic ``ARRAY`` is returned as this dialect's ARRAY, with its ``dimensions``, so an element
+        of that type is created, bound and read as a top-level one is, rather than cast from text.
         """
         if isclass(subtype_obj):
             if issubclass(subtype_obj, StructuredType):
                 raise TypeError(f"'{subtype_obj.__name__}' should be an instance of StructuredType, not a class")
             return subtype_obj()
+        if isinstance(subtype_obj, sqltypes.ARRAY):
+            return ARRAY(subtype_obj.item_type, dimensions=subtype_obj.dimensions)
         return subtype_obj
 
     def get_col_spec(self, **kw) -> str:

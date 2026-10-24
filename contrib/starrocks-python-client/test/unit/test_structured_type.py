@@ -464,6 +464,18 @@ class StructuredTypeBindProcessorTest(fixtures.TestBase):
         with testing.expect_raises_message(TypeError, "cannot store the"):
             _bind(type_obj, value)
 
+    @testing.combinations(
+        ("array", lambda: datatype.ARRAY(sa.ARRAY(sa.Integer)).item_type, "ARRAY(Integer())"),
+        ("map", lambda: datatype.MAP(sa.String(5), sa.ARRAY(sa.Date, dimensions=2)).value_type, "ARRAY(ARRAY(Date()))"),
+        ("struct", lambda: datatype.STRUCT(a=sa.ARRAY(sa.Integer)).field_tuples[0][1], "ARRAY(Integer())"),
+        id_="iaa",
+        argnames="element_type_factory,expected",
+    )
+    def test_a_generic_array_element_is_this_dialects_array(self, element_type_factory, expected):
+        """A generic ARRAY element is otherwise cast from its JSON text, which stores NULLs."""
+        element_type = element_type_factory()
+        assert type(element_type) is datatype.ARRAY and repr(element_type) == expected
+
     def test_generic_array_dimensions_nest(self):
         """The generic ARRAY declares an array of arrays by ``dimensions``; a copy of the adapted type keeps the depth."""
         adapted = sa.ARRAY(sa.Integer, dimensions=3).dialect_impl(_DIALECT)

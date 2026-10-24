@@ -28,6 +28,7 @@ from datetime import date, datetime
 from decimal import Decimal
 import enum
 
+import sqlalchemy as sa
 from sqlalchemy import Column, Enum, Integer, PickleType, Table, TypeDecorator, select, testing, type_coerce
 from sqlalchemy.testing import eq_, fixtures
 
@@ -265,6 +266,9 @@ class ComplexValueRoundTripTest(fixtures.TestBase):
         ("array_of_pickle", ARRAY(PickleType(protocol=0)), [{"x": [1, 2]}, None]),
         ("array_of_binary_pickle", ARRAY(PickleType()), [{"x": [1, 2]}]),
         ("array_of_non_utf8_binary", ARRAY(VARBINARY()), [b"\xff\xfe", None, b"abc"]),
+        ("map_of_generic_array", MAP(VARCHAR(5), sa.ARRAY(sa.String(10))), {"k": ["a,b", 'c"d', None]}),
+        ("struct_of_generic_array", STRUCT(a=sa.ARRAY(sa.Numeric(10, 2))), {"a": [Decimal("1.25"), None]}),
+        ("array_of_generic_array", ARRAY(sa.ARRAY(sa.Date, dimensions=2)), [[[date(2024, 1, 2)]], None]),
         ("array_of_array_of_non_utf8_binary", ARRAY(ARRAY(VARBINARY())), [[b"\x80", None], None, []]),
         ("map_of_pickle", MAP(VARCHAR(5), PickleType(protocol=0)), {"k": ("t", 1)}),
         argnames="type_,value",
