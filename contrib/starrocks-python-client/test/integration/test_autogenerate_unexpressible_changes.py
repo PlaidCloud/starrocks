@@ -92,6 +92,41 @@ class UnalterableChangesTest(fixtures.TestBase):
             connection.exec_driver_sql("DROP TABLE unalterable_plain")
 
 
+class TimeSlicePartitionTest(fixtures.TestBase):
+    """A time_slice partition reflects in a different spelling from the one it was created with, and still compares equal."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @testing.requires.sqlalchemy_2
+    @testing.combinations(
+        ("time_slice(dt, INTERVAL 7 DAY)", "time_slice(dt, INTERVAL 7 DAY)"),
+        ("time_slice(dt, INTERVAL 7 DAY, floor)", "time_slice(dt, INTERVAL 7 DAY)"),
+        ("time_slice(dt, INTERVAL 1 MONTH, ceil)", "time_slice(dt, INTERVAL 1 MONTH, ceil)"),
+        argnames="partition_by, model_partition_by",
+    )
+    def test_no_diff_after_create(self, connection, caplog, partition_by, model_partition_by):
+        connection.exec_driver_sql(
+            f"CREATE TABLE time_slice_part (id INT, dt DATETIME) DUPLICATE KEY(id) "
+            f"PARTITION BY {partition_by} DISTRIBUTED BY HASH(id) BUCKETS 1"
+        )
+        try:
+            metadata = MetaData()
+            Table(
+                "time_slice_part",
+                metadata,
+                Column("id", INTEGER),
+                Column("dt", DATETIME),
+                starrocks_duplicate_key="id",
+                starrocks_partition_by=model_partition_by,
+                starrocks_distributed_by="HASH(id) BUCKETS 1",
+            )
+            assert OmittedAttributesTest._diffs(connection, metadata, "time_slice_part") == []
+            assert "does not support 'ALTER TABLE PARTITION BY'" not in caplog.text
+        finally:
+            connection.exec_driver_sql("DROP TABLE time_slice_part")
+
+
 class InferredPrimaryKeyTest(fixtures.TestBase):
     """``primary_key=True`` without ``starrocks_*_key`` means a PRIMARY KEY table, to CREATE TABLE and autogenerate."""
 

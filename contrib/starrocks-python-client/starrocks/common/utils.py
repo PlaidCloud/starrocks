@@ -147,6 +147,12 @@ class TableAttributeNormalizer:
     # Matches spaces around closing parenthesis
     _CLOSE_PAREN_SPACE_PATTERN = re.compile(r'\s*(\)\s?)\s*')
     _COMMA_SPACE_PATTERN = re.compile(r'\s*,\s*')
+    _TIME_SLICE_PATTERN = re.compile(
+        r"\btime_slice\(\s*(?P<column>[^,()]+?)\s*,\s*"
+        r"(?:interval\s+(?P<interval>\d+)\s+(?P<unit>[a-z]+)|(?P<count>\d+)\s*,\s*'(?P<quoted_unit>[a-z]+)')"
+        r"(?:\s*,\s*'?(?P<boundary>floor|ceil)'?)?\s*\)",
+        re.IGNORECASE,
+    )
 
     @staticmethod
     def strip_identifier_backticks(sql: str) -> str:
@@ -320,9 +326,27 @@ class TableAttributeNormalizer:
         """
         if not partition:
             return partition
-        return TableAttributeNormalizer.normalize_column_identifiers(
+        normalized: str = TableAttributeNormalizer.normalize_column_identifiers(
             partition.partition_method if isinstance(partition, ReflectedPartitionInfo) else partition
         )
+        return TableAttributeNormalizer.normalize_time_slice_calls(normalized)
+
+    @staticmethod
+    def normalize_time_slice_calls(text: str) -> str:
+        """Rewrite every time_slice call to the form StarRocks reflects for FLOOR.
+
+        `time_slice(dt, INTERVAL 7 DAY)` and `time_slice(dt, 7, 'day', 'floor')` are the same
+        partitioning, but SHOW CREATE TABLE returns the second for FLOOR and the first
+        for CEIL, so both spellings, with or without the boundary, become
+        `time_slice(dt, 7, 'day', 'floor')`.
+        """
+        def canonical_call(match: re.Match[str]) -> str:
+            count: str = match.group('interval') or match.group('count')
+            unit: str = (match.group('unit') or match.group('quoted_unit')).lower()
+            boundary: str = (match.group('boundary') or 'floor').lower()
+            return f"time_slice({match.group('column')}, {int(count)}, '{unit}', '{boundary}')"
+
+        return TableAttributeNormalizer._TIME_SLICE_PATTERN.sub(canonical_call, text)
 
     @staticmethod
     def normalize_distribution_string(distribution: Union[ReflectedDistributionInfo, str]) -> Optional[str]:

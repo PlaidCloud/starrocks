@@ -842,6 +842,53 @@ class PartitionChangesTest(fixtures.TestBase):
         result = upgrade_ops.ops
         assert len(result) == 0
 
+    @staticmethod
+    def _partition_ops(conn_partition, meta_partition):
+        conn_table = Mock()
+        type(conn_table).name = PropertyMock(return_value="test_table")
+        type(conn_table).schema = PropertyMock(return_value="test_db")
+        conn_table.kwargs = {
+            TableInfoKeyWithPrefix.DISTRIBUTED_BY: "HASH(id)",
+            TableInfoKeyWithPrefix.PARTITION_BY: conn_partition,
+        }
+        conn_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(conn_table.kwargs)}
+        meta_table = Mock(
+            kwargs={
+                TableInfoKeyWithPrefix.DISTRIBUTED_BY: "HASH(id)",
+                TableInfoKeyWithPrefix.PARTITION_BY: meta_partition,
+            }
+        )
+        meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
+        upgrade_ops = UpgradeOps([])
+        with patch.object(AlterTableEnablement, "PARTITION_BY", True):
+            compare_starrocks_table(
+                _starrocks_autogen_context(), upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+            )
+        return upgrade_ops.ops
+
+    @testing.combinations(
+        ("time_slice(dt, 7, 'day', 'floor')", "time_slice(dt, INTERVAL 7 DAY)"),
+        ("time_slice(`dt`, 7, 'day', 'floor')", "time_slice(dt, interval 7 day, floor)"),
+        ("time_slice(dt, 7, 'day', 'floor')", "time_slice(dt, INTERVAL 7 DAY, 'floor')"),
+        ("time_slice(dt, 1, 'month', 'floor')", "TIME_SLICE( dt , INTERVAL 1 MONTH )"),
+        ("time_slice(dt, INTERVAL 3 hour, ceil)", "time_slice(dt, INTERVAL 3 HOUR, CEIL)"),
+        ("time_slice(dt, INTERVAL 3 hour, ceil)", "time_slice(dt, 3, 'hour', 'ceil')"),
+        ("RANGE(time_slice(dt, 7, 'day', 'floor'))", "RANGE(time_slice(dt, INTERVAL 7 DAY))"),
+        argnames="conn_partition, meta_partition",
+    )
+    def test_time_slice_spellings_are_equal(self, conn_partition, meta_partition):
+        assert self._partition_ops(conn_partition, meta_partition) == []
+
+    @testing.combinations(
+        ("time_slice(dt, 7, 'day', 'floor')", "time_slice(dt, INTERVAL 14 DAY)"),
+        ("time_slice(dt, 7, 'day', 'floor')", "time_slice(dt, INTERVAL 7 DAY, ceil)"),
+        ("time_slice(dt, 7, 'day', 'floor')", "time_slice(dt, INTERVAL 7 HOUR)"),
+        ("time_slice(dt, 7, 'day', 'floor')", "time_slice(other, INTERVAL 7 DAY)"),
+        argnames="conn_partition, meta_partition",
+    )
+    def test_time_slice_real_changes_are_detected(self, conn_partition, meta_partition):
+        assert len(self._partition_ops(conn_partition, meta_partition)) == 1
+
     def test_partition_none_to_none(self):
         """Test PARTITION_BY from None to None (no change)."""
         autogen_context = _starrocks_autogen_context()
