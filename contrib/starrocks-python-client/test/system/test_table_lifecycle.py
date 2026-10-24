@@ -15,10 +15,11 @@
 import logging
 import re
 
-from sqlalchemy import Column, inspect, testing
+from sqlalchemy import Column, inspect
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.testing.assertions import eq_
+from sqlalchemy.testing.assertions import eq_, expect_raises_message
 from sqlalchemy.testing.suite import is_true
 
 from starrocks.common.params import TableInfoKeyWithPrefix
@@ -188,10 +189,10 @@ class TableLifecycleTest(_AlembicLifecycleBase):
         is_true(re.search(EMPTY_UPGRADE_PATTERN, script_content), "Upgrade script should be empty")
         is_true(re.search(EMPTY_DOWNGRADE_PATTERN, script_content), "Downgrade script should be empty")
 
-    @testing.skip("starrocks", "SR doesn't support submiting multiple alter table cluases.")
     def test_alter_table_columns_comprehensive(self, database, alembic_env, sr_engine):
         """Tests comprehensive column alterations: ADD, DROP, ALTER.
-        TODO: we may batch ALTER COLUMN clauses into one clause.
+
+        StarRocks cannot narrow BIGINT back to INT, so the downgrade's reverse of the type change is refused.
         """
         # 1. Initial state
         Base = declarative_base()
@@ -248,17 +249,8 @@ class TableLifecycleTest(_AlembicLifecycleBase):
                 assert col['nullable'] is True
                 assert col['comment'] == 'Modified comment'
 
-        alembic_env.harness.downgrade("-1")
-        inspector.clear_cache()
-        columns = inspector.get_columns("t_alter_columns")
-        col_names = [c['name'] for c in columns]
-        assert 'col_to_drop' in col_names
-        assert 'col_added' not in col_names
-        for col in columns:
-            if col['name'] == 'col_to_modify':
-                assert isinstance(col['type'], INTEGER)
-                assert col['nullable'] is False
-                assert col['comment'] == 'Original comment'
+        with expect_raises_message(DBAPIError, "Can not change BIGINT to INT"):
+            alembic_env.harness.downgrade("-1")
 
     def test_add_agg_table_key_column(self, database, alembic_env, sr_engine):
         """Tests adding a key column to an AGGREGATE KEY table.
@@ -381,7 +373,6 @@ class TableLifecycleTest(_AlembicLifecycleBase):
         assert 'page_views2' not in col_names
         # assert 'last_visit_time2' not in col_names
 
-    @testing.skip("starrocks", "Adding a key column is time-consuming, so it fails to add a value column immediately after the key column.")
     def test_add_agg_table_key_and_value_columns(self, database, alembic_env, sr_engine):
         """Tests adding both a key column and a value column to an AGGREGATE KEY table."""
         # 1. Initial state
