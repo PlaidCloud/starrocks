@@ -36,7 +36,7 @@ import textwrap
 from typing import Callable, Optional
 from unittest.mock import Mock, patch
 
-from alembic.autogenerate import comparators
+from alembic.autogenerate import api, comparators
 from alembic.autogenerate.api import AutogenContext
 from alembic.operations.ops import ModifyTableOps, UpgradeOps
 from alembic.runtime.migration import MigrationContext
@@ -52,6 +52,24 @@ from test.util import STATISTIC_COLLECT_PROPERTY_MISSING, normalize_sql
 
 
 logger = logging.getLogger(__name__)
+
+
+class AutogenerateOnEitherSqlalchemyTest(fixtures.TestBase):
+    """Autogenerate compares tables on SQLAlchemy 1.4 too, whose inspector lists no materialized views itself."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    def test_a_new_table_is_created(self, connection):
+        metadata = MetaData()
+        Table("autogen_either_sqla", metadata, Column("id", Integer), starrocks_properties={"replication_num": "1"})
+
+        def only_this_table(name, type_, parent_names):
+            return type_ != "table" or name == "autogen_either_sqla"
+
+        context = MigrationContext.configure(connection, opts={"include_name": only_this_table})
+        upgrade_ops = api.produce_migrations(context, metadata).upgrade_ops.ops
+        assert [(type(op).__name__, op.table_name) for op in upgrade_ops] == [("CreateTableOp", "autogen_either_sqla")]
 
 
 class AlterTableIntegrationTest(fixtures.TestBase):

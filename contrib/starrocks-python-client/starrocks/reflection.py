@@ -83,6 +83,15 @@ class StarRocksInspector(Inspector):
         with self._operation_context() as conn:
             return self.dialect.get_view(conn, view_name, schema=schema, **kwargs)
 
+    def get_materialized_view_names(self, schema: Optional[str] = None, **kwargs: Any) -> List[str]:
+        """Return the names of the materialized views in ``schema``, which SQLAlchemy 1.4's inspector cannot.
+
+        Autogenerate compares materialized views on every run, so without it autogenerate fails on 1.4 even for
+        a metadata that has none.
+        """
+        with self._operation_context() as conn:
+            return self.dialect.get_materialized_view_names(conn, schema, info_cache=self.info_cache, **kwargs)
+
     def get_materialized_view(self, view_name: str, schema: Optional[str] = None, **kwargs: Any) -> Optional[ReflectedMVState]:
         """
         Retrieves information about a specific materialized view.

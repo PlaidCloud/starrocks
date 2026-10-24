@@ -32,7 +32,7 @@ Older versions also differ in ways the dialect handles for you:
 - `@@run_mode` exists from 4.0.7. Older servers report the run mode only through `ADMIN SHOW FRONTEND CONFIG`, which needs the OPERATE privilege; without it the dialect assumes shared-nothing.
 - Some table properties are newer than 3.3: `compaction_strategy` (4.0), `enable_statistic_collect_on_first_load` (3.5.10 and 4.0.2), and `bucket_size` defaults to 4 GiB before 4.0 and 1 GiB from 4.0. Declare only the properties your servers know.
 
-Views, materialized views, Alembic autogenerate and the `starrocks+asyncmy` driver need SQLAlchemy 2.0. On SQLAlchemy 1.4 the dialect covers tables, types, queries and reflection.
+Views, materialized views and the `starrocks+asyncmy` driver need SQLAlchemy 2.0, and the Alembic integration is tested on 2.0 only. On SQLAlchemy 1.4 the dialect covers tables, types, queries and reflection.
 
 #### Using a Virtual Environment (Recommended)
 
