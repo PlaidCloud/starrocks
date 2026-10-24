@@ -179,29 +179,55 @@ class StarRocksInspector(Inspector):
 
 
 _SHOW_CREATE_COLUMN_LINE = re.compile(r"^\s*`((?:[^`]|``)+)`\s(.*)$")
+_SHOW_CREATE_QUOTED = re.compile(r'`(?:[^`]|``)*`|"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'', re.DOTALL)
 _SHOW_CREATE_DEFAULT = re.compile(r"\sDEFAULT\s+(\S)")
+_SHOW_CREATE_AUTO_INCREMENT = re.compile(r"\bAUTO_INCREMENT\b", re.IGNORECASE)
+
+
+def show_create_column_specs(create_table: str) -> Dict[str, str]:
+    """Return each column's definition from SHOW CREATE TABLE, after its name, with its string literals emptied.
+
+    An emptied literal keeps its quotes, so ``COMMENT "not AUTO_INCREMENT"`` reads as ``COMMENT ""`` and a default
+    or comment can't pass for a keyword. Backquoted names are kept whole. The column list ends at the line that
+    closes it, not at an ``ENGINE=`` inside a literal. A view's DDL lists no columns.
+    """
+    if create_table.lstrip().upper().startswith("CREATE VIEW"):
+        return {}
+    emptied = _SHOW_CREATE_QUOTED.sub(
+        lambda match: match.group(0) if match.group(0)[0] == "`" else match.group(0)[0] * 2, create_table
+    )
+    specs: Dict[str, str] = {}
+    for line in emptied.split("\n")[1:]:
+        if line.lstrip().startswith(")"):
+            break
+        match = _SHOW_CREATE_COLUMN_LINE.match(line)
+        if match is not None:
+            specs[match.group(1).replace("``", "`")] = match.group(2)
+    return specs
 
 
 def column_default_kinds(create_table: str) -> Dict[str, str]:
     """Return how SHOW CREATE TABLE spells each column's default: ``literal``, ``expression``, ``keyword`` or ``none``.
 
     A quoted default is a literal, a parenthesized one an expression such as ``(uuid())``, and a bare one a keyword
-    such as CURRENT_TIMESTAMP. A view's DDL lists no columns.
+    such as CURRENT_TIMESTAMP.
     """
     kinds: Dict[str, str] = {}
-    if create_table.lstrip().upper().startswith("CREATE VIEW"):
-        return kinds
-    for line in create_table.split("ENGINE=")[0].split("\n")[1:]:
-        match = _SHOW_CREATE_COLUMN_LINE.match(line)
-        if match is None:
-            continue
-        name, spec = match.group(1).replace("``", "`"), " " + match.group(2).split(' COMMENT "')[0]
-        default = _SHOW_CREATE_DEFAULT.search(spec)
+    for name, spec in show_create_column_specs(create_table).items():
+        default = _SHOW_CREATE_DEFAULT.search(" " + spec)
         if default is None:
             kinds[name] = "none"
         else:
             kinds[name] = {'"': "literal", "'": "literal", "(": "expression"}.get(default.group(1), "keyword")
     return kinds
+
+
+def column_auto_increments(create_table: str) -> Dict[str, bool]:
+    """Return whether SHOW CREATE TABLE gives each column AUTO_INCREMENT, outside its comment and default."""
+    return {
+        name: bool(_SHOW_CREATE_AUTO_INCREMENT.search(spec))
+        for name, spec in show_create_column_specs(create_table).items()
+    }
 
 
 @log.class_logger

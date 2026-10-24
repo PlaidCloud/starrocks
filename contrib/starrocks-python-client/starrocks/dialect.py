@@ -2724,17 +2724,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
             The key is the column name, the value is True/False whether the column has auto increment
             Example: `{"col1": True, "col2": False, ...}`
         """
-        if create_table.lstrip().startswith("CREATE VIEW"):
-            return dict()
-        only_create = create_table.split('ENGINE=')[0]
-        only_columns = only_create.split("\n")[1:-1]
-        only_columns = [c.strip() for c in only_columns if c.strip().startswith("`")]
-        col_autoinc = {
-            c.split(' ')[0].strip('`'): 'AUTO_INCREMENT' in c
-            for c in only_columns
-        }
-        # logger.debug("get auto increment info from show create table: %s", col_autoinc)
-        return col_autoinc
+        return _reflection.column_auto_increments(create_table)
 
     _GENERATED_PARTITION_COLUMN: Final[re.Pattern[str]] = re.compile(
         r'^\s*`(__generated_partition_column_\d+)`\s.*?\sAS\s(.+?)\sCOMMENT\s"', re.MULTILINE

@@ -20,7 +20,7 @@ from sqlalchemy.testing import fixtures
 from starrocks.common.defaults import ReflectionViewDefaults
 from starrocks.common.types import ViewSecurityType
 from starrocks.engine.interfaces import ReflectedViewState
-from starrocks.reflection import StarRocksTableDefinitionParser, column_default_kinds
+from starrocks.reflection import StarRocksTableDefinitionParser, column_auto_increments, column_default_kinds
 
 
 class ReflectionViewDefaultsTest(fixtures.TestBase):
@@ -114,3 +114,30 @@ class ColumnDefaultKindsTest(fixtures.TestBase):
             "d_ts": "keyword",
             "odd`name": "none",
         }
+
+    def test_engine_text_in_a_comment_or_default_does_not_end_the_columns(self):
+        ddl = (
+            "CREATE TABLE `t` (\n"
+            '  `a` varchar(20) NULL DEFAULT "ENGINE=OLAP" COMMENT "",\n'
+            '  `b` int(11) NULL COMMENT "multi\nline ENGINE= comment",\n'
+            '  `c` varchar(40) NULL DEFAULT (uuid()) COMMENT "",\n'
+            "  INDEX idx_a (`a`) USING BITMAP\n"
+            ") ENGINE=OLAP\nDUPLICATE KEY(`a`)"
+        )
+        assert column_default_kinds(ddl) == {"a": "literal", "b": "none", "c": "expression"}
+
+
+class ColumnAutoIncrementsTest(fixtures.TestBase):
+    def test_only_the_column_definition_counts(self):
+        ddl = (
+            "CREATE TABLE `t` (\n"
+            '  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT "",\n'
+            '  `n` int(11) NULL COMMENT "unlike id, not AUTO_INCREMENT",\n'
+            '  `d` varchar(20) NULL DEFAULT "AUTO_INCREMENT" COMMENT "",\n'
+            '  `my id` bigint(20) NOT NULL auto_increment COMMENT ""\n'
+            ") ENGINE=OLAP\nPRIMARY KEY(`id`)"
+        )
+        assert column_auto_increments(ddl) == {"id": True, "n": False, "d": False, "my id": True}
+
+    def test_a_view_lists_no_columns(self):
+        assert column_auto_increments("CREATE VIEW `v` AS SELECT 1") == {}

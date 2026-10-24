@@ -89,6 +89,8 @@ class ReflectionColumnAutoIncrementTest(fixtures.TestBase):
     @testing.combinations(
         ("autoincrement", "id BIGINT NOT NULL AUTO_INCREMENT", True),
         ("no_autoincrement", "id BIGINT NOT NULL", False),
+        ("named_in_the_comment", "id INT NULL COMMENT 'not AUTO_INCREMENT'", False),
+        ("named_in_the_default", "id VARCHAR(20) NULL DEFAULT 'AUTO_INCREMENT'", False),
         argnames="id_column, expected",
         id_="iaa",
     )
