@@ -460,16 +460,20 @@ class StarRocksSQLCompiler(MySQLCompiler):
             t._compiler_dispatch(self, fromhints=from_hints, **kw) for t in extra_froms
         )
 
+    _LIMIT_FOR_OFFSET_ALONE: Final[int] = 2**62 - 1
+
     def limit_clause(self, select: Select, **kw: Any) -> str:
-        # StarRocks supports:
-        #   LIMIT <limit>
-        #   LIMIT <limit> OFFSET <offset>
+        """Render ``LIMIT <limit>`` and ``LIMIT <limit> OFFSET <offset>``, the forms StarRocks takes.
+
+        StarRocks has no OFFSET without a LIMIT, so an offset alone gets a LIMIT of 2**62 - 1. StarRocks refuses
+        a limit and offset whose sum overflows a signed 64-bit integer, which leaves room for any offset below 2**62.
+        """
         text = ""
         if select._limit_clause is not None:
             text += "\n LIMIT " + self.process(select._limit_clause, **kw)
+        elif select._offset_clause is not None:
+            text += f"\n LIMIT {self._LIMIT_FOR_OFFSET_ALONE}"
         if select._offset_clause is not None:
-            # if select._limit_clause is None:
-            #     text += "\n LIMIT -1"
             text += " OFFSET " + self.process(select._offset_clause, **kw)
         return text
 

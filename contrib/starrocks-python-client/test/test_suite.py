@@ -127,6 +127,14 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL, SRAssertsCompiledSQLMix
             schema.CreateTable(tbl),
             'CREATE TABLE btable (id INTEGER NOT NULL)PRIMARY KEY(id) DISTRIBUTED BY HASH(id)PROPERTIES("replication_num"="3")')
 
+    def test_offset_without_limit_gets_a_limit(self):
+        """StarRocks takes OFFSET only after LIMIT; 2**62 - 1 rows leaves the sum within 64 bits."""
+        t = table("t", column("id"))
+        self.assert_compile(
+            select(t.c.id).order_by(t.c.id).offset(5),
+            "SELECT t.id FROM t ORDER BY t.id LIMIT 4611686018427387903 OFFSET %(param_1)s",
+        )
+
 
 class StarrocksMogrifyTest(fixtures.TablesTest, AssertsCompiledSQL):
     """The driver's ``mogrify`` renders a compiled statement with its parameters as literals.
@@ -315,20 +323,6 @@ class FetchLimitOffsetTest(_FetchLimitOffsetTest):
             ],
         )
 
-    @testing.skip('starrocks', 'cannot render offset without limit')
-    @testing.requires.offset
-    def test_simple_offset(self, connection):
-        pass
-
-    @testing.skip('starrocks', 'cannot render offset without limit')
-    @testing.requires.offset
-    def test_simple_offset_zero(self, connection):
-        pass
-
-    @testing.skip('starrocks', 'cannot render offset without limit')
-    @testing.requires.bound_limit_offset
-    def test_bound_offset(self, connection):
-        pass
 
 
 class NumericTest(_NumericTest,):
