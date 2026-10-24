@@ -259,3 +259,26 @@ class IntegerCastExecutionTest(fixtures.TestBase):
     @testing.combinations((sa.BigInteger(), 5000000000), (LARGEINT(), 2**100), argnames="target_type, value")
     def test_cast_keeps_a_wide_value(self, connection, target_type, value):
         eq_(int(connection.scalar(sa.select(sa.cast(sa.literal(str(value)), target_type)))), value)
+
+
+class GenericArrayTest(fixtures.TablesTest):
+    """SQLAlchemy's generic ``ARRAY`` binds and reads as the dialect's ARRAY does."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @classmethod
+    def define_tables(cls, metadata):
+        sa.Table(
+            "generic_array",
+            metadata,
+            sa.Column("id", INTEGER),
+            sa.Column("numbers", sa.ARRAY(sa.Integer)),
+            sa.Column("words", sa.ARRAY(sa.String(10))),
+            starrocks_duplicate_key="id",
+        )
+
+    def test_round_trip(self, connection):
+        table = self.tables.generic_array
+        connection.execute(table.insert(), {"id": 1, "numbers": [1, 2, 3], "words": ["x", None]})
+        eq_(connection.execute(sa.select(table.c.numbers, table.c.words)).one(), ([1, 2, 3], ["x", None]))

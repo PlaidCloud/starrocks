@@ -220,6 +220,7 @@ colspecs = {
     sqltypes.DateTime: DATETIME,
     sqltypes.DECIMAL: DECIMAL,
     sqltypes.Time: TIME,
+    sqltypes.ARRAY: ARRAY,
     sqltypes.JSON: JSON,
     sqltypes.JSON.JSONIndexType: JSONIndexType,
     sqltypes.JSON.JSONPathType: JSONPathType,
