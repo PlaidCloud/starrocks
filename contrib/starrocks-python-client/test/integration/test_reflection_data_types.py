@@ -291,6 +291,24 @@ class DataTypeReflectionTest(fixtures.TestBase):
         assert values == [1.123456789012345, 1e300]
         assert all(isinstance(value, float) for value in values)
 
+    def test_wide_decimal_inside_array_reflects_as_decimal(self, connection):
+        """The server prints ``array<DECIMAL256(76,10)>`` for a nested wide decimal; it must not reflect as NullType."""
+        table_name = "test_reflect_nested_decimal256"
+        table = Table(
+            table_name,
+            MetaData(),
+            Column("id_col", INTEGER()),
+            Column("wide_col", ARRAY(DECIMAL(76, 10))),
+            starrocks_distributed_by='HASH(id_col)',
+            starrocks_properties={"replication_num": "1"},
+        )
+
+        reflected_table = self._create_and_reflect_table(connection, table_name, table)
+
+        item_type = reflected_table.c.wide_col.type.item_type
+        assert isinstance(item_type, DECIMAL)
+        assert (item_type.precision, item_type.scale) == (76, 10)
+
     def test_reflect_datetime_types(self, connection):
         """Test reflection of datetime data types"""
         table_name = "test_reflect_datetime_types"

@@ -160,10 +160,15 @@ ischema_names = {
     "decimal32": DECIMAL,
     "decimal64": DECIMAL,
     "decimal128": DECIMAL,
+    "decimal256": DECIMAL,
+    "decimalv2": DECIMAL,
+    "numeric": DECIMAL,
+    "number": DECIMAL,
     # === String ===
     "varchar": VARCHAR,
     "char": CHAR,
     "string": STRING,
+    "text": STRING,
     "json": JSON,
     "variant": VARIANT,
     # === Date and time ===
