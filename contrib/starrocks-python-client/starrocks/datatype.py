@@ -124,6 +124,15 @@ class DATETIME(mysql_types.DATETIME):
 
         return process
 
+    def literal_processor(self, dialect: Dialect) -> Callable[[datetime], str]:
+        """Render ``'YYYY-MM-DD HH:MM:SS[.ffffff]'``; SQLAlchemy 1.4 has no DATETIME literal renderer of its own."""
+        reject_aware = self.bind_processor(dialect)
+
+        def process(value: datetime) -> str:
+            return "'%s'" % reject_aware(value).isoformat(sep=" ")
+
+        return process
+
     def result_processor(self, dialect: Dialect, coltype: object):
         def process(value):
             if isinstance(value, (bytes, bytearray)):

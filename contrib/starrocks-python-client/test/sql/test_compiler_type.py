@@ -187,6 +187,29 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(CreateColumn(column), expected)
 
 
+class DateTimeLiteralTest(fixtures.TestBase, AssertsCompiledSQL):
+    """DATETIME values render as literals on SQLAlchemy 1.4 as well as 2.0."""
+
+    __dialect__ = StarRocksDialect()
+
+    @testing.combinations(
+        (datetime.datetime(2012, 10, 15, 12, 57, 18), "'2012-10-15 12:57:18'"),
+        (datetime.datetime(1, 1, 1, 0, 0, 0, 5), "'0001-01-01 00:00:00.000005'"),
+        argnames="value, expected",
+    )
+    def test_naive_datetime(self, value, expected):
+        self.assert_compile(
+            sa.literal(value, DATETIME()), expected, literal_binds=True
+        )
+
+    def test_aware_datetime_raises(self):
+        value = datetime.datetime(2012, 10, 15, tzinfo=datetime.timezone.utc)
+        with testing.expect_raises_message(sa.exc.CompileError, "Could not render literal value"):
+            sa.literal(value, DATETIME()).compile(
+                dialect=self.__dialect__, compile_kwargs={"literal_binds": True}
+            )
+
+
 class SysdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     """``func.sysdate()`` compiles to a function StarRocks has."""
 
