@@ -234,6 +234,32 @@ class AlterMaterializedViewTest(_MaterializedViewAutogenerateBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    @testing.combinations(
+        ("with_a_distribution", {"starrocks_distributed_by": "HASH(val)"}),
+        ("with_nothing_else", {}),
+        argnames="model_options",
+        id_="ia",
+    )
+    def test_a_recreated_mv_keeps_what_the_model_leaves_out(self, connection, model_options) -> None:
+        """A definition change recreates the MV; the database's refresh and session properties carry over."""
+        mv_name = "test_recreate_keeps_refresh"
+        connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+        connection.execute(text(
+            f"CREATE MATERIALIZED VIEW {mv_name} REFRESH ASYNC EVERY (INTERVAL 1 DAY) "
+            "PROPERTIES('session.query_timeout' = '900') AS SELECT val FROM t_autogen"
+        ))
+        try:
+            target_metadata = MetaData()
+            MaterializedView(mv_name, target_metadata, definition="SELECT val + 1 AS val FROM t_autogen", **model_options)
+            script = api.produce_migrations(create_migration_context(connection, target_metadata), target_metadata)
+            operations = Operations(MigrationContext.configure(connection))
+            for op in script.upgrade_ops.ops:
+                operations.invoke(op)
+            ddl = connection.exec_driver_sql(f"SHOW CREATE MATERIALIZED VIEW {mv_name}").fetchone()[1]
+            assert "INTERVAL 1 DAY" in ddl and '"session.query_timeout" = "900"' in ddl, ddl
+        finally:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+
     def test_alter_immutable_attributes(self, connection) -> None:
         """ALTER: Change immutable attributes (definition) triggers DROP/CREATE."""
         mv_name = "test_alter_mv_immutable"

@@ -63,6 +63,7 @@ from starrocks.common.params import (
     InvalidTableProperty,
     SRKwargsPrefix,
     TableInfoKey,
+    TableInfoKeyWithPrefix,
     TableKind,
     TableObjectInfoKey,
     TablePropertyForFuturePartitions,
@@ -1503,17 +1504,51 @@ def _recreate_materialized_view(
     """Apply changes ALTER MATERIALIZED VIEW cannot express by dropping the materialized view and creating it again.
 
     Its data is derived from its base tables, so recreating it applies the model as written; StarRocks then fills it
-    again according to its refresh scheme. The drop keeps the database's definition, so the downgrade restores it.
+    again according to its refresh scheme. What the model leaves out and an ALTER would have left alone is kept from
+    the database: see :func:`_keep_what_the_model_leaves_out`. The drop keeps the database's definition, so the
+    downgrade restores it.
     """
     mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
+    create_op = CreateMaterializedViewOp.from_materialized_view(metadata_mv)
+    kept = _keep_what_the_model_leaves_out(create_op, CreateMaterializedViewOp.from_materialized_view(conn_mv))
     logger.warning(
         "Materialized view %r changed in ways ALTER MATERIALIZED VIEW cannot express, so the migration drops it and "
-        "creates it again, and StarRocks refills it as it refreshes. %s",
+        "creates it again, and StarRocks refills it as it refreshes. %s%s",
         mv_fqn,
         " ".join(changes),
+        f" The new one keeps the database's {', '.join(kept)}, which the model leaves out." if kept else "",
     )
     upgrade_ops.ops.append(DropMaterializedViewOp.from_materialized_view(conn_mv))
-    upgrade_ops.ops.append(CreateMaterializedViewOp.from_materialized_view(metadata_mv))
+    upgrade_ops.ops.append(create_op)
+
+
+def _keep_what_the_model_leaves_out(
+    create_op: CreateMaterializedViewOp, database_op: CreateMaterializedViewOp
+) -> List[str]:
+    """Give a recreated materialized view the database's refresh and set-only properties the model leaves out.
+
+    A model that states no refresh leaves the refresh alone, so the new MV keeps the database's rather than
+    becoming MANUAL, or, with no distribution either, a synchronous MV the dialect refuses after the DROP has run.
+    The properties SHOW CREATE MATERIALIZED VIEW lists only once they are set (``session.*`` and the others of
+    :meth:`ReflectionMVDefaults.is_ddl_only_property`) are kept the same way; any other property the database
+    reports may be a default StarRocks filled in, so the model's properties stand for those. Returns what was kept.
+    """
+    kept: List[str] = []
+    refresh = database_op.kwargs.get(TableInfoKeyWithPrefix.REFRESH)
+    if not create_op.kwargs.get(TableInfoKeyWithPrefix.REFRESH) and refresh:
+        create_op.kwargs[TableInfoKeyWithPrefix.REFRESH] = refresh
+        kept.append(f"refresh {str(refresh)!r}")
+    model_properties = dict(create_op.kwargs.get(TableInfoKeyWithPrefix.PROPERTIES) or {})
+    stated = {key.lower() for key in model_properties}
+    set_only = {
+        key: value
+        for key, value in (database_op.kwargs.get(TableInfoKeyWithPrefix.PROPERTIES) or {}).items()
+        if ReflectionMVDefaults.is_ddl_only_property(key) and key.lower() not in stated
+    }
+    if set_only:
+        create_op.kwargs[TableInfoKeyWithPrefix.PROPERTIES] = {**model_properties, **set_only}
+        kept.append(f"properties {set_only!r}")
+    return kept
 
 
 @comparators_dispatch_for_starrocks("table")
