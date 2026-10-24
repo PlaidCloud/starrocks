@@ -37,12 +37,14 @@ from starrocks.alembic.ops import (
 )
 from starrocks.sql.ddl import (
     AlterMaterializedView,
+    AlterTableProperties,
     AlterView,
     AlterViewSecurity,
     CreateMaterializedView,
     CreateView,
     DropMaterializedView,
     DropView,
+    group_properties_for_set,
 )
 from starrocks.sql.schema import MaterializedView, View
 
@@ -208,11 +210,15 @@ def alter_table_order(operations, op: AlterTableOrderOp):
 
 
 @Operations.implementation_for(AlterTablePropertiesOp)
-def alter_table_properties(operations, op: AlterTablePropertiesOp):
-    from starrocks.sql.ddl import AlterTableProperties
-    operations.execute(
-        AlterTableProperties(op.table_name, op.properties, schema=op.schema)
-    )
+def alter_table_properties(operations: Operations, op: AlterTablePropertiesOp) -> None:
+    """Execute one ALTER TABLE ... SET per property, or per group of ``dynamic_partition.`` or ``binlog_`` ones.
+
+    One packet of several statements fails midway when the first starts a schema-change job, as
+    ``bloom_filter_columns`` does. Each statement is executed on its own, so the impl can wait for the
+    job to finish before the next one when ``starrocks_wait_for_schema_change`` is on.
+    """
+    for group in group_properties_for_set(op.properties):
+        operations.execute(AlterTableProperties(op.table_name, group, schema=op.schema))
 
 
 @Operations.implementation_for(AlterTableColumnsOp)

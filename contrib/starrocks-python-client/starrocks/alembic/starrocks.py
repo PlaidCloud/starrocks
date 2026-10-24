@@ -22,12 +22,13 @@ from alembic.ddl.mysql import MySQLImpl
 from sqlalchemy import Column, ForeignKeyConstraint, Index, MetaData, Table, UniqueConstraint, text, util
 from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.sql import Executable
+from sqlalchemy.sql.elements import TextClause
 
 from starrocks import datatype
 from starrocks.alembic import compare
 from starrocks.datatype import BIGINT, VARCHAR
 from starrocks.dialect import StarRocksDialect
-from starrocks.sql.ddl import AlterTableColumns
+from starrocks.sql.ddl import AlterTableColumns, AlterTableDistribution, AlterTableOrder, AlterTableProperties
 
 
 logger = logging.getLogger(__name__)
@@ -35,12 +36,21 @@ logger = logging.getLogger(__name__)
 # DDL constructs that submit an asynchronous StarRocks column schema-change job.
 # StarRocks allows only one in-flight schema-change job per table, so when the
 # wait feature is enabled we poll for a terminal state after each of these.
-_SCHEMA_CHANGE_CONSTRUCTS = (
+# A property set may start one too (bloom_filter_columns does), and most start none.
+# So does a sort key change, ORDER BY: on 4.1.6 it is listed by SHOW ALTER TABLE COLUMN.
+_COLUMN_JOB_CONSTRUCTS = (
     AlterTableColumns,
+    AlterTableOrder,
+    AlterTableProperties,
     alembic_base.AddColumn,
     alembic_base.DropColumn,
     alembic_base.AlterColumn,  # covers Column{Nullable,Type,Default,Comment} + MySQL modify/change
 )
+
+# Changing the distribution submits an OPTIMIZE job, which SHOW ALTER TABLE COLUMN does not list.
+_OPTIMIZE_JOB_CONSTRUCTS = (AlterTableDistribution,)
+
+_SCHEMA_CHANGE_CONSTRUCTS = _COLUMN_JOB_CONSTRUCTS + _OPTIMIZE_JOB_CONSTRUCTS
 
 class SchemaChangeState(str, Enum):
     """Job states reported by the ``State`` column of ``SHOW ALTER TABLE COLUMN``."""
@@ -99,15 +109,24 @@ class StarRocksImpl(MySQLImpl):
         multiparams: Optional[Sequence[Mapping[str, Any]]] = None,
         params: Mapping[str, Any] = util.immutabledict(),
     ) -> Optional[CursorResult]:
-        """Execute DDL, then optionally block until a column schema change finishes.
+        """Execute DDL, then optionally block until the schema change it starts finishes.
 
-        StarRocks runs column schema changes asynchronously and rejects a new
+        StarRocks runs schema changes asynchronously and rejects a new
         job while a prior one on the same table is still running. When the user
         opts in via ``context.configure(starrocks_wait_for_schema_change=True)``,
-        we poll ``SHOW ALTER TABLE COLUMN`` after each column-altering statement
-        until it reaches a terminal state, keeping the migration in lock-step
-        with the cluster.
+        we poll ``SHOW ALTER TABLE COLUMN`` (or ``OPTIMIZE`` after a distribution or sort key change)
+        after each such statement until the job it started reaches a terminal state, keeping the
+        migration in lock-step with the cluster.
+
+        Only a job newer than the table's latest one before the statement counts, so a statement that
+        starts no job, and an old cancelled job of the table or of a dropped table of the same name,
+        are not mistaken for it.
         """
+        target = self._schema_change_target(construct)
+        waiting = target is not None and self._should_wait_for_schema_change()
+        alter_type = self._schema_change_job_kind(construct)
+        previous_job_id = self._latest_job_id(*target, alter_type) if waiting and target is not None else None
+
         result = super()._exec(
             construct,
             execution_options=execution_options,
@@ -115,9 +134,8 @@ class StarRocksImpl(MySQLImpl):
             params=params,
         )
 
-        target = self._schema_change_target(construct)
-        if target is not None and self._should_wait_for_schema_change():
-            self._wait_for_schema_change(*target)
+        if waiting and target is not None:
+            self._wait_for_schema_change(*target, alter_type=alter_type, after_job_id=previous_job_id)
 
         return result
 
@@ -165,8 +183,51 @@ class StarRocksImpl(MySQLImpl):
         rows = self.connection.exec_driver_sql(f"SHOW INDEX FROM {full_name}").mappings().all()
         return any(row["Key_name"] == index_name for row in rows)
 
-    def _wait_for_schema_change(self, table_name: str, schema: Optional[str]) -> None:
-        """Poll ``SHOW ALTER TABLE COLUMN`` until the latest job reaches a terminal state.
+    @staticmethod
+    def _schema_change_job_kind(construct: Any) -> str:
+        """Return the SHOW ALTER TABLE kind that lists the job the construct starts: ``OPTIMIZE`` or ``COLUMN``."""
+        return "OPTIMIZE" if isinstance(construct, _OPTIMIZE_JOB_CONSTRUCTS) else "COLUMN"
+
+    @staticmethod
+    def _latest_job_query(table_name: str, schema: Optional[str], alter_type: str) -> TextClause:
+        """Build the query for the table's newest job of the kind, whatever state it is in.
+
+        Order by JobId (a monotonic, unique FE counter), NOT CreateTime: CreateTime has second
+        granularity, so several jobs submitted back-to-back on the same table share a timestamp and
+        CreateTime-ordering returns an arbitrary (observed: the oldest) tied job.
+        """
+        return text(
+            StarRocksDialect.gen_show_alter_table_statement(
+                table_name,
+                alter_type,
+                schema=schema,
+                state=None,
+                order_by="JobId DESC",
+                limit=1,
+                bind_table_name=True,
+            )
+        )
+
+    def _latest_job_id(self, table_name: str, schema: Optional[str], alter_type: str) -> int:
+        """Return the JobId of the table's newest job of the kind, or 0 when it has none."""
+        if self.connection is None:
+            return 0
+        row = self.connection.execute(
+            self._latest_job_query(table_name, schema, alter_type), {"table_name": table_name}
+        ).mappings().first()
+        return int(row["JobId"]) if row and row.get("JobId") is not None else 0
+
+    def _wait_for_schema_change(
+        self,
+        table_name: str,
+        schema: Optional[str],
+        alter_type: str = "COLUMN",
+        after_job_id: Optional[int] = None,
+    ) -> None:
+        """Poll ``SHOW ALTER TABLE <alter_type>`` until the newest job reaches a terminal state.
+
+        When ``after_job_id`` is given, only a job with a higher JobId counts, and the wait ends at once
+        if the table has none.
 
         Raises:
             RuntimeError: if the schema change is CANCELLED or the timeout elapses.
@@ -182,23 +243,7 @@ class StarRocksImpl(MySQLImpl):
         # None / 0 means wait indefinitely.
         timeout = opts.get("starrocks_schema_change_timeout", None)
 
-        # Order by JobId (a monotonic, unique FE counter), NOT CreateTime:
-        # CreateTime has second granularity, so several jobs submitted back-to-back
-        # on the same table share a timestamp and CreateTime-ordering returns an
-        # arbitrary (observed: the oldest) tied job. In a single-writer migration
-        # the highest JobId is the statement we just submitted. State is not
-        # filtered: we want the newest job whatever state it is in.
-        query = text(
-            StarRocksDialect.gen_show_alter_table_statement(
-                table_name,
-                "COLUMN",
-                schema=schema,
-                state=None,
-                order_by="JobId DESC",
-                limit=1,
-                bind_table_name=True,
-            )
-        )
+        query = self._latest_job_query(table_name, schema, alter_type)
 
         deadline = None if not timeout else time.monotonic() + float(timeout)
         while True:
@@ -212,6 +257,9 @@ class StarRocksImpl(MySQLImpl):
             # comes back already FINISHED, so it exits via the FINISHED branch.
             raw_state = (row.get("State") if row else None)
             if raw_state is None:
+                return
+            if after_job_id is not None and int(row["JobId"]) <= after_job_id:
+                logger.debug("The statement on %s started no %s job.", table_name, alter_type)
                 return
 
             state = SchemaChangeState.parse(raw_state)

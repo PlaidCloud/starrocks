@@ -126,6 +126,7 @@ from .sql.ddl import (
     CreateView,
     DropMaterializedView,
     DropView,
+    group_properties_for_set,
 )
 
 
@@ -1585,15 +1586,17 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         """Compile ALTER TABLE SET (...) DDL for StarRocks.
 
         Note:
-            Currently, SR only support one property in an ALTER TABLE SET statement.
-            So, we will generate multiple ALTER TABLE SET statements if there are multiple properties.
+            SR supports one property in an ALTER TABLE SET statement, except for the ones sharing the
+            ``dynamic_partition.`` or ``binlog_`` prefix. So, we will generate a SET statement for each
+            group of properties from `group_properties_for_set`.
         """
         table_name = format_table_name(self, alter.table_name, alter.schema)
-        # logger.debug("ALTER TABLE %r SET (%s)", table_name, alter.properties)
 
         multi_set_statement = "; ".join(
-            f"ALTER TABLE {table_name} SET ({self.quoted_property(k)} = {self.quoted_property(v)})"
-            for k, v in alter.properties.items()
+            f"ALTER TABLE {table_name} SET ("
+            + ", ".join(f"{self.quoted_property(k)} = {self.quoted_property(v)}" for k, v in group.items())
+            + ")"
+            for group in group_properties_for_set(alter.properties)
         )
         logger.debug("Compiled SQL for AlterTableProperties: \n%s", multi_set_statement)
         return multi_set_statement

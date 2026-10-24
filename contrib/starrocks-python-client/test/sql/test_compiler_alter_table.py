@@ -62,10 +62,21 @@ class AlterTablePropertiesCompileTest(fixtures.TestBase, AssertsCompiledSQL):
                 "dynamic_partition.start": "-7",
                 "dynamic_partition.end": "3",
             },
-            'ALTER TABLE test_table SET ("dynamic_partition.enable" = "true"); '
-            'ALTER TABLE test_table SET ("dynamic_partition.time_unit" = "DAY"); '
-            'ALTER TABLE test_table SET ("dynamic_partition.start" = "-7"); '
-            'ALTER TABLE test_table SET ("dynamic_partition.end" = "3")',
+            'ALTER TABLE test_table SET ("dynamic_partition.enable" = "true", '
+            '"dynamic_partition.time_unit" = "DAY", "dynamic_partition.start" = "-7", '
+            '"dynamic_partition.end" = "3")',
+        ),
+        (
+            "binlog",
+            {"binlog_enable": "true", "binlog_ttl_second": "3600"},
+            'ALTER TABLE test_table SET ("binlog_enable" = "true", "binlog_ttl_second" = "3600")',
+        ),
+        (
+            "grouped_and_single",
+            {"replication_num": "1", "dynamic_partition.start": "-7", "in_memory": "false", "dynamic_partition.end": "3"},
+            'ALTER TABLE test_table SET ("replication_num" = "1"); '
+            'ALTER TABLE test_table SET ("dynamic_partition.start" = "-7", "dynamic_partition.end" = "3"); '
+            'ALTER TABLE test_table SET ("in_memory" = "false")',
         ),
         (
             "bloom_filter",
@@ -290,8 +301,26 @@ class AlterTableOperationTest(fixtures.TestBase):
         context = op_fixture("starrocks")
         op.alter_table_properties("users", {"replication_num": "3", "storage_medium": "SSD"}, schema="test_db")
         context.assert_(
-            'ALTER TABLE test_db.users SET ("replication_num" = "3"); '
-            'ALTER TABLE test_db.users SET ("storage_medium" = "SSD")'
+            'ALTER TABLE test_db.users SET ("replication_num" = "3")',
+            'ALTER TABLE test_db.users SET ("storage_medium" = "SSD")',
+        )
+
+    def test_alter_table_properties_groups_only_dynamic_partition_and_binlog_keys(self):
+        context = op_fixture("starrocks")
+        op.alter_table_properties(
+            "users",
+            {
+                "bloom_filter_columns": "k1",
+                "dynamic_partition.start": "-7",
+                "binlog_enable": "true",
+                "dynamic_partition.end": "3",
+                "binlog_ttl_second": "60",
+            },
+        )
+        context.assert_(
+            'ALTER TABLE users SET ("bloom_filter_columns" = "k1")',
+            'ALTER TABLE users SET ("dynamic_partition.start" = "-7", "dynamic_partition.end" = "3")',
+            'ALTER TABLE users SET ("binlog_enable" = "true", "binlog_ttl_second" = "60")',
         )
 
     def test_alter_table_distribution(self):

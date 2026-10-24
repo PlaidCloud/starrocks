@@ -631,7 +631,9 @@ context.configure(
 )
 ```
 
-When enabled, after each column-altering statement the dialect polls `SHOW ALTER TABLE COLUMN` until the job finishes. A `CANCELLED` job or an elapsed timeout raises an error so the migration stops instead of silently drifting from the cluster state. This only applies to online mode (`alembic upgrade`); it is a no-op in offline `--sql` mode.
+When enabled, after each column-altering, sort key (`ORDER BY`) or property-setting statement the dialect polls `SHOW ALTER TABLE COLUMN` until the job it started finishes, and after a distribution change it polls `SHOW ALTER TABLE OPTIMIZE`. A statement that starts no job, such as most property changes, does not wait. A `CANCELLED` job or an elapsed timeout raises an error so the migration stops instead of silently drifting from the cluster state. This only applies to online mode (`alembic upgrade`); it is a no-op in offline `--sql` mode.
+
+`op.alter_table_properties` sends one `ALTER TABLE ... SET` per property, because StarRocks accepts one property at a time (the `dynamic_partition.*` properties, and the `binlog_*` ones, may share a statement) and a property such as `bloom_filter_columns` starts a schema-change job. The dialect holds back each statement until the job of the one before it has ended; with the option on, each statement also waits for its own job and stops the migration if it is cancelled.
 
 ### 4.5 Verifying No Further Changes (optional)
 
