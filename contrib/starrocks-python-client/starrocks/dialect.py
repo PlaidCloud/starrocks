@@ -17,7 +17,7 @@ import re
 from textwrap import dedent
 from typing import Any, Dict, Final, List, Optional, Tuple, Union
 
-from alembic.ddl.base import alter_table, format_column_name, format_server_default, format_table_name
+from alembic.ddl.base import RenameTable, alter_table, format_column_name, format_server_default, format_table_name
 from alembic.ddl.mysql import (
     MySQLAlterDefault,
     MySQLChangeColumn,
@@ -2081,6 +2081,15 @@ def _starrocks_change_column(element: MySQLChangeColumn, compiler: StarRocksDDLC
         return "%s %s" % (alter_claus_header, rename_clause)
     else:
         return "%s %s" % (alter_claus_header, modify_clause)
+
+
+@compiles(RenameTable, DialectName)
+def _starrocks_rename_table(element: RenameTable, compiler: StarRocksDDLCompiler, **kw: Any) -> str:
+    """StarRocks renames with ``ALTER TABLE t RENAME new_name``: there is no ``TO``, and the new name is unqualified."""
+    return "%s RENAME %s" % (
+        alter_table(compiler, element.table_name, element.schema),
+        format_table_name(compiler, element.new_table_name, None),
+    )
 
 
 @compiles(MySQLAlterDefault, DialectName)

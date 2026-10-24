@@ -311,3 +311,15 @@ class AlterTableOperationTest(fixtures.TestBase):
         context = op_fixture("starrocks")
         op.alter_table_order("events", "timestamp DESC, event_id ASC", schema="analytics_db")
         context.assert_("ALTER TABLE analytics_db.events ORDER BY (timestamp DESC, event_id ASC)")
+
+    @testing.combinations(
+        ("unqualified", None, "ALTER TABLE users RENAME customers"),
+        ("schema", "test_db", "ALTER TABLE test_db.users RENAME customers"),
+        argnames="schema, expected",
+        id_="iaa",
+    )
+    def test_rename_table(self, schema, expected):
+        """StarRocks has no ``RENAME TO``, and the new name stays unqualified when the table has a schema."""
+        context = op_fixture("starrocks")
+        op.rename_table("users", "customers", schema=schema)
+        context.assert_(expected)
