@@ -18,7 +18,7 @@ import sqlalchemy as sa
 from sqlalchemy import TIMESTAMP, Column, Enum, LargeBinary, MetaData, Table, Text, UnicodeText, testing
 from sqlalchemy.dialects import mysql
 from sqlalchemy.schema import CreateColumn
-from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import eq_, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
 from starrocks.datatype import (
@@ -167,6 +167,19 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(sa.cast(x, target_type), expected)
 
     @testing.combinations(
+        (sa.Integer(), "CAST(t.x AS INTEGER)"),
+        (sa.BigInteger(), "CAST(t.x AS BIGINT)"),
+        (sa.SmallInteger(), "CAST(t.x AS SMALLINT)"),
+        (LARGEINT(), "CAST(t.x AS LARGEINT)"),
+        argnames="target_type, expected",
+        id_="ra",
+    )
+    def test_cast_to_an_integer_names_its_width(self, target_type, expected):
+        """MySQL's ``SIGNED INTEGER`` is INT on StarRocks 3.3 and BIGINT on 4.1, so a cast names the type itself."""
+        x = sa.column("x", sa.String, _selectable=sa.table("t"))
+        self.assert_compile(sa.cast(x, target_type), expected)
+
+    @testing.combinations(
         ("not_null", INTEGER(), {"nullable": False}, "col INTEGER NOT NULL"),
         ("comment", VARCHAR(100), {"comment": "A test column"}, "col VARCHAR(100) COMMENT 'A test column'"),
         ("default", INTEGER(), {"server_default": "0"}, "col INTEGER DEFAULT '0'"),
@@ -227,3 +240,14 @@ class SysdateExecutionTest(fixtures.TestBase):
 
     def test_sysdate_returns_a_datetime(self, connection):
         assert isinstance(connection.scalar(sa.select(sa.func.sysdate())), datetime.datetime)
+
+
+class IntegerCastExecutionTest(fixtures.TestBase):
+    """A cast to BIGINT or LARGEINT keeps values beyond 32 bits on every supported StarRocks version."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @testing.combinations((sa.BigInteger(), 5000000000), (LARGEINT(), 2**100), argnames="target_type, value")
+    def test_cast_keeps_a_wide_value(self, connection, target_type, value):
+        eq_(int(connection.scalar(sa.select(sa.cast(sa.literal(str(value)), target_type)))), value)

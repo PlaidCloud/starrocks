@@ -520,9 +520,14 @@ class StarRocksSQLCompiler(MySQLCompiler):
         type_=None,
         **kw: Any,
     ):
+        """Render a CAST target; booleans, integers and ARRAY, MAP and STRUCT are cast to StarRocks' own types.
+
+        MySQL casts integers to ``SIGNED INTEGER``, which StarRocks reads as INT on 3.3 and as BIGINT on 4.1, so a
+        BIGINT or LARGEINT cast lost its range on one version or the other.
+        """
         if type_ is None:
             type_ = typeclause.type.dialect_impl(self.dialect)
-        if isinstance(type_, (sqltypes.Boolean, StructuredType)):
+        if isinstance(type_, (sqltypes.Boolean, sqltypes.Integer, StructuredType)):
             return self.dialect.type_compiler.process(type_)
         return super().visit_typeclause(typeclause, type_, **kw)
 
