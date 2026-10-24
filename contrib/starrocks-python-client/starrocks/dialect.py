@@ -15,7 +15,7 @@
 import logging
 import re
 from textwrap import dedent
-from typing import Any, Dict, Final, List, Optional, Tuple, Union
+from typing import Any, Dict, Final, List, Optional, Tuple, Type, Union
 
 from alembic.ddl.base import alter_table, format_column_name, format_server_default, format_table_name
 from alembic.ddl.mysql import (
@@ -45,11 +45,13 @@ from sqlalchemy.dialects.mysql.base import (
     colspecs as base_colspecs,
 )
 from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
+import sqlalchemy.dialects.mysql.types as mysql_types
 from sqlalchemy.engine import reflection
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
 from sqlalchemy.engine.row import Row
-from sqlalchemy.sql import sqltypes, bindparam
-from sqlalchemy.sql.expression import Delete, Select, Update, TableClause
+from sqlalchemy.sql import bindparam, operators, sqltypes
+from sqlalchemy.sql.elements import BinaryExpression, Grouping, Null, TypeClause
+from sqlalchemy.sql.expression import Delete, Insert, Select, TableClause, Update
 
 from starrocks.common import utils
 from starrocks.common.defaults import ReflectionMVDefaults, ReflectionTableDefaults, ReflectionViewDefaults
@@ -93,6 +95,11 @@ from .datatype import (
     VARBINARY,
     VARCHAR,
     VARIANT,
+    JSONIndexType,
+    JSONPathType,
+    check_struct_field_name,
+    server_casts_json_to,
+    stored_collection_type,
 )
 from .engine.interfaces import ReflectedMVState, ReflectedState, ReflectedViewState
 from .reflection import StarRocksInspector, StarRocksTableDefinitionParser
@@ -158,10 +165,15 @@ ischema_names = {
     "decimal32": DECIMAL,
     "decimal64": DECIMAL,
     "decimal128": DECIMAL,
+    "decimal256": DECIMAL,
+    "decimalv2": DECIMAL,
+    "numeric": DECIMAL,
+    "number": DECIMAL,
     # === String ===
     "varchar": VARCHAR,
     "char": CHAR,
     "string": STRING,
+    "text": STRING,
     "json": JSON,
     "variant": VARIANT,
     # === Date and time ===
@@ -181,11 +193,18 @@ ischema_names = {
     "bitmap": BITMAP,
 }
 
-colspecs = base_colspecs | {
+colspecs = {
+    generic_type: impl_type for generic_type, impl_type in base_colspecs.items() if generic_type is not sqltypes.Enum
+} | {
+    mysql_types.BIGINT: BIGINT,
     sqltypes.Date: DATE,
     sqltypes.DateTime: DATETIME,
     sqltypes.DECIMAL: DECIMAL,
     sqltypes.Time: TIME,
+    sqltypes.ARRAY: ARRAY,
+    sqltypes.JSON: JSON,
+    sqltypes.JSON.JSONIndexType: JSONIndexType,
+    sqltypes.JSON.JSONPathType: JSONPathType,
 }
 
 class StarRocksTypeCompiler(MySQLTypeCompiler):
@@ -207,6 +226,10 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
     def visit_DOUBLE(self, type_, **kw):
         return "DOUBLE"
 
+    def visit_REAL(self, type_: sqltypes.REAL, **kw: Any) -> str:
+        """StarRocks has no REAL; it reads the REAL of MySQL, PostgreSQL and Trino tables as its 4-byte FLOAT."""
+        return "FLOAT"
+
     def visit_LARGEINT(self, type_, **kw):
         if getattr(type_, "display_width", None) is not None:
             return f"LARGEINT({type_.display_width})"
@@ -218,6 +241,41 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
     def visit_STRING(self, type_, **kw):
         return "STRING"
 
+    def visit_DATETIME(self, type_: sqltypes.DateTime, **kw: Any) -> str:
+        """StarRocks DATETIME has no precision argument; ``DATETIME(6)`` is a syntax error."""
+        return "DATETIME"
+
+    def visit_TIMESTAMP(self, type_: sqltypes.TIMESTAMP, **kw: Any) -> str:
+        """TIMESTAMP is not a StarRocks type keyword; DATETIME is the equivalent."""
+        return "DATETIME"
+
+    def visit_enum(self, type_: sqltypes.Enum, **kw: Any) -> str:
+        """StarRocks has no ENUM type, so sa.Enum is always stored as VARCHAR.
+
+        VARCHAR(n) counts bytes in StarRocks, so n is at least the longest value's UTF-8 length, not its character
+        count, and at least the ``length`` the Enum asks for.
+        """
+        longest_value_bytes = max((len(value.encode("utf-8")) for value in type_.enums), default=None)
+        if longest_value_bytes is not None and type_.length:
+            longest_value_bytes = max(longest_value_bytes, type_.length)
+        return self.visit_VARCHAR(sqltypes.String(longest_value_bytes), **kw)
+
+    def visit_NCHAR(self, type_: sqltypes.NCHAR, **kw: Any) -> str:
+        """StarRocks has no NATIONAL CHAR; its CHAR is UTF-8 already, as NVARCHAR's VARCHAR is."""
+        return self.visit_CHAR(type_, **kw)
+
+    def visit_CHAR(self, type_: sqltypes.CHAR, **kw: Any) -> str:
+        """Render ``CHAR(n)`` or ``CHAR`` alone, as :meth:`visit_VARCHAR` renders VARCHAR.
+
+        MySQL's compiler adds NATIONAL for ``mysql.NCHAR`` and ``CHAR(national=True)``, and COLLATE or BINARY for
+        a collation, all of which StarRocks refuses in a column definition.
+        """
+        return "CHAR" if type_.length is None else f"CHAR({type_.length})"
+
+    def visit_TEXT(self, type_: sqltypes.Text, **kw: Any) -> str:
+        """StarRocks stores TEXT as varchar(65533), which is what STRING means."""
+        return "STRING"
+
     def visit_VARCHAR(self, type_, **kw):
         # StarRocks supports unbounded strings via STRING. When no length is
         # provided (e.g. from SQLAlchemy String() without length), render
@@ -226,15 +284,22 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
             return "STRING"
         return f"VARCHAR({type_.length})"
 
-    def visit_BINARY(self, type_, **kw):
-        return "BINARY"
+    def visit_BINARY(self, type_: sqltypes.BINARY, **kw: Any) -> str:
+        return self._binary_with_length("BINARY", type_)
 
-    def visit_VARBINARY(self, type_, **kw):
-        return "VARBINARY"
+    def visit_VARBINARY(self, type_: sqltypes.VARBINARY, **kw: Any) -> str:
+        return self._binary_with_length("VARBINARY", type_)
 
-    def visit_ARRAY(self, type_: ARRAY, **kw):
-        """Compiles the ARRAY type into the correct StarRocks syntax."""
-        # logger.debug("visit_ARRAY: type_: %r, kw: %s", type_, kw)
+    @staticmethod
+    def _binary_with_length(keyword: str, type_: sqltypes.TypeEngine) -> str:
+        """Render a binary keyword with the declared length; StarRocks stores BINARY(n) as varbinary(n)."""
+        length = getattr(type_, "length", None)
+        return keyword if length is None else f"{keyword}({length})"
+
+    def visit_ARRAY(self, type_: Union[ARRAY, sqltypes.ARRAY], **kw: Any) -> str:
+        """Render ``ARRAY<item>``; SQLAlchemy's generic ARRAY is adapted first, so its ``dimensions`` nest."""
+        if not isinstance(type_, ARRAY):
+            type_ = type_.dialect_impl(self.dialect)
         inner_type_sql = self.process(type_.item_type, **kw)
         return f"ARRAY<{inner_type_sql}>"
 
@@ -244,13 +309,19 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
         value_type_sql = self.process(type_.value_type, **kw)
         return f"MAP<{key_type_sql}, {value_type_sql}>"
 
-    def visit_STRUCT(self, type_: STRUCT, **kw):
-        # logger.debug("visit_STRUCT: type_: %r, kw: %s", type_, kw)
+    def visit_STRUCT(self, type_: STRUCT, **kw: Any) -> str:
+        """Render ``STRUCT<name type, ...>``, with each field name quoted by the identifier preparer.
+
+        The preparer quotes a field name as it quotes a column name: a name StarRocks reserves, such as ``key``,
+        or one that is not a plain lowercase identifier, is backquoted, and a ``%`` is doubled for a driver that
+        formats parameters with ``%``. A name holding a backquote is refused, see
+        :func:`~starrocks.datatype.check_struct_field_name`.
+        """
+        preparer = self.dialect.identifier_preparer
         fields_sql = []
-        for name, type_ in type_.field_tuples:
-            name_sql = self.process(name, **kw) if isinstance(name, sqltypes.TypeEngine) else name
-            type_sql = self.process(type_, **kw)
-            fields_sql.append(f"{name_sql} {type_sql}")
+        for name, field_type in type_.field_tuples:
+            check_struct_field_name(name)
+            fields_sql.append(f"{preparer.quote(name)} {self.process(field_type, **kw)}")
         return f"STRUCT<{', '.join(fields_sql)}>"
 
     def visit_HLL(self, type_, **kw):
@@ -259,14 +330,24 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
     def visit_BITMAP(self, type_, **kw):
         return "BITMAP"
 
+    def visit_PERCENTILE(self, type_: PERCENTILE, **kw: Any) -> str:
+        return "PERCENTILE"
+
     def visit_VARIANT(self, type_, **kw):
         return "VARIANT"
 
-    def visit_BLOB(self, type_, **kw):
-        return "BINARY"
+    def visit_BLOB(self, type_: sqltypes.LargeBinary, **kw: Any) -> str:
+        """StarRocks has no BLOB; a LargeBinary is a BINARY of its declared length."""
+        return self._binary_with_length("BINARY", type_)
 
 
 class StarRocksSQLCompiler(MySQLCompiler):
+    render_table_with_column_in_update_from = False
+
+    def visit_sysdate_func(self, fn: Any, **kw: Any) -> str:
+        """StarRocks has no SYSDATE(); NOW() is its current-timestamp function, and takes the same precision."""
+        return "now" + self.function_argspec(fn, **kw)
+
     def visit_delete(self, delete_stmt: Delete, **kw: Any) -> str:
         result: str = super().visit_delete(delete_stmt, **kw)
         compile_state: Any = delete_stmt._compile_state_factory(
@@ -280,30 +361,310 @@ class StarRocksSQLCompiler(MySQLCompiler):
             return "TRUNCATE TABLE " + table
         return result
 
+    def visit_insert(self, insert_stmt: Insert, **kw: Any) -> str:
+        """Render ``INSERT OVERWRITE`` and ``WITH LABEL`` when the ``starrocks_overwrite`` and ``starrocks_label`` options ask.
+
+        StarRocks takes the label straight after the table, ``INSERT INTO t WITH LABEL l (a, b) VALUES ...``, and
+        replaces ``INTO`` with ``OVERWRITE``. The base compiler renders the whole statement, so the head is rewritten
+        around the table name it just emitted.
+        """
+        text: str = super().visit_insert(insert_stmt, **kw)
+        overwrite = bool(insert_stmt.dialect_options[self.dialect.name]["overwrite"])
+        label = insert_stmt.dialect_options[self.dialect.name]["label"]
+        if not overwrite and label is None:
+            return text
+        into_table = "INTO " + self.preparer.format_table(insert_stmt.table)
+        head, found, tail = text.partition(into_table)
+        if not found:
+            raise exc.CompileError(f"Cannot apply starrocks_overwrite or starrocks_label to: {text}")
+        keyword = "OVERWRITE" if overwrite else "INTO"
+        label_clause = "" if label is None else " WITH LABEL " + self._quoted_insert_label(label)
+        return f"{head}{keyword} {into_table[len('INTO '):]}{label_clause}{tail}"
+
+    _INSERT_LABEL: Final = re.compile(r"[-A-Za-z0-9_]{1,128}")
+    """The labels StarRocks takes: ``^[-\\w]{1,128}$`` in its frontend, where ``\\w`` is ASCII."""
+
+    def _quoted_insert_label(self, label: Any) -> str:
+        """Quote ``label``, refusing one that StarRocks would refuse or record under another name.
+
+        StarRocks refuses a label outside :attr:`_INSERT_LABEL`, and drops a backquote, which the identifier
+        quoting doubles, so ``lbl`q`` would be recorded as ``lblq`` with no error.
+        """
+        if not isinstance(label, str) or self._INSERT_LABEL.fullmatch(label) is None:
+            raise exc.CompileError(
+                f"starrocks_label must be 1 to 128 ASCII letters, digits, '_' or '-', as StarRocks requires, "
+                f"not {label!r}"
+            )
+        return self.preparer.quote(label)
+
+    _JSON_ACCESS_OPERATORS: Final[Tuple[Any, ...]] = (operators.json_getitem_op, operators.json_path_getitem_op)
+
+    def _render_json_extract_from_binary(self, binary: Any, operator: Any, **kw: Any) -> str:
+        """Render a JSON index or path access with ``json_query`` or the ``get_json_*`` function for its type.
+
+        StarRocks has no ``JSON_EXTRACT``. ``json_query`` returns JSON, with a JSON null kept as JSON null, and
+        the ``get_json_*`` functions return the SQL type of the accessor (``as_integer()`` and the like): a
+        missing key or a JSON null is SQL NULL, and a value of another type is converted as StarRocks casts it,
+        so the JSON string ``"5"`` reads as 5 and ``1.5`` as 1.
+
+        A chained access such as ``j["arr"][1]`` is one call with its paths joined at run time: StarRocks returns
+        NULL when ``json_query`` indexes into an array an inner ``json_query`` returned.
+
+        ``as_numeric(precision, scale)`` is rendered by :meth:`_render_json_decimal_access`.
+        """
+        decimal_type = self._exact_decimal_access_type(binary.type)
+        if decimal_type is not None:
+            return self._render_json_decimal_access(binary, decimal_type, **kw)
+        return self._render_json_access(self._json_access_function(binary.type), binary, **kw)
+
+    def _render_json_access(self, function: str, binary: Any, **kw: Any) -> str:
+        """Render ``function(document, path)`` for a JSON access, a chain's paths joined into one."""
+        document, paths = self._json_document_and_paths(binary, **kw)
+        path = paths[0] if len(paths) == 1 else "concat(%s)" % ", ".join(
+            [paths[0], *(f"substring({later}, 2)" for later in paths[1:])]
+        )
+        return f"{function}({document}, {path})"
+
+    def _render_json_decimal_access(self, binary: Any, decimal_type: str, **kw: Any) -> str:
+        """Render ``as_numeric(p, s)``: the value's text cast to the DECIMAL, which keeps every digit StarRocks stores.
+
+        StarRocks stores a JSON number with a fraction as a DOUBLE, so ``99998969694839.983485848`` inside an
+        object or array is stored, and read, as ``99998969694839.98``. An integer such as
+        ``12345678901234567890``, and a number written as a JSON string, keep all their digits. Read through
+        ``get_json_double``, a value past 2**53, or with more than about 16 digits, would be rounded.
+        The text of a JSON ``true`` or ``false`` is not a number, so when the text cast is NULL the value is cast
+        through a DOUBLE as well, which reads a boolean as 1 or 0, as ``get_json_double`` does, and anything else
+        it cannot hold as NULL. That second read is ``json_query``, not ``get_json_double``: StarRocks 4.1.6
+        refuses an expression combining ``get_json_string`` and ``get_json_double`` of one key, with "only found
+        column statistics".
+        """
+        exact = self._render_json_access("get_json_string", binary, **kw)
+        whole = self._render_json_access("json_query", binary, **kw)
+        return f"COALESCE(CAST({exact} AS {decimal_type}), CAST(CAST({whole} AS DOUBLE) AS {decimal_type}))"
+
+    @staticmethod
+    def _exact_decimal_access_type(access_type: sqltypes.TypeEngine) -> Optional[str]:
+        """Return ``DECIMAL(p, s)`` for an ``as_numeric(p, s)`` access, and ``None`` for any other."""
+        if access_type._type_affinity is not sqltypes.Numeric:
+            return None
+        precision, scale = access_type.precision, access_type.scale
+        if precision is None or scale is None:
+            return None
+        return f"DECIMAL({precision}, {scale})"
+
+    def _json_document_and_paths(self, binary: Any, **kw: Any) -> Tuple[str, List[str]]:
+        """Return the JSON document a chain of accesses starts from, and the path of each access in order.
+
+        SQLAlchemy groups the inner access when the chain mixes an index with a path, as ``j[("a", 2)][1]``
+        does, so the grouping is looked through to find it.
+        """
+        left = self._ungrouped(binary.left)
+        if isinstance(left, BinaryExpression) and left.operator in self._JSON_ACCESS_OPERATORS:
+            document, paths = self._json_document_and_paths(left, **kw)
+        else:
+            document, paths = self.process(binary.left, **kw), []
+        return document, [*paths, self.process(binary.right, **kw)]
+
+    @staticmethod
+    def _ungrouped(element: Any) -> Any:
+        while isinstance(element, Grouping):
+            element = element.element
+        return element
+
+    def _json_access_function(self, access_type: sqltypes.TypeEngine) -> str:
+        affinity = access_type._type_affinity
+        if affinity is sqltypes.JSON:
+            return "json_query"
+        if affinity is sqltypes.Integer:
+            return "get_json_int"
+        if affinity is sqltypes.Boolean:
+            return "get_json_bool"
+        if affinity is sqltypes.String:
+            return "get_json_string"
+        if issubclass(affinity, sqltypes.Numeric):
+            return "get_json_double"
+        return "json_query"
+
+    def update_tables_clause(
+        self,
+        update_stmt: Update,
+        from_table: Any,
+        extra_froms: list[Any],
+        **kw: Any,
+    ) -> str:
+        """Render only the updated table; StarRocks takes the other tables from ``FROM``, not a comma list."""
+        kw["asfrom"] = True
+        return from_table._compiler_dispatch(self, **kw)
+
+    def update_from_clause(
+        self,
+        update_stmt: Update,
+        from_table: Any,
+        extra_froms: list[Any],
+        from_hints: Any,
+        **kw: Any,
+    ) -> str:
+        """Render ``FROM b, c`` for the extra tables, as ``UPDATE a SET ... FROM b, c WHERE ...``."""
+        kw["asfrom"] = True
+        return "FROM " + ", ".join(
+            t._compiler_dispatch(self, fromhints=from_hints, **kw) for t in extra_froms
+        )
+
+    def delete_extra_from_clause(
+        self,
+        delete_stmt: Delete,
+        from_table: Any,
+        extra_froms: list[Any],
+        from_hints: Any,
+        **kw: Any,
+    ) -> str:
+        """Render ``USING b, c`` for the extra tables only; StarRocks rejects the deleted table repeated in it."""
+        kw["asfrom"] = True
+        return "USING " + ", ".join(
+            t._compiler_dispatch(self, fromhints=from_hints, **kw) for t in extra_froms
+        )
+
+    _LIMIT_FOR_OFFSET_ALONE: Final[int] = 2**62 - 1
+
     def limit_clause(self, select: Select, **kw: Any) -> str:
-        # StarRocks supports:
-        #   LIMIT <limit>
-        #   LIMIT <limit> OFFSET <offset>
+        """Render ``LIMIT <limit>`` and ``LIMIT <limit> OFFSET <offset>``, the forms StarRocks takes.
+
+        StarRocks has no OFFSET without a LIMIT, so an offset alone gets a LIMIT of 2**62 - 1. StarRocks refuses
+        a limit and offset whose sum overflows a signed 64-bit integer, which leaves room for any offset below 2**62.
+        """
         text = ""
         if select._limit_clause is not None:
             text += "\n LIMIT " + self.process(select._limit_clause, **kw)
+        elif select._offset_clause is not None:
+            text += f"\n LIMIT {self._LIMIT_FOR_OFFSET_ALONE}"
         if select._offset_clause is not None:
-            # if select._limit_clause is None:
-            #     text += "\n LIMIT -1"
             text += " OFFSET " + self.process(select._offset_clause, **kw)
         return text
 
+    def visit_cast(self, cast: Any, **kw: Any) -> str:
+        """Render a cast of a JSON expression to a string type as ``json_string``, which yields the JSON text.
+
+        ``CAST(<JSON> AS VARCHAR)`` on StarRocks drops the quotes of a JSON string and turns a JSON null into SQL
+        NULL, whereas SQLAlchemy documents the cast as the JSON text (``"value"``, ``null``). ``json_string``
+        returns that text, and SQL NULL for a missing value.
+
+        A CAST to ARRAY, MAP or STRUCT that StarRocks can't run is rendered as its operand alone, see
+        :meth:`_leaves_out_collection_cast`.
+        """
+        casts_json_to_string = (
+            cast.clause.type._type_affinity is sqltypes.JSON
+            and cast.typeclause.type._type_affinity is sqltypes.String
+        )
+        if casts_json_to_string:
+            return f"json_string({self.process(cast.clause, **kw)})"
+        if self._leaves_out_collection_cast(cast):
+            return self.process(cast.clause.self_group(), **kw)
+        return super().visit_cast(cast, **kw)
+
+    def _leaves_out_collection_cast(self, cast: Any) -> bool:
+        """Whether ``cast`` is a CAST to ARRAY, MAP or STRUCT that StarRocks can't run on its operand.
+
+        Such a CAST is left out, as MySQL's compiler left out every CAST to these types, and the operand's text is
+        read as the type by the type's result processing. That covers:
+
+        - text: StarRocks refuses text to MAP and STRUCT, and its text cast to ARRAY is not a JSON parser, so it
+          turns quoted dates, escaped quotes and fractions into NULL, where the reader reads them exactly;
+        - an operand with no type, such as ``literal_column()``, ``text()`` or a typeless ``column()``, which can
+          be text;
+        - JSON, where :func:`server_casts_json_to` finds no such cast in the connected StarRocks.
+
+        A collection operand, ``null()``, and any other operand keep the CAST.
+        """
+        if stored_collection_type(cast.typeclause.type, self.dialect) is None or isinstance(cast.clause, Null):
+            return False
+        operand_type = cast.clause.type
+        if operand_type._isnull:
+            return True
+        operand_affinity = operand_type._type_affinity
+        if isinstance(operand_affinity, type) and issubclass(operand_affinity, sqltypes.String):
+            return True
+        return operand_affinity is sqltypes.JSON and not server_casts_json_to(cast.typeclause.type, self.dialect)
+
     def visit_typeclause(
         self,
-        typeclause,
-        type_=None,
+        typeclause: TypeClause,
+        type_: Optional[sqltypes.TypeEngine] = None,
         **kw: Any,
-    ):
+    ) -> str:
+        """Render a CAST target; booleans, integers and ARRAY, MAP and STRUCT are cast to StarRocks' own types.
+
+        MySQL casts integers to ``SIGNED INTEGER``, which StarRocks reads as INT on 3.3 and 3.5 and as BIGINT on
+        4.1, so a BIGINT or LARGEINT cast lost its range on one version or the other. See
+        :meth:`_integer_cast_target` for the integer types, and :meth:`_casts_float_as_double` for the float
+        types.
+        """
         if type_ is None:
+            if self._casts_float_as_double(typeclause.type):
+                return "DOUBLE"
             type_ = typeclause.type.dialect_impl(self.dialect)
-        if isinstance(type_, sqltypes.Boolean):
-            return self.dialect.type_compiler_instance.process(type_)
+        if isinstance(type_, sqltypes.Integer):
+            return self._integer_cast_target(type_)
+        if isinstance(type_, self._CAST_TARGETS_NAMED_AS_DECLARED):
+            return self.dialect.type_compiler.process(type_)
         return super().visit_typeclause(typeclause, type_, **kw)
+
+    _CAST_TARGETS_NAMED_AS_DECLARED: Final[Tuple[Type[sqltypes.TypeEngine], ...]] = (
+        sqltypes.Boolean, ARRAY, MAP, STRUCT,
+    )
+    """The CAST targets MySQL has none for, which StarRocks casts to by the name its own DDL gives the type."""
+
+    _SINGLE_PRECISION_DIGITS: Final[int] = 24
+    """The largest ``FLOAT(p)`` precision MySQL stores in 4 bytes; a larger one is DOUBLE."""
+
+    _FLOAT_VISIT_NAMES: Final[Tuple[str, ...]] = ("float", "FLOAT")
+    """The generic ``Float``, and the ``FLOAT`` of SQLAlchemy, MySQL and StarRocks; REAL and DOUBLE are apart."""
+
+    def _casts_float_as_double(self, declared_type: sqltypes.TypeEngine) -> bool:
+        """Whether a CAST to ``declared_type``, a float type, is sent as DOUBLE.
+
+        StarRocks' FLOAT is 4 bytes, so ``CAST(123456789 AS FLOAT)`` reads 123456790. A float type with a
+        precision above 24, such as ``Float(53)``, ``sa.FLOAT(53)`` or ``mysql.FLOAT(53)``, is cast to DOUBLE, as
+        MySQL reads ``FLOAT(p)``; so is the generic ``Float`` with no precision, which SQLAlchemy maps to Python's
+        8-byte float. ``FLOAT()``, ``FLOAT(24)`` and below, and ``REAL`` are cast to FLOAT, and so is
+        ``mysql.FLOAT(M, D)``, which MySQL stores in 4 bytes whatever its M. A TypeDecorator is cast as the type
+        it loads for the dialect.
+        """
+        while isinstance(declared_type, sqltypes.TypeDecorator):
+            declared_type = declared_type.load_dialect_impl(self.dialect)
+        if declared_type.__visit_name__ not in self._FLOAT_VISIT_NAMES:
+            return False
+        precision = getattr(declared_type, "precision", None)
+        if precision is None:
+            return declared_type.__visit_name__ == "float"
+        return precision > self._SINGLE_PRECISION_DIGITS and getattr(declared_type, "scale", None) is None
+
+    _INTEGER_CAST_TARGETS: Final[Tuple[Tuple[Type[sqltypes.Integer], str, str], ...]] = (
+        (mysql_types.TINYINT, "TINYINT", "SMALLINT"),
+        (sqltypes.SmallInteger, "SMALLINT", "INT"),
+        (mysql_types.MEDIUMINT, "INT", "INT"),
+        (sqltypes.INTEGER, "INT", "BIGINT"),
+        (sqltypes.BigInteger, "BIGINT", "LARGEINT"),
+        (LARGEINT, "LARGEINT", "LARGEINT"),
+    )
+    """Each integer type with the StarRocks type a cast to it names, signed and unsigned."""
+
+    _GENERIC_INTEGER_CAST_TARGET: Final[str] = "BIGINT"
+    """The generic ``Integer`` names no width, so it is cast to the 64 bits ``SIGNED INTEGER`` has on 4.1.
+
+    A value that fits 64 bits, such as an id or an epoch in milliseconds, is therefore not turned into NULL.
+    """
+
+    def _integer_cast_target(self, type_: sqltypes.Integer) -> str:
+        """Name the StarRocks integer type of the same width, without a display width, UNSIGNED or ZEROFILL.
+
+        StarRocks has no unsigned integers and refuses those keywords, and MEDIUMINT, in a CAST. An unsigned type
+        is widened to the next signed type that holds its whole range, and MEDIUMINT is INT.
+        """
+        unsigned = bool(getattr(type_, "unsigned", False))
+        for integer_type, signed_target, unsigned_target in self._INTEGER_CAST_TARGETS:
+            if isinstance(type_, integer_type):
+                return unsigned_target if unsigned else signed_target
+        return self._GENERIC_INTEGER_CAST_TARGET
 
     def visit_insert_into_files(self, insert_into, **kw):
         return (
@@ -703,11 +1064,11 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         This method extends the base MySQL compiler to support:
         - **KEY specifier**: For AGGREGATE KEY tables, key columns can be marked
-          with `info={'starrocks_is_agg_key': True}`. The compiler validates that
+          with `Column(..., starrocks_is_agg_key=True)`. The compiler validates that
           a column is not both a key and an aggregate.
         - **Aggregate Functions**: For AGGREGATE KEY tables, value columns can have
-          an aggregate function (e.g., 'SUM', 'REPLACE') specified via the
-          `info={'starrocks_agg': '...'}` dictionary on a Column.
+          an aggregate function (e.g., 'SUM', 'REPLACE', or a state function such as
+          'sum(BIGINT)') given as `Column(..., starrocks_agg_type='...')`.
         - **AUTO_INCREMENT**: Automatically renders `AUTO_INCREMENT` for columns
           with `autoincrement=True`. It also ensures these columns are `BIGINT`
           and `NOT NULL` as required by StarRocks.
@@ -804,11 +1165,11 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         This method extends the base MySQL compiler to support:
         - **KEY specifier**: For AGGREGATE KEY tables, key columns can be marked
-          with `info={'starrocks_is_agg_key': True}`. The compiler validates that
+          with `Column(..., starrocks_is_agg_key=True)`. The compiler validates that
           a column is not both a key and an aggregate.
         - **Aggregate Functions**: For AGGREGATE KEY tables, value columns can have
-          an aggregate function (e.g., 'SUM', 'REPLACE') specified via the
-          `info={'starrocks_agg': '...'}` dictionary on a Column.
+          an aggregate function (e.g., 'SUM', 'REPLACE', or a state function such as
+          'sum(BIGINT)') given as `Column(..., starrocks_agg_type='...')`.
         - **AUTO_INCREMENT**: Automatically renders `AUTO_INCREMENT` for columns
           with `autoincrement=True`. It also ensures these columns are `BIGINT`
           and `NOT NULL` as required by StarRocks.
@@ -933,7 +1294,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             return ColumnAggType.KEY
         elif has_agg_type:
             agg_val = str(opt_dict[ColumnAggInfoKey.AGG_TYPE])
-            if agg_val.upper() not in ColumnAggType.ALLOWED_ITEMS:
+            if not ColumnAggType.is_valid(agg_val):
                 raise exc.CompileError(
                     f"Unsupported aggregate type for column '{column.name}': {agg_val}"
                 )
@@ -1278,8 +1639,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
     construct_arguments = [
         (Table, {variant: None for k in TableInfoKey.ALL for variant in (k.lower(), k.upper())}),
         (Column, {variant: None for k in ColumnAggInfoKey.ALL for variant in (k.lower(), k.upper())}),
-        (Update, {"limit": None}),
-        (Delete, {"limit": None}),
+        (Insert, {"overwrite": False, "label": None}),
         (sa_schema.PrimaryKeyConstraint, {"using": None}),
         (
             sa_schema.Index,
@@ -1296,6 +1656,8 @@ class StarRocksDialect(MySQLDialect_pymysql):
     # Warnings are generated by SQLAlchemy if this flag is not explicitly set
     # and tests are needed before being enabled
     supports_statement_cache = True
+    supports_native_enum = False
+    _support_float_cast = True
     supports_empty_insert = False
 
     ischema_names = ischema_names

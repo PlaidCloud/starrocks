@@ -175,6 +175,10 @@ Column(
 )
 ```
 
+Bind a Python list to an ARRAY column, and a dict to a MAP or STRUCT column. An ARRAY column also takes text, as StarRocks writes an array. JSON text such as `"[1, 2, 3]"` is read as JSON, and other text is cast by StarRocks, so `"[a,b]"` is stored as `["a", "b"]`, and text that isn't an array becomes NULL. An ARRAY of MAP or STRUCT values takes JSON text only, since StarRocks can't cast text to it.
+
+A `cast()` to ARRAY, MAP or STRUCT is sent only where StarRocks can run it: on an ARRAY, MAP or STRUCT, on NULL, and on JSON from the StarRocks version that casts JSON to the type. Otherwise, as for text or an expression with no type, the CAST is left out and the value is read from the operand's text. A `func` given no `type_` has no type, so give a function that returns a collection its type, as in `func.split(c, ",", type_=ARRAY(VARCHAR(10)))`. Its result is then read as a list, and a CAST of it reaches StarRocks.
+
 **Note**: Syntax and usage are analogous to SQLAlchemy's style (e.g., MySQL types), but always import and use the StarRocks types in uppercase from `starrocks`.
 
 #### Column-Level Attributes (`starrocks_*` Prefixes)
