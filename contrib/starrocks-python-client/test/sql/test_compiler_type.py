@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from sqlalchemy import Column, LargeBinary, MetaData, Table, Text, UnicodeText, testing
+from sqlalchemy import Column, Enum, LargeBinary, MetaData, Table, Text, UnicodeText, testing
 from sqlalchemy.schema import CreateColumn
 from sqlalchemy.testing import expect_warnings, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
@@ -73,6 +73,9 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         (Text(), "STRING"),
         (Text(100), "STRING"),
         (UnicodeText(), "STRING"),
+        (Enum("a", "bb"), "VARCHAR(2)"),
+        (Enum("réveillé", "b"), "VARCHAR(10)"),
+        (Enum("a", native_enum=True), "VARCHAR(1)"),
         (BINARY(), "BINARY"),
         (BINARY(10), "BINARY(10)"),
         (VARBINARY(), "VARBINARY"),
@@ -89,7 +92,7 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         id_="ra",
     )
     def test_scalar_type(self, type_, expected):
-        """Binary types keep their declared length; VARCHAR at StarRocks' maximum length renders as STRING."""
+        """Binary types keep their declared length, Enum is a VARCHAR sized in UTF-8 bytes; VARCHAR at StarRocks' maximum length renders as STRING."""
         self.assert_compile(type_, expected)
 
     @testing.combinations(

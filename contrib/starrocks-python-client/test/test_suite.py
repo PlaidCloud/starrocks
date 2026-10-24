@@ -60,7 +60,7 @@ from test.util import normalize_sql
 
 if IS_SQLALCHEMY_2:
     from sqlalchemy.engine import ObjectKind, ObjectScope
-    from sqlalchemy.testing.suite import EnumTest, TrueDivTest as _TrueDivTest
+    from sqlalchemy.testing.suite import TrueDivTest as _TrueDivTest
 else:
     from sqlalchemy.testing.suite import (
         HasIndexTest,
@@ -696,9 +696,7 @@ class ServerSideCursorsTest(_ServerSideCursorsTest):
 
 LongNameBlowoutTest.__requires__ = ("index_reflection",)  # This will do to make it skip for now, no multiple column index
 CompositeKeyReflectionTest.__requires__ = ('primary_key_constraint_reflection',) # This will make it also skip the fixture which is not creating succesfully
-if IS_SQLALCHEMY_2:
-    EnumTest.__requires__ = ("enums",)  # Fix Enum handling. Mysql has native ENUM type, but Starrocks has not
-else:
+if not IS_SQLALCHEMY_2:
     HasIndexTest.__requires__ = ('index_reflection',)
 
     class LikeFunctionsTest(_LikeFunctionsTest):
