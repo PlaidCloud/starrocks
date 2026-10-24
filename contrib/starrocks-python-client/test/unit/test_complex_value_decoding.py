@@ -102,8 +102,13 @@ class ComplexTypeReflectionTest(fixtures.TestBase):
         t = parse_data_type("map<decimal(10, 2),largeint(40)>")
         assert isinstance(t, datatype.MAP)
 
+    def test_declared_double_defaults_to_float_and_honours_asdecimal(self):
+        assert datatype.DOUBLE().asdecimal is False
+        assert datatype.DOUBLE(asdecimal=True).asdecimal is True
+        assert datatype.DOUBLE().adapt(datatype.DOUBLE).asdecimal is False
+
     def test_double_returns_float(self):
-        t = parse_data_type("double")
+        t = parse_data_type("double")()
         assert t._cached_result_processor(_DIALECT, None) is None or \
             t._cached_result_processor(_DIALECT, None)(1.2345678901234567) == 1.2345678901234567
         assert t.asdecimal is False

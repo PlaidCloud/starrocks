@@ -43,7 +43,7 @@ class DataTypeParserTest(fixtures.TestBase):
         ("bigint", datatype.BIGINT),
         ("largeint", datatype.LARGEINT),
         ("decimal(10, 2)", datatype.DECIMAL(10, 2)),
-        ("double", datatype.DOUBLE(asdecimal=False)),
+        ("double", datatype.DOUBLE),
         ("float", datatype.FLOAT),
         ("char(10)", datatype.CHAR(10)),
         ("varchar(100)", datatype.VARCHAR(100)),

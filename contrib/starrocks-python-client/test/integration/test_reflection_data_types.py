@@ -27,7 +27,7 @@ issues where:
 """
 import logging
 
-from sqlalchemy import TIMESTAMP, Column, MetaData, Table, Text, UnicodeText, text
+from sqlalchemy import TIMESTAMP, Column, MetaData, Table, Text, UnicodeText, select, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.testing import fixtures
 
@@ -268,6 +268,28 @@ class DataTypeReflectionTest(fixtures.TestBase):
         reflected_table = self._create_and_reflect_table(connection, table_name, table)
 
         assert [name for name, _ in reflected_table.c.struct_col.type.field_tuples] == ["a b", "Caps"]
+
+    def test_declared_double_round_trips_as_float(self, connection):
+        """A declared DOUBLE must return the stored float, as a reflected DOUBLE does."""
+        table_name = "test_double_round_trip"
+        connection.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+        table = Table(
+            table_name,
+            MetaData(),
+            Column("id_col", INTEGER()),
+            Column("double_col", DOUBLE()),
+            starrocks_distributed_by='HASH(id_col)',
+            starrocks_properties={"replication_num": "1"},
+        )
+        table.create(connection)
+        try:
+            connection.execute(table.insert(), [{"id_col": 1, "double_col": 1.123456789012345}, {"id_col": 2, "double_col": 1e300}])
+            values = connection.execute(select(table.c.double_col).order_by(table.c.id_col)).scalars().all()
+        finally:
+            connection.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+
+        assert values == [1.123456789012345, 1e300]
+        assert all(isinstance(value, float) for value in values)
 
     def test_reflect_datetime_types(self, connection):
         """Test reflection of datetime data types"""

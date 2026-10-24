@@ -68,7 +68,18 @@ class DECIMAL(mysql_types.DECIMAL):
 
 
 class DOUBLE(mysql_types.DOUBLE):
+    """DOUBLE returning ``float``; MySQL's default ``asdecimal=True`` would round every value to ten places."""
+
     __visit_name__ = "DOUBLE"
+
+    def __init__(
+        self,
+        precision: Optional[int] = None,
+        scale: Optional[int] = None,
+        asdecimal: bool = False,
+        **kw: Any,
+    ) -> None:
+        super().__init__(precision=precision, scale=scale, asdecimal=asdecimal, **kw)
 
 
 class FLOAT(mysql_types.FLOAT):
