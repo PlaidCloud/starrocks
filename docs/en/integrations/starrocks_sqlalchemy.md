@@ -46,9 +46,10 @@ Schema changes can be applied to development, staging, and production with the s
 
 ### Prerequisites**
 
-- StarRocks Python client: 1.3.2 or later
-- `SQLAlchemy`: 1.4 or later (SQLAlchemy 2.0 is recommended and is required to use `sqlacodegen`)
-- `Alembic`: 1.16 or later
+- StarRocks: 3.3.3 or later. View `starrocks_security` needs 3.4.1, and `VARIANT` columns need 4.1; on an older server the dialect refuses them with a `CompileError`.
+- StarRocks Python client: 1.4.0 or later. Earlier clients lack the version checks above and some of the features on this page.
+- `SQLAlchemy`: 1.4 or later. Views, materialized views, the `starrocks+asyncmy` driver and `sqlacodegen` need SQLAlchemy 2.0. On SQLAlchemy 1.4, Alembic autogenerate compares tables and leaves the database's views and materialized views alone.
+- `Alembic`: 1.14 or later
 
 ### Installing StarRocks Python client
 
@@ -106,7 +107,14 @@ It also supports StarRocks-specific table attributes such as:
 :::important
 - StarRocks dialect options are passed as keyword arguments prefixed with `starrocks_`.
 - The `starrocks_` **prefix must be lowercase**. The suffix is accepted in either case (for example, `PRIMARY_KEY` and `primary_key`).
-- If you specify a table key (e.g. `starrocks_primary_key="id"`), the involved columns **must** also be marked with `primary_key=True` in `Column(...)`, so that SQLAlchemy metadata and Alembic autogenerate can behave correctly.
+- A table that names no table key but has `primary_key=True` columns is created as a `PRIMARY KEY` table on those columns when they come first, in key order. Otherwise the dialect warns and sends no key clause, so StarRocks creates a `DUPLICATE KEY` table. Autogenerate compares such a model's key only with a `PRIMARY KEY` table.
+- If you specify a `PRIMARY KEY`, `UNIQUE KEY` or `AGGREGATE KEY` (e.g. `starrocks_primary_key="id"`), also mark its columns with `primary_key=True` in `Column(...)`: reflection reports the key of those tables as the primary key, so the model then matches the database. A `DUPLICATE KEY` table has no primary key: mark all of its key columns `primary_key=True` only if the ORM must map the table, or none of them.
+:::
+
+:::note Upgrading from an earlier version of the dialect
+- Earlier versions sent no key clause for a table that names no table key, so a table they created from a model with `primary_key=True` columns is a `DUPLICATE KEY` table. Autogenerate leaves it as it is, but a new database built from the same model, or from the same migration scripts, now gets a `PRIMARY KEY` table, which keeps one row per key.
+- To keep the table a `DUPLICATE KEY` table everywhere, name its key as `SHOW CREATE TABLE` reports it, for example `starrocks_duplicate_key="id, name"`. The columns marked `primary_key=True` must then be exactly the key's columns, or none of them.
+- A `DUPLICATE KEY` table no longer reflects a primary key, so `automap_base().prepare(autoload_with=engine)` skips it, and the ORM cannot map a reflected `Table` of it. Give the ORM the key yourself: reflect the table with an overriding `Column("id", INTEGER, primary_key=True)`, or set `__mapper_args__ = {"primary_key": [table.c.id]}` on the mapped class.
 :::
 
 Examples below reflect the real public API and parameter names.
@@ -314,7 +322,7 @@ GRANT CREATE VIEW ON DATABASE __alembic_canon__ TO '<user>';
 GRANT SELECT, DROP ON ALL VIEWS IN DATABASE __alembic_canon__ TO '<user>';
 ```
 
-When `starrocks_temp_view_schema` is unset, behavior is unchanged (the temporary view is created in the compared object's own schema). If the temporary view cannot be created (missing privilege, or a referenced object that does not exist yet), the comparison logs a DEBUG message and falls back to in-process AST/regex normalization.
+When `starrocks_temp_view_schema` is unset, behavior is unchanged (the temporary view is created in the compared object's own schema). If the temporary view cannot be created (missing privilege, or a referenced object that does not exist yet), the comparison logs a DEBUG message and falls back to in-process AST/regex normalization. From 4.0.6 StarRocks stores definitions as written, and a materialized view whose definition differs is recreated as usual. Before 4.0.6 its stored definition has table-qualified columns that the normalization keeps, so a difference only it finds is reported as a warning, and no operation is generated for the materialized view, unless the model's definition reads a table, view or materialized view that the same revision creates; then the materialized view is recreated.
 
 ### Generating migrations automatically
 

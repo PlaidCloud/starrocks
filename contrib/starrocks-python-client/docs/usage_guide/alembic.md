@@ -9,7 +9,7 @@ Alembic is a database migration tool for SQLAlchemy that allows you to manage ch
 First, ensure you have Alembic installed. If not, you can install it via pip:
 
 ```bash
-pip install "alembic>=1.16"
+pip install "alembic>=1.14"
 ```
 
 For more detailed installation instructions, refer to the [Alembic Installation Guide](https://alembic.sqlalchemy.org/en/latest/front.html#installation).
@@ -173,7 +173,12 @@ GRANT SELECT, DROP ON ALL VIEWS IN DATABASE __alembic_canon__ TO '<user>';
 When `starrocks_temp_view_schema` is unset the previous behaviour is unchanged (the temp
 view is created in the compared object's own schema). If the temporary view cannot be
 created (missing privilege, or a referenced object that does not exist yet), the comparison
-logs a DEBUG message and falls back to in-process AST/regex normalization.
+logs a DEBUG message and falls back to in-process AST/regex normalization. From 4.0.6
+StarRocks stores definitions as written, and a materialized view whose definition differs
+is recreated as usual. Before 4.0.6 its stored definition has table-qualified columns that
+the normalization keeps, so a difference only it finds is reported as a warning, and no
+operation is generated for the MV, unless the model's definition reads a table, view or
+materialized view that the same revision creates; then the MV is recreated.
 
 ### Advanced: Custom Object Filtering
 
@@ -340,9 +345,11 @@ class MyTable(Base):
     }
 ```
 
-**Note**: All columns that appear in a StarRocks key (`starrocks_primary_key`, `starrocks_unique_key`, `starrocks_duplicate_key`, or `starrocks_aggregate_key`) must also be marked with `primary_key=True` in their `Column(...)` declarations.
+**Note**: All columns that appear in a Primary, Unique or Aggregate Key (`starrocks_primary_key`, `starrocks_unique_key` or `starrocks_aggregate_key`) must also be marked with `primary_key=True` in their `Column(...)` declarations, since reflection reports those keys as the primary key. A Duplicate Key table has no primary key: mark all of its key columns `primary_key=True` only if the ORM must map the table, or none of them.
 
 > In the above example, it the `id` column.
+
+**Note**: A table that names no `starrocks_*_key` is created as a Primary Key table on its `primary_key=True` columns when they are its first columns, in key order; otherwise the dialect warns, and StarRocks makes a Duplicate Key table. Earlier versions of the dialect always made a Duplicate Key table from such a model. Autogenerate leaves those existing tables alone, but a new database built from the same model or migration scripts gets Primary Key tables; to keep them Duplicate Key tables, name the key with `starrocks_duplicate_key`, as `SHOW CREATE TABLE` reports it. The upgrade note under Table Type in the [table guide](tables.md) has the details, and how to map a reflected Duplicate Key table with the ORM.
 
 **Note**: Usage mirrors SQLAlchemy’s patterns (e.g., MySQL), but always import and use uppercase types from `starrocks`.
 
@@ -441,8 +448,9 @@ def downgrade():
 - **Autogenerate will detect:**
   - New views/MVs in metadata: emits `op.create_view(...)` or `op.create_materialized_view(...)`.
   - Dropped views/MVs from metadata: emits `op.drop_view(...)` or `op.drop_materialized_view(...)`.
-  - Definition changes: emits `op.alter_view(...)` or `op.alter_materialized_view(...)`.
-- **StarRocks Limitation:** `ALTER VIEW` only supports redefining the `AS SELECT` clause. It does not support changing `COMMENT` or `SECURITY` directly. If only `COMMENT`/`SECURITY` change, no operation is emitted; if the definition also changes, those attributes are ignored and only `ALTER VIEW` is generated.
+  - Definition changes: a view gets `op.alter_view(...)`. A materialized view, whose definition ALTER cannot change, is dropped and created again (`op.drop_materialized_view(...)` and `op.create_materialized_view(...)`), with a warning that StarRocks refills it.
+  - Changes to a materialized view's refresh scheme (ASYNC, MANUAL or the schedule) and properties: emits `op.alter_materialized_view(...)`. A change of the refresh moment (IMMEDIATE or DEFERRED) drops the materialized view and creates it again.
+- **View comment and security:** `ALTER VIEW ... AS` drops the view's comment and StarRocks has no ALTER for it, so `op.alter_view` applies a definition, column or comment change as `CREATE OR REPLACE VIEW` with the full definition, columns and comment. A security change is applied with `ALTER VIEW ... SET SECURITY`. Autogenerate emits an `op.alter_view` that carries all of this.
 - **Definition Comparison:** View/MV definition comparison uses normalization: remove identifier backticks, strip comments, collapse whitespace, and compare case-insensitively. But, it's still recommended to give the definition with a good and unified SQL style.
 
 #### Caveats: SQL rewriting and quoted strings
@@ -533,6 +541,11 @@ alembic upgrade <current_rev>:<target_rev> --sql
 
 Setting `<target_rev>` to be `head`, you can see the SQL for changes to the newest version.
 
+> **Offline limits of `op.alter_column`**: with no database to read, the SQL written for `--sql` can differ from what the dialect sends when connected.
+>
+> - StarRocks wants a key column's `KEY`, or a value column's aggregate type, repeated in `MODIFY COLUMN` for a key column of a DUPLICATE KEY or UNIQUE KEY table and a value column of an AGGREGATE KEY table. Connected, the dialect reads it from the table; offline it can't, so the script's statement leaves it out and fails, with "Can not change aggregation type". Add it after the type before you run the script, as in `ALTER TABLE t MODIFY COLUMN k2 VARCHAR(20) KEY NULL` or `ALTER TABLE t MODIFY COLUMN v BIGINT SUM NULL`.
+> - `autoincrement=True` needs `existing_autoincrement`: the dialect can't tell whether it would add AUTO_INCREMENT, which StarRocks can't do. `autoincrement=False`, which autogenerate writes for a `primary_key=True, autoincrement=False` column, leaves AUTO_INCREMENT out.
+
 ### 4.3 Applying This Migration to Your Database
 
 ```bash
@@ -605,7 +618,7 @@ def downgrade():
 
 **Notes and limitations:**
 
-- Only `ADD COLUMN` and `DROP COLUMN` are coalesced. `MODIFY COLUMN` (type/nullability changes) and property/distribution changes remain separate statements. If a table has both a combined add/drop *and* a modify in the same revision, they are still two schema-change jobs — enable the wait option below, or split them into separate revisions.
+- Only `ADD COLUMN` and `DROP COLUMN` are coalesced. `MODIFY COLUMN` (type/nullability changes) and property/distribution changes remain separate statements. If a table has both a combined add/drop *and* a modify in the same revision, they are still two schema-change jobs, which run one after the other (see below).
 - The combined operation compiles to a single `ALTER TABLE`, so its column ordering within one statement does not matter to StarRocks.
 - **Known gap — RANGE-distributed tables (StarRocks 4.2 / CelerData 26.2, private preview).** In shared-data mode with the FE config `enable_range_distribution = true`, a table declared with an explicit key type or `ORDER BY` and no `DISTRIBUTED BY` clause is distributed by range. On such a table, StarRocks routes a change that shifts the range sort key — adding a key column, or dropping a sort-key column — to a dedicated rewrite job that it refuses to run alongside any other clause:
 
@@ -619,7 +632,7 @@ def downgrade():
 
 #### Waiting for schema changes to reach a terminal state (opt-in)
 
-Even with coalescing, `ALTER TABLE` returns *before* the async job finishes, so a later operation on the same table (in the same `alembic upgrade` run) can still collide. To make your migration pipeline stay 100% in sync with the cluster, opt in to blocking until each column schema change reaches a terminal state (`FINISHED`/`CANCELLED`):
+Even with coalescing, `ALTER TABLE` returns *before* the async job finishes, and StarRocks rejects any other change to the table until it has. The dialect therefore holds back a later `ALTER TABLE`, `CREATE INDEX` or `DROP INDEX` on the same table until the table's running `COLUMN` or `OPTIMIZE` job has ended, so the operations of one `alembic upgrade` run do not collide. That wait does not look at how the job ended, and it is bounded by the engine's `starrocks_schema_change_timeout`, 300 seconds by default: see [Handling Time-Consuming ALTER TABLE Operations](tables.md#handling-time-consuming-alter-table-operations). To make your migration pipeline stay 100% in sync with the cluster, opt in to blocking until each column schema change reaches a terminal state (`FINISHED`/`CANCELLED`), and stopping when one is cancelled:
 
 ```python
 context.configure(
@@ -631,7 +644,9 @@ context.configure(
 )
 ```
 
-When enabled, after each column-altering statement the dialect polls `SHOW ALTER TABLE COLUMN` until the job finishes. A `CANCELLED` job or an elapsed timeout raises an error so the migration stops instead of silently drifting from the cluster state. This only applies to online mode (`alembic upgrade`); it is a no-op in offline `--sql` mode.
+When enabled, after each column-altering, sort key (`ORDER BY`) or property-setting statement the dialect polls `SHOW ALTER TABLE COLUMN` until the job it started finishes, and after a distribution change it polls `SHOW ALTER TABLE OPTIMIZE`. A statement that starts no job, such as most property changes, does not wait. A `CANCELLED` job or an elapsed timeout raises an error so the migration stops instead of silently drifting from the cluster state. This only applies to online mode (`alembic upgrade`); it is a no-op in offline `--sql` mode.
+
+`op.alter_table_properties` sends one `ALTER TABLE ... SET` per property, because StarRocks accepts one property at a time (the `dynamic_partition.*` properties, and the `binlog_*` ones, may share a statement) and a property such as `bloom_filter_columns` starts a schema-change job. The dialect holds back each statement until the job of the one before it has ended; with the option on, each statement also waits for its own job and stops the migration if it is cancelled.
 
 ### 4.5 Verifying No Further Changes (optional)
 

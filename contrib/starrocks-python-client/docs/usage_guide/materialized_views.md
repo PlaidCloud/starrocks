@@ -93,12 +93,12 @@ The `MaterializedView` object is used to define a materialized view in your Pyth
 - **`name`** (`str`): The name of the materialized view.
 - **`metadata`** (`MetaData`): The SQLAlchemy MetaData object to associate with. A `MaterailizedView` can be recoganized from `table.info['table_kind']` when you get objects from `metadata.tables`.
 - **`*args`** (`Column`): Optional Column objects for explicit column definitions (SQLAlchemy style).
-- **`definition`** (`str | Selectable`): **Required.** The `SELECT` statement that defines the materialized view. Can be a raw SQL string or a SQLAlchemy `Selectable` object.
+- **`definition`** (`str | Selectable`): **Required.** The `SELECT` statement that defines the materialized view. Can be a raw SQL string or a SQLAlchemy `Selectable` object. Write a single `%`, as in `date_format(d, '%Y')`; see the [note on `%`](tables.md#available-table-level-options) for upgrading from `%%`.
 - **`schema`** (`Optional[str]`): The database schema where the materialized view will be created.
 - **`comment`** (`Optional[str]`): An optional comment to describe the materialized view's purpose.
 - **`starrocks_partition_by`** (`Optional[str]`): Partitioning strategy (e.g., `"order_date"` or `"date_trunc('day', created_at)"`).
 - **`starrocks_distributed_by`** (`Optional[str]`): Distribution strategy (e.g., `"HASH(order_id) BUCKETS 16"`).
-- **`starrocks_refresh`** (`Optional[str]`): Refresh method - `"ASYNC"`, `"MANUAL"`, or a full refresh schedule specification. Specify it when you want to create an Async Materialized View. Sync Materialized View is not supported now.
+- **`starrocks_refresh`** (`Optional[str]`): Refresh method - `"ASYNC"`, `"MANUAL"`, or a full refresh schedule specification. Specify it, or `starrocks_distributed_by`, to create an asynchronous materialized view. With neither, StarRocks builds a synchronous materialized view, a rollup of its base table, which reflection and autogenerate can't see, so autogenerate proposes creating it again; the dialect warns when it creates one.
 - **`starrocks_properties`** (`Optional[dict]`): Additional StarRocks-specific properties (e.g., `{"replication_num": "3"}`).
 
 ## Alembic Integration
@@ -151,4 +151,4 @@ No matter whether using `--autogenerate` or manual scripting, you should use `al
   - activate/deactivate,
   - swap,
 
-Autogenerate will raise errors for immutable changes instead of producing ALTER statements. You should decide explicitly (usually DROP + CREATE) in those cases or with direct SQL statement, such as `engine.connect().execute(text("ALTER MATERIALIZED VIEW ..."))`.
+For a change ALTER cannot make, such as a new definition, comment, partitioning, distribution, sort order or refresh moment (IMMEDIATE or DEFERRED), autogenerate drops the materialized view and creates it again, and warns that StarRocks refills the new one as it refreshes. The new one keeps the database's refresh when the model states none, and its `session.*` and other properties that SHOW CREATE lists only once set, when the model leaves them out. The downgrade drops it and creates it as the database had it. A change to the refresh scheme (ASYNC, MANUAL or the schedule) or the properties is an `op.alter_materialized_view(...)`.
