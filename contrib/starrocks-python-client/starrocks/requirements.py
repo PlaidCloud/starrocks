@@ -30,40 +30,53 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
         return exclusions.skip_if(lambda config: not IS_SQLALCHEMY_2, "SQLAlchemy 2.0 or greater required")
 
     @property
-    def unbounded_varchar(self):
-        """Target database must support VARCHAR with no length"""
-        return exclusions.closed()  # Starrocks does not support unbounded VARCHAR
-
-    @property
-    def temp_table_reflection(self):
-        return exclusions.closed()
-
-    @property
-    def temp_table_reflect_indexes(self):
-        return self.temp_table_reflection
-
-    @property
-    def temp_table_names(self):
-        """target dialect supports listing of temporary table names"""
-        return exclusions.closed()
-
-    @property
-    def has_temp_table(self):
-        """target dialect supports checking a single temp table name"""
-        return exclusions.closed()
-
-    @property
-    def temporary_tables(self):
-        """target database supports temporary tables"""
+    def unbounded_varchar(self) -> exclusions.compound:
+        """``String()`` without a length compiles as STRING."""
         return exclusions.open()
 
     @property
-    def temporary_views(self):
-        """target database supports temporary views"""
+    def temp_table_reflection(self) -> exclusions.compound:
+        """Closed: the suite's temporary table carries an index, and StarRocks refuses ``CREATE INDEX`` on a
+        temporary table ("temporary table doesn't support alter table statement").
+        """
         return exclusions.closed()
 
     @property
-    def index_reflection(self):
+    def temp_table_reflect_indexes(self) -> exclusions.compound:
+        """Closed, as ``temp_table_reflection``: StarRocks refuses an index on a temporary table."""
+        return self.temp_table_reflection
+
+    @property
+    def temp_table_names(self) -> exclusions.compound:
+        """Closed: the dialect has no ``get_temp_table_names``, though ``SHOW TEMPORARY TABLES`` lists them.
+
+        The suite also creates its temporary table only when ``temp_table_reflection`` is open.
+        """
+        return exclusions.closed()
+
+    @property
+    def has_temp_table(self) -> exclusions.compound:
+        """``has_table`` finds a temporary table on SQLAlchemy 2.0, whose MySQL ``has_table`` runs ``DESCRIBE``.
+
+        SQLAlchemy 1.4's reads ``information_schema.tables``, which lists no temporary tables.
+        """
+        return exclusions.skip_if(
+            lambda config: not IS_SQLALCHEMY_2,
+            "SQLAlchemy 1.4's has_table reads information_schema.tables, which lists no temporary tables",
+        )
+
+    @property
+    def temporary_tables(self) -> exclusions.compound:
+        """``CREATE TEMPORARY TABLE``. No suite test is gated on it."""
+        return exclusions.open()
+
+    @property
+    def temporary_views(self) -> exclusions.compound:
+        """Closed: StarRocks has no ``CREATE TEMPORARY VIEW``."""
+        return exclusions.closed()
+
+    @property
+    def index_reflection(self) -> exclusions.compound:
         """Closed: ComponentReflectionTest's fixture tables carry multi-column and unique indexes, which StarRocks
         does not have, and HasIndexTest checks its indexes before StarRocks has built them.
 
@@ -86,12 +99,13 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
         return exclusions.open()
 
     @property
-    def primary_key_constraint_reflection(self):
+    def primary_key_constraint_reflection(self) -> exclusions.compound:
         """PRIMARY KEY, UNIQUE KEY and AGGREGATE KEY tables reflect their key as the primary key."""
         return exclusions.open()
 
     @property
-    def foreign_key_constraint_reflection(self):
+    def foreign_key_constraint_reflection(self) -> exclusions.compound:
+        """Closed: StarRocks has no foreign keys, so none are reflected."""
         return exclusions.closed()
 
     @property
@@ -125,40 +139,26 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
         return exclusions.closed()
 
     @property
-    def unique_constraint_reflection(self):
-        """target dialect supports reflection of unique constraints"""
+    def unique_constraint_reflection(self) -> exclusions.compound:
+        """Closed: StarRocks has no unique constraints; a UNIQUE KEY table's key reflects as its primary key."""
         return exclusions.closed()
 
     @property
-    def binary_literals(self):
-        """target backend supports simple binary literals, e.g. an
-        expression like::
-
-            SELECT CAST('foo' AS BINARY)
-
-        Where ``BINARY`` is the type emitted from :class:`.LargeBinary`,
-        e.g. it could be ``BLOB`` or similar.
-
-        Basically fails on Oracle.
-
-        """
-
-        return exclusions.closed()
+    def binary_literals(self) -> exclusions.compound:
+        """``CAST('foo' AS BINARY)`` works, and binary values round-trip."""
+        return exclusions.open()
 
     @property
-    def datetime_implicit_bound(self):
-        """target dialect when given a datetime object will bind it such
-        that the database server knows the object is a datetime, and not
-        a plain string.
-        https://github.com/sqlalchemy/sqlalchemy/discussions/9661
+    def datetime_implicit_bound(self) -> exclusions.compound:
+        """A datetime bound in a SELECT list reads back as that datetime: the DATETIME type parses the text
+        StarRocks returns.
         """
         return exclusions.open()
 
     @property
-    def duplicate_key_raises_integrity_error(self):
-        """target dialect raises IntegrityError when reporting an INSERT
-        with a primary key violation.  (hint: it should)
-
+    def duplicate_key_raises_integrity_error(self) -> exclusions.compound:
+        """Closed: nothing raises. Inserting an existing key replaces the row in a PRIMARY KEY or UNIQUE KEY table,
+        and a DUPLICATE KEY table keeps both rows.
         """
         return exclusions.closed()
 
@@ -173,128 +173,188 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
         return exclusions.open()
 
     @property
-    def sql_expression_limit_offset(self):
-        """target database can render LIMIT and/or OFFSET with a complete
-        SQL expression, such as one that uses the addition operator.
-        parameter
-        """
-
-        return exclusions.closed()  # Not supported on StarRocks
-
-    @property
-    def json_type(self):
-        """target platform implements a native JSON type."""
-
-        return exclusions.open()
-
-    @property
-    def time(self):
-        """target dialect supports representation of Python
-        datetime.time() with microsecond objects."""
-
-        return exclusions.closed()  # Not supported on Starrocks (no time type)
-
-    @property
-    def time_microseconds(self):
-        """target dialect supports representation of Python
-        datetime.time() with microsecond objects."""
-
-        return exclusions.closed()  # Not supported on Starrocks (no time type)
-
-    @property
-    def implements_get_lastrowid(self):
-        """target dialect implements the executioncontext.get_lastrowid()
-        method without reliance on RETURNING.
-        """
-
+    def sql_expression_limit_offset(self) -> exclusions.compound:
+        """Closed: StarRocks takes only a number or a bound parameter in LIMIT and OFFSET, not an expression."""
         return exclusions.closed()
 
     @property
-    def reflect_table_options(self):
-        """Target database must support reflecting table_options."""
-
+    def json_type(self) -> exclusions.compound:
+        """StarRocks' JSON column type."""
         return exclusions.open()
 
     @property
-    def comment_reflection(self):
-        """Indicates if the database support table comment reflection"""
-        return exclusions.open()  # Does not support column comments before version 4?
-
-    @property
-    def sane_rowcount(self):
-        return exclusions.closed()  # TODO: Check if that is expected
-
-    @property
-    def views(self):
-        """Target database must support VIEWs."""
-
-        return exclusions.open()
-
-    @property
-    def like_escapes(self):
-        # Starrocks does not support like escape
+    def time(self) -> exclusions.compound:
+        """Closed: StarRocks has no TIME column type."""
         return exclusions.closed()
 
     @property
-    def legacy_unconditional_json_extract(self):
+    def time_microseconds(self) -> exclusions.compound:
+        """Closed: StarRocks has no TIME column type."""
+        return exclusions.closed()
+
+    @property
+    def implements_get_lastrowid(self) -> exclusions.compound:
+        """Closed: StarRocks reports a ``lastrowid`` of 0 after an AUTO_INCREMENT insert, and has no
+        ``last_insert_id()``.
+        """
+        return exclusions.closed()
+
+    @property
+    def reflect_table_options(self) -> exclusions.compound:
+        """Table options reflect as ``starrocks_*`` keys: engine, key, partitioning, distribution, ORDER BY,
+        properties and comment.
+        """
+        return exclusions.open()
+
+    @property
+    def comment_reflection(self) -> exclusions.compound:
+        """Table and column comments are reflected, on 3.3 as on later versions."""
+        return exclusions.open()
+
+    @property
+    def sane_rowcount(self) -> exclusions.compound:
+        """UPDATE and DELETE on a PRIMARY KEY table report how many rows they matched.
+
+        A DELETE on a DUPLICATE or UNIQUE KEY table reports 0 rows, even when it deletes some, so the ORM warns that
+        it matched none; the suite's tables are PRIMARY KEY tables.
+        """
+        return exclusions.open()
+
+    @property
+    def views(self) -> exclusions.compound:
+        """``CREATE VIEW``; views reflect through ``information_schema.views``."""
+        return exclusions.open()
+
+    @property
+    def like_escapes(self) -> exclusions.compound:
+        """Closed: StarRocks has no ``LIKE ... ESCAPE``."""
+        return exclusions.closed()
+
+    @property
+    def legacy_unconditional_json_extract(self) -> exclusions.compound:
         """``json_query`` returns valid JSON in all cases, as the legacy ``JSON_EXTRACT`` does."""
         return exclusions.open()
 
     @property
-    def update_from(self):
-        """Target must support UPDATE..FROM syntax"""
+    def update_from(self) -> exclusions.compound:
+        """A multi-table ``UPDATE ... FROM``, on PRIMARY KEY tables, the only kind StarRocks lets UPDATE target."""
         return exclusions.open()
 
     @property
-    def delete_from(self):
-        """Target must support DELETE FROM..FROM or DELETE..USING syntax"""
+    def delete_from(self) -> exclusions.compound:
+        """A multi-table ``DELETE ... USING``, on PRIMARY KEY tables."""
         return exclusions.open()
 
     @property
-    def empty_inserts(self):
+    def empty_inserts(self) -> exclusions.compound:
+        """Closed: StarRocks has neither ``INSERT INTO t () VALUES ()`` nor ``DEFAULT VALUES``."""
         return exclusions.closed()
 
     @property
-    def precision_generic_float_type(self):
-        """target backend will return native floating point numbers with at
-        least seven decimal places when using the generic Float type.
-
-        """
-        return exclusions.closed()  #ToDo - I couldn't get the test for this one working, not sure where the issue is - AssertionError: {Decimal('15.7563830')} != {Decimal('15.7563827')}
-
-    @property
-    def ctes(self):
-        """Target database supports CTEs"""
-        return exclusions.open()
-
-    @property
-    def ctes_with_update_delete(self):
-        """target database supports CTES that ride on top of a normal UPDATE
-        or DELETE statement which refers to the CTE in a correlated subquery.
-
-        """
-        return exclusions.open()
-
-    @property
-    def ctes_with_values(self):
-        """target database supports CTES that ride on top of a VALUES
-        clause."""
+    def precision_generic_float_type(self) -> exclusions.compound:
+        """Closed: FLOAT is 32-bit, so 15.7563827 comes back as 15.7563830."""
         return exclusions.closed()
 
     @property
-    def ctes_on_dml(self):
-        """target database supports CTES which consist of INSERT, UPDATE
-        or DELETE *within* the CTE, e.g. WITH x AS (UPDATE....)"""
+    def ctes(self) -> exclusions.compound:
+        """``WITH ... AS (SELECT ...)``. StarRocks has no recursive CTEs, which ``CTETest`` skips."""
         return exclusions.open()
 
     @property
-    def enums(self):
-        """target database supports ENUM type"""
+    def ctes_with_update_delete(self) -> exclusions.compound:
+        """An UPDATE or DELETE that reads a CTE in a correlated subquery, on PRIMARY KEY tables."""
+        return exclusions.open()
+
+    @property
+    def ctes_with_values(self) -> exclusions.compound:
+        """Closed: a CTE whose body is VALUES, ``WITH x AS (VALUES ...)``, is a syntax error."""
         return exclusions.closed()
 
     @property
-    def unicode_ddl(self):
+    def ctes_on_dml(self) -> exclusions.compound:
+        """Closed: a CTE holding INSERT, UPDATE or DELETE, ``WITH x AS (DELETE ...)``, is a syntax error."""
+        return exclusions.closed()
+
+    @property
+    def enums(self) -> exclusions.compound:
+        """Closed: StarRocks has no ENUM type, and ``Enum`` compiles to a VARCHAR. No suite test is gated on it."""
+        return exclusions.closed()
+
+    @property
+    def unicode_ddl(self) -> exclusions.compound:
+        """Table and column names in non-ASCII Unicode, as ``UnicodeSchemaTest`` creates them."""
         return exclusions.open()
+
+    @property
+    def window_functions(self) -> exclusions.compound:
+        """``OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN ...)``"""
+        return exclusions.open()
+
+    @property
+    def intersect(self) -> exclusions.compound:
+        """``INTERSECT``. No suite test is gated on it."""
+        return exclusions.open()
+
+    @property
+    def except_(self) -> exclusions.compound:
+        """``EXCEPT``, which StarRocks also spells ``MINUS``. No suite test is gated on it."""
+        return exclusions.open()
+
+    @property
+    def nullsordering(self) -> exclusions.compound:
+        """``ORDER BY ... NULLS FIRST`` and ``NULLS LAST``"""
+        return exclusions.open()
+
+    @property
+    def table_value_constructor(self) -> exclusions.compound:
+        """``SELECT * FROM (VALUES (...), (...)) AS t``"""
+        return exclusions.open()
+
+    @property
+    def regexp_match(self) -> exclusions.compound:
+        """``regexp_match`` compiles to ``REGEXP``, which StarRocks has."""
+        return exclusions.open()
+
+    @property
+    def regexp_replace(self) -> exclusions.compound:
+        """``regexp_replace`` without flags compiles to StarRocks' ``regexp_replace(str, pattern, repl)``."""
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_and(self) -> exclusions.compound:
+        """``x & y``."""
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_or(self) -> exclusions.compound:
+        """``x | y``."""
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_xor(self) -> exclusions.compound:
+        """``x ^ y``."""
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_not(self) -> exclusions.compound:
+        """``~x``. The shift operators stay closed: StarRocks has ``bit_shift_left`` and ``bit_shift_right``, not ``<<`` and ``>>``."""
+        return exclusions.open()
+
+    @property
+    def date_historic(self) -> exclusions.compound:
+        """Dates from year 1 round-trip."""
+        return exclusions.open()
+
+    @property
+    def datetime_historic(self) -> exclusions.compound:
+        """Datetimes from year 1 round-trip, as dates do."""
+        return exclusions.open()
+
+    @property
+    def datetime_literals(self) -> exclusions.compound:
+        """A date or datetime renders as a quoted literal, which StarRocks reads as DATE or DATETIME."""
+        return exclusions.open()
+
     @property
     def isolation_level(self) -> exclusions.compound:
         """``AUTOCOMMIT``, the default, and ``READ COMMITTED``, which runs DML in StarRocks transactions."""
@@ -302,6 +362,7 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
 
     @property
     def autocommit(self) -> exclusions.compound:
+        """``AUTOCOMMIT``, the default isolation level, under which StarRocks commits each statement on its own."""
         return exclusions.open()
 
     def get_isolation_levels(self, config: Any) -> Dict[str, Any]:
@@ -320,3 +381,53 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
         """NCHAR and NVARCHAR, which compile to StarRocks' CHAR and VARCHAR, both UTF-8."""
         return exclusions.open()
 
+    @property
+    def table_ddl_if_exists(self) -> exclusions.compound:
+        """``CREATE TABLE IF NOT EXISTS`` and ``DROP TABLE IF EXISTS``."""
+        return exclusions.open()
+
+    @property
+    def comment_reflection_full_unicode(self) -> exclusions.compound:
+        """Comments of any Unicode text reflect unchanged."""
+        return exclusions.open()
+
+    @property
+    def schema_create_delete(self) -> exclusions.compound:
+        """``CREATE SCHEMA`` and ``DROP SCHEMA``, which StarRocks takes as databases."""
+        return exclusions.open()
+
+    @property
+    def precision_numerics_retains_significant_digits(self) -> exclusions.compound:
+        """DECIMAL keeps trailing zeros: ``Numeric(5, 3)`` reads 1.000 back as ``Decimal('1.000')``.
+
+        ``Numeric`` without a precision is ``decimal(10, 0)`` in StarRocks, so it rounds a fraction away.
+        """
+        return exclusions.open()
+
+    @property
+    def precision_numerics_many_significant_digits(self) -> exclusions.compound:
+        """``DECIMAL(38, 12)`` round-trips values with many digits on both sides, such as 319438950232418390.273596."""
+        return exclusions.open()
+
+    @property
+    def cast_precision_numerics_many_significant_digits(self) -> exclusions.compound:
+        """Fails: JSON ``as_numeric()`` reads the value with ``get_json_double``, so a DECIMAL loses its digits past
+        a double's precision, 99998969694839.983485848 coming back as 99998969694839.992483840.
+        """
+        return exclusions.fails_on(
+            "starrocks", "JSON as_numeric() reads the value through a double, which loses a DECIMAL's last digits"
+        )
+
+    @property
+    def empty_inserts_executemany(self) -> exclusions.compound:
+        """An executemany of an INSERT whose parameter sets are all empty inserts the column defaults."""
+        return exclusions.open()
+
+    @property
+    def computed_columns(self) -> exclusions.compound:
+        """Generated columns work, but StarRocks wants the column type to be the expression's type exactly.
+
+        The suite's tables declare INTEGER columns computed as ``side * side``, which StarRocks types as BIGINT, and
+        it rejects them with "Illegal expression type for Generated Column".
+        """
+        return exclusions.closed()
