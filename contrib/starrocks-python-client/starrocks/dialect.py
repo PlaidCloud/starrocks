@@ -304,6 +304,8 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
 
 
 class StarRocksSQLCompiler(MySQLCompiler):
+    render_table_with_column_in_update_from = False
+
     def visit_sysdate_func(self, fn: Any, **kw: Any) -> str:
         """StarRocks has no SYSDATE(); NOW() is its current-timestamp function."""
         return "now()"
@@ -320,6 +322,31 @@ class StarRocksSQLCompiler(MySQLCompiler):
         if not delete_stmt._where_criteria:
             return "TRUNCATE TABLE " + table
         return result
+
+    def update_tables_clause(
+        self,
+        update_stmt: Update,
+        from_table: Any,
+        extra_froms: list[Any],
+        **kw: Any,
+    ) -> str:
+        """Render only the updated table; StarRocks takes the other tables from ``FROM``, not a comma list."""
+        kw["asfrom"] = True
+        return from_table._compiler_dispatch(self, **kw)
+
+    def update_from_clause(
+        self,
+        update_stmt: Update,
+        from_table: Any,
+        extra_froms: list[Any],
+        from_hints: Any,
+        **kw: Any,
+    ) -> str:
+        """Render ``FROM b, c`` for the extra tables, as ``UPDATE a SET ... FROM b, c WHERE ...``."""
+        kw["asfrom"] = True
+        return "FROM " + ", ".join(
+            t._compiler_dispatch(self, fromhints=from_hints, **kw) for t in extra_froms
+        )
 
     def limit_clause(self, select: Select, **kw: Any) -> str:
         # StarRocks supports:

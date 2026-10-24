@@ -226,6 +226,11 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
         return exclusions.closed()
 
     @property
+    def update_from(self):
+        """Target must support UPDATE..FROM syntax"""
+        return exclusions.open()
+
+    @property
     def empty_inserts(self):
         return exclusions.closed()
 

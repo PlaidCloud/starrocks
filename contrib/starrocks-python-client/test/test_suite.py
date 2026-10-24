@@ -547,6 +547,30 @@ class StringTest(_StringTest):
         )
 
 class CTETest(_CTETest):
+    """The suite's tables become PRIMARY KEY tables, the only kind StarRocks lets UPDATE and DELETE target."""
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "some_table",
+            metadata,
+            Column("id", Integer, primary_key=True, autoincrement=False),
+            Column("data", String(50)),
+            Column("parent_id", Integer),
+            starrocks_primary_key="id",
+            starrocks_distributed_by="HASH(id)",
+        )
+
+        Table(
+            "some_other_table",
+            metadata,
+            Column("id", Integer, primary_key=True, autoincrement=False),
+            Column("data", String(50)),
+            Column("parent_id", Integer),
+            starrocks_primary_key="id",
+            starrocks_distributed_by="HASH(id)",
+        )
+
     @testing.requires.ctes_with_update_delete
     @testing.skip('starrocks', 'needs a primary column')
     def test_delete_scalar_subq_round_trip(self, connection):
