@@ -133,7 +133,8 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL, SRAssertsCompiledSQLMix
         t = table("t", column("id"))
         self.assert_compile(
             select(t.c.id).order_by(t.c.id).offset(5),
-            "SELECT t.id FROM t ORDER BY t.id LIMIT 4611686018427387903 OFFSET %(param_1)s",
+            "SELECT t.id FROM t ORDER BY t.id LIMIT 4611686018427387903 OFFSET 5",
+            literal_binds=True,
         )
 
 
