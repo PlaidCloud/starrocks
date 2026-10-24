@@ -16,6 +16,24 @@ pip install starrocks
 
 Python >= 3.10, <= 3.14
 
+#### Supported StarRocks Versions
+
+StarRocks 3.3.3 or later; the dialect is tested on 3.3, 3.4, 3.5, 4.0 and 4.1. A few features need a later version, and on an older server the dialect refuses them with a `CompileError`:
+
+| Feature | Needs |
+|---|---|
+| View `starrocks_security` | 3.4.1 |
+| RANGE distribution (`starrocks_distributed_by="RANGE"`) | 4.1, with `enable_range_distribution` on in the FE configuration or the session |
+| `VARIANT` columns | 4.1 |
+
+Older versions also differ in ways the dialect handles for you:
+
+- Before 4.0.6, StarRocks stores a view's SQL in its own canonical form; autogenerate canonicalizes the model's SQL the same way before comparing.
+- `@@run_mode` exists from 4.0.7. Older servers report the run mode only through `ADMIN SHOW FRONTEND CONFIG`, which needs the OPERATE privilege; without it the dialect assumes shared-nothing.
+- Some table properties are newer than 3.3: `compaction_strategy` (4.0), `enable_statistic_collect_on_first_load` (3.5.10 and 4.0.2), and `bucket_size` defaults to 4 GiB before 4.0 and 1 GiB from 4.0. Declare only the properties your servers know.
+
+Views, materialized views and the `starrocks+asyncmy` driver need SQLAlchemy 2.0. On SQLAlchemy 1.4 the dialect covers tables, types, queries and reflection, and Alembic autogenerate compares tables and leaves the database's views and materialized views alone, with a warning that names them.
+
 #### Using a Virtual Environment (Recommended)
 
 It is highly recommended to install `starrocks` in a virtual environment to avoid conflicts with system-wide packages.
@@ -60,6 +78,8 @@ starrocks+asyncmy://<User>:<Password>@<Host>:<Port>/[<Catalog>.]<Database>
 
 > Note: The `Catalog` can be omitted and is managed by StarRocks.
 > The default is `default_catalog`.
+
+Connections autocommit by default, as StarRocks does. Pass `isolation_level="READ COMMITTED"` to `create_engine` to run INSERT, UPDATE and DELETE in StarRocks transactions; see [Transactions](./docs/usage_guide/sqlalchemy.md#transactions).
 
 ### Example: Basic Operations
 
@@ -208,7 +228,7 @@ Refer to [generating models](./docs/usage_guide/alembic.md#Generating-models-fro
 #### 1. Install and Initialize Alembic
 
 ```bash
-pip install "alembic>=1.16"
+pip install "alembic>=1.14"
 alembic init alembic
 ```
 
@@ -352,7 +372,7 @@ pytest test/integration/test_reflection_table.py -k ReflectionTableOptionsTest
 
 | Path | What it covers |
 | --- | --- |
-| `test/sql` | Compiling DDL and DML with `assert_compile`, without executing it |
+| `test/sql` | Compiling DDL and DML with `assert_compile`; a few classes also run what they compile against the server |
 | `test/unit` | Parsing, reflection helpers, the defaults tables, and Alembic comparison and rendering, without executing SQL |
 | `test/integration` | Reflection, result processing and Alembic autogenerate comparison, against tables the tests create |
 | `test/system` | Alembic revisions end to end (autogenerate, upgrade and downgrade), each test in a fresh database |
@@ -374,7 +394,7 @@ Tests are classes derived from `sqlalchemy.testing.fixtures.TestBase`, with meth
 
 SQLAlchemy's plugin adds its own options, which `pytest --help` lists. Besides `--dburi`, these are the useful ones:
 
-- `--dropfirst` drops the views and tables earlier runs left in the configured database and the two extra schemas, for example after an interrupted `-n0` run.
+- `--dropfirst` drops the materialized views, views and tables earlier runs left in the configured database and the two extra schemas, for example after an interrupted `-n0` run.
 - `--log-info=sqlalchemy.engine` logs each statement the tests execute, and `--log-debug=sqlalchemy.engine` adds the rows. `pyproject.toml` turns on pytest's live log at INFO, so they show as the tests run.
 
 For the dialect's own debug messages too, add `--log-cli-level=DEBUG`.

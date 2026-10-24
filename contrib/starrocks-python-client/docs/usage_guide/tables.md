@@ -69,7 +69,7 @@ Defines the table's type (key) and the columns that constitute the key. You must
 
 - **`starrocks_duplicate_key`**
 
-  - **Description**: Defines a Duplicate Key type table. This is the default type if no key is specified. It's suitable for storing raw, unchanged data.
+  - **Description**: Defines a Duplicate Key type table. This is the type StarRocks gives a table that names no key and has no primary key columns. It's suitable for storing raw, unchanged data.
   - **Type**: `str` (comma-separated column names)
   - **Example**: `starrocks_duplicate_key="request_id, timestamp"`
 
@@ -84,7 +84,9 @@ Defines the table's type (key) and the columns that constitute the key. You must
   - **Type**: `str` (comma-separated column names)
   - **Example**: `starrocks_unique_key="device_id"`
 
-> Although you **CAN'T only** specify the Primary Key type in Columns, such as `Column('id', Integer, primary_key=True)`, or by using `PrimaryKeyConstraint`, You still need to specify it as the SQLAlchemy's stardard primary key declaration, either via Columns or `PrimaryKeyConstraint`, to prevent errors.
+> A table that names no `starrocks_*_key` but has primary key columns, from `Column('id', Integer, primary_key=True)` or a `PrimaryKeyConstraint`, is created as a Primary Key table on those columns. StarRocks needs the key columns first, in key order, so the dialect raises a `CompileError` when they are not.
+>
+> Reflection reports a primary key for Primary, Unique and Aggregate Key tables, which hold one row per key, and none for Duplicate Key tables. When you name one of those three key types, also mark its columns `primary_key=True`, so that the model matches the reflected table and the ORM can map it.
 
 ##### 3. `COMMENT`
 
@@ -113,12 +115,12 @@ Specifies the data distribution (including bucketing) strategy.
 
 > **Note on Buckets**: If you specify a distribution method (e.g., `HASH(user_id)`) but omit the `BUCKETS` clause, StarRocks will automatically assign a bucket count. Alembic's `autogenerate` feature is designed to handle this: if the distribution method in your metadata matches the one in the database and you haven't specified a bucket count, no changes will be detected. This prevents unnecessary `ALTER TABLE` statements when the bucket count is automatically managed by the system.
 
-> **Note on RANGE distribution**: StarRocks 4.1+ supports range-based distribution for a table that declares a key type (or `ORDER BY`) but no `DISTRIBUTED BY` clause, when the FE config `enable_range_distribution` is enabled. It is opt-in on 4.1 (the config defaults to `false`); newer releases enable it by default in shared-data mode. Materialized views additionally need `enable_mv_range_distribution`, which defaults to `false`. StarRocks has no `DISTRIBUTED BY RANGE` syntax, so range distribution is obtained by *omitting* the clause:
+> **Note on RANGE distribution**: StarRocks 4.1+ supports range-based distribution for a table that declares a key type (or `ORDER BY`) but no `DISTRIBUTED BY` clause, when the FE config `enable_range_distribution` is enabled, or the session sets `SET enable_range_distribution = true`; either works on shared-nothing clusters too. It is opt-in on 4.1 (the config defaults to `false`); newer releases enable it by default in shared-data mode. StarRocks has no `DISTRIBUTED BY RANGE` syntax, so range distribution is obtained by *omitting* the clause:
 >
 > - Leave `starrocks_distributed_by` unset, or set it to `"RANGE"` to make the intent explicit. Either way `CREATE TABLE` is emitted without a `DISTRIBUTED BY` clause, and `autogenerate` treats a RANGE-distributed table as unchanged. A `BUCKETS` value on `RANGE` is ignored: range distribution has no bucket count (StarRocks always reports a placeholder of `1`, which is why an unsupported version shows `RANGE BUCKETS 1`).
 > - A table reflected with RANGE distribution reports `distributed_by` as `"RANGE"`.
 > - StarRocks cannot switch an existing table between RANGE and `HASH`/`RANDOM` distribution, so `autogenerate` raises an error instead of generating an `ALTER TABLE`. Recreate the table to change it.
-> - On clusters that do not apply range distribution (before 4.1, 4.1 without `enable_range_distribution`, shared-nothing, or the config disabled), a table marked `"RANGE"` is created with the default distribution instead, and `autogenerate` then reports a mismatch. For models shared across such clusters, leave `starrocks_distributed_by` unset.
+> - Before 4.1 the dialect refuses `"RANGE"` with a `CompileError`. On 4.1 with `enable_range_distribution` off, in both the FE config and the session, a table marked `"RANGE"` is created with the default distribution instead, and `autogenerate` then reports a mismatch. For models shared across such clusters, leave `starrocks_distributed_by` unset.
 
 ##### 6. `starrocks_order_by`
 
@@ -143,6 +145,27 @@ A dictionary of additional table attributes.
   ```
 
 > **Note on Future Partition Properties**: Certain properties, such as `replication_num` and `storage_medium`, can be modified to apply only to newly created partitions. When `alembic revision --autogenerate` detects changes to these specific properties, it will generate an `ALTER TABLE` statement that prefixes them with `default.` prefix (e.g., `SET ("default.replication_num" = "...")`). This ensures that the changes do not affect existing data.
+
+### Secondary Indexes
+
+Declare StarRocks' BITMAP, NGRAMBF, GIN and VECTOR indexes with SQLAlchemy's `Index`. `starrocks_using` names the type, `starrocks_properties` its properties and `starrocks_comment` the comment:
+
+```python
+from sqlalchemy import Index
+
+Index("ix_city", events.c.city, starrocks_using="BITMAP")
+Index(
+    "ix_name",
+    events.c.name,
+    starrocks_using="NGRAMBF",
+    starrocks_properties={"gram_num": "4", "bloom_filter_fpp": "0.05"},
+    starrocks_comment="n-grams of the name",
+)
+```
+
+Each compiles to `CREATE INDEX ix_name ON events (name) USING NGRAMBF ("gram_num" = "4", "bloom_filter_fpp" = "0.05") COMMENT '...'`. StarRocks builds the index in an asynchronous schema-change job, and the dialect waits for it before the next change to the same table, so `create_all` can create several indexes on one table. GIN indexes need the FE configuration `enable_experimental_gin`.
+
+Indexes are reflected with their type, comment and properties, including the ones StarRocks filled in, so autogenerate creates and drops them like any other index. Dropping a column drops its index as well, and a `drop_index` for an index that went with its column does nothing.
 
 ### Column Attributes
 
@@ -467,26 +490,23 @@ This ensures that your model definitions correctly map to StarRocks's native dat
 
 #### Handling Time-Consuming ALTER TABLE Operations
 
-StarRocks schema change operations (like `ALTER TABLE ... MODIFY COLUMN`) can be time-consuming. Because one table can have only one ongoing schema change operation at a time, StarRocks does not allow other schema change jobs to be submitted for the same table.
+StarRocks schema change operations (like `ALTER TABLE ... MODIFY COLUMN`, building a secondary index, or changing the distribution) run as asynchronous jobs and can be time-consuming. Because one table can have only one ongoing schema change operation at a time, StarRocks rejects any other change to the table, with "A schema change operation is in progress", until the job has ended.
 
-> Some other operations, such as rename, comment, partition, index and swap, are synchronous operations, a command return indicates that the execution is finished. Then, the next operation can be submitted.
+> Rename, comment, partition and swap operations are synchronous: when the statement returns, the change is done.
 
 Alembic's `autogenerate` feature may produce an `upgrade()` function that contains multiple consecutive `op.alter_column()` or other `ALTER TABLE` calls for a single table. For example:
 
 ```python
 def upgrade():
-    # Potentially problematic if schema changes are slow
     op.alter_column('my_table', 'col1', ...)
     op.alter_column('my_table', 'col2', ...)
 ```
 
-If the first `alter_column` operation takes a long time to complete, the second one will fail when Alembic tries to execute it immediately after the first.
+The dialect holds back each `ALTER TABLE`, `CREATE INDEX` and `DROP INDEX` until the job running on its table has ended, so these run one after the other, and `metadata.create_all()` can create several indexes on one table. The wait lasts as long as the job does; INFO logging on the `starrocks.dialect` logger shows what a statement is waiting for.
 
 **Recommendation:**
 
-For potentially slow `ALTER TABLE` operations, it is recommended to modify only **one column or one table property at a time**. After `autogenerate` creates a migration script, review it. If you see multiple `ALTER` operations for the same table that you suspect might be slow, you should split them into separate migration scripts.
-
-However, operations that are typically fast, such as adding or dropping multiple columns, can often be executed together without issue.
+Each slow schema change rewrites the table's data, so on a large table prefer one statement over several where StarRocks allows it: the `combine_column_alters` rewriter in the [Alembic guide](alembic.md#44-coalescing-column-changes-into-a-single-alter-table) folds a table's added and dropped columns into one `ALTER TABLE`.
 
 #### Limitations on Modifying Complex Type Columns
 
