@@ -318,26 +318,66 @@ Run `pytest` from this directory:
 pytest
 ```
 
-`pyproject.toml` runs the tests on four `pytest-xdist` workers. Each worker gets its own databases, created from the configured one and dropped at the end, so the workers do not interfere; pass `-n0` to run serially against the configured database. A subset runs the same way, for example `pytest test/sql` or `pytest test/test_suite.py`. The system tests keep Alembic's scripts in a `scratch` directory here (`scratch_<worker>` under `pytest-xdist`), so do not run two serial runs from this directory at once.
+`pyproject.toml` runs the tests on four `pytest-xdist` workers. Each worker gets its own databases, created from the configured one and dropped at the end, so the workers do not interfere; pass `-n0` to run serially against the configured database. The system tests keep Alembic's scripts in a `scratch` directory here (`scratch_<worker>` under `pytest-xdist`), so do not run two serial runs from this directory at once.
+
+Every test needs a reachable cluster, the ones in `test/sql` and `test/unit` included, because the plugin connects when the session starts.
 
 Tests that StarRocks itself cannot support are skipped. Tests that fail because of a known dialect bug are marked `fails_on`, or `fails_if` with a condition, and the reason, so a fix shows up as an unexpected pass. Such a test is reported as passed when it fails as expected; run with `-s` to see each "failed as expected" line and its reason.
 
 The tests run on SQLAlchemy 2.0 and 1.4. On 1.4, SQLAlchemy's compliance suite and the compile, reflection, comparison and rendering tests run; Alembic's suite, the system tests, and the tests that build `View` or `MaterializedView` objects or need SQLAlchemy 2.0's inspector need SQLAlchemy 2.0 and are skipped.
 
+#### Running Part of the Tests
+
+Give `pytest` a directory, a module, a class or a test:
+
+```bash
+pytest test/sql
+pytest test/unit/test_compare_tables.py
+pytest test/unit/test_compare_tables.py::BucketSizeTest
+pytest test/unit/test_compare_tables.py::BucketSizeTest::test_explicit_change_detected
+```
+
+The last one runs every combination of that test. A single combination has its parameters in brackets, as in `test_explicit_change_detected[1073741824-2147483648]`.
+
+The plugin renames each class that runs against the database (one with `__backend__ = True`, which covers nearly every class in the two suites) after the driver and the server version, for example `ComponentReflectionTest_starrocks+pymysql_4_1_6`. Select those with `-k` rather than by node ID:
+
+```bash
+pytest test/test_suite.py -k "ComponentReflectionTest and test_get_table_names"
+pytest test/integration/test_reflection_table.py -k ReflectionTableOptionsTest
+```
+
+`pytest --collect-only -qq` lists the node IDs. For a short run, `-n0` saves starting the four workers, and `-x` stops at the first failure.
+
+#### Test Layout
+
+| Path | What it covers |
+| --- | --- |
+| `test/sql` | Compiling DDL and DML with `assert_compile`, without executing it |
+| `test/unit` | Parsing, reflection helpers, the defaults tables, and Alembic comparison and rendering, without executing SQL |
+| `test/integration` | Reflection, result processing and Alembic autogenerate comparison, against tables the tests create |
+| `test/system` | Alembic revisions end to end (autogenerate, upgrade and downgrade), each test in a fresh database |
+| `test/test_suite.py` | SQLAlchemy's dialect compliance suite |
+| `test/test_suite_alembic.py` | Alembic's dialect suite |
+
+The shared pieces:
+
+- `test/conftest.py` loads the plugin and fails collection for any test the plugin would otherwise drop.
+- `starrocks/requirements.py` holds the `Requirements` class. Both suites consult it, and so do `__requires__` and `testing.requires.<name>` in the StarRocks tests.
+- A skip or `fails_on` mark is a module-level constant named after its cause. It is defined at the top of the module that uses it, or in `test/util.py` when several modules share it. `test/util.py` also holds the shared helpers.
+- `test/system/lifecycle.py` holds the base class and helpers for the system tests.
+
 #### Writing Tests
 
 Tests are classes derived from `sqlalchemy.testing.fixtures.TestBase`, with methods named `test_*`. The plugin silently ignores anything else, so collection fails for a module-level test function or a plain test class. Use `AssertsCompiledSQL` and `__dialect__` for compile tests, the `connection` and `metadata` fixtures for database tests, and `testing.combinations` for parametrized cases.
 
-#### Test Logging
+#### Plugin Options and Logging
 
-To see the raw SQL that the dialect compiles and executes during tests, you can modify the `[tool.pytest.ini_options]` section in the `pyproject.toml` file in your project with the following content:
+SQLAlchemy's plugin adds its own options, which `pytest --help` lists. Besides `--dburi`, these are the useful ones:
 
-```ini
-[tool.pytest.ini_options]
-log_cli = true
-log_cli_level = DEBUG
-log_cli_format = %(levelname)-5.5s [%(name)s] %(message)s
-```
+- `--dropfirst` drops the views and tables earlier runs left in the configured database and the two extra schemas, for example after an interrupted `-n0` run.
+- `--log-info=sqlalchemy.engine` logs each statement the tests execute, and `--log-debug=sqlalchemy.engine` adds the rows. `pyproject.toml` turns on pytest's live log at INFO, so they show as the tests run.
+
+For the dialect's own debug messages too, add `--log-cli-level=DEBUG`.
 
 ### Build and Deploy
 

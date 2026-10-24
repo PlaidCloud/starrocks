@@ -58,7 +58,7 @@ Please follow these standards and procedures when assisting with development:
     - Every new feature or bug fix must have corresponding test cases, following a "unit tests first, then integration tests" sequence.
     - Mark a test StarRocks cannot support with `testing.skip("starrocks", reason)`, and one that fails because of a known dialect bug with `testing.fails_on("starrocks", reason)`.
   - **Review**: I expect to review the test cases you write or modify before you implement the code to pass them. [[memory:8065598]]
-  - **Running Tests**: Run `pytest` from the client directory; every test, including SQLAlchemy's and Alembic's dialect suites, runs against a live StarRocks cluster.
+  - **Running Tests**: Run `pytest` from the client directory; every test, including SQLAlchemy's and Alembic's dialect suites, runs against a live StarRocks cluster. The README's Tests section explains how to run part of the tests, the test layout, and the plugin's options.
 
 ## 4. Documentation Standards
 
