@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from alembic.autogenerate.rewriter import Rewriter
 from alembic.operations import Operations, ops
+from alembic.runtime.migration import MigrationContext
 from sqlalchemy import Column, MetaData, Table
 
 from starrocks.common.params import (
@@ -1089,12 +1090,15 @@ combine_column_alters = Rewriter()
 
 
 @combine_column_alters.rewrites(ops.ModifyTableOps)
-def _combine_column_alters(context, revision, op: ops.ModifyTableOps):
+def _combine_column_alters(
+    context: Optional[MigrationContext], revision: Any, op: ops.ModifyTableOps
+) -> ops.ModifyTableOps:
     """Coalesce a table's AddColumnOp/DropColumnOp into a single combined op.
 
     Every ``ADD COLUMN`` and ``DROP COLUMN`` for the table is folded into one
     ``AlterTableColumnsOp`` (a single ``ALTER TABLE``, hence one
-    schema-change job), placed at the position of the first column change. Other
+    schema-change job), placed at the position of the first column change, which
+    holds a placeholder until all the column changes are collected. Other
     operations keep their relative position. With fewer than two column changes
     there is nothing to combine and the container is returned unchanged.
 
@@ -1110,23 +1114,22 @@ def _combine_column_alters(context, revision, op: ops.ModifyTableOps):
     adds: List[Column] = []
     drops: List[Column] = []
     new_ops: List[Any] = []
-    combined_pos = -1  # index of the combined-op placeholder in new_ops; -1 until seen
+    combined_pos = -1
 
     for inner in op.ops:
         if isinstance(inner, ops.AddColumnOp):
             adds.append(inner.column)
             if combined_pos == -1:
                 combined_pos = len(new_ops)
-                new_ops.append(None)  # placeholder for the combined op
+                new_ops.append(None)
         elif isinstance(inner, ops.DropColumnOp):
             drops.append(inner.to_column())
             if combined_pos == -1:
                 combined_pos = len(new_ops)
-                new_ops.append(None)  # placeholder for the combined op
+                new_ops.append(None)
         else:
             new_ops.append(inner)
 
-    # Nothing to combine (0 or 1 column change): leave the container as-is.
     if len(adds) + len(drops) < 2:
         return op
 
