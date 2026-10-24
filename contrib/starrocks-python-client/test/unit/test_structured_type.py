@@ -519,6 +519,33 @@ class StructuredLeafBindProcessingTest(fixtures.TestBase):
         with testing.expect_raises_message(ValueError, "cannot store 1.7 in an integer element exactly"):
             _bind(datatype.ARRAY(datatype.INTEGER()), [1.7])
 
+    @testing.combinations(
+        ("integer", datatype.ARRAY(datatype.INTEGER()), ["7", " -3 ", "2.0", "1E+2"], ["7", "-3", "2", "100"]),
+        ("decimal", datatype.ARRAY(datatype.DECIMAL(10, 2)), ["1.25", "1e-2"], ["1.25", "0.01"]),
+        ("double", datatype.STRUCT(d=datatype.DOUBLE()), {"d": "1e-07"}, ["0.0000001"]),
+        id_="iaaa",
+        argnames="type_obj,value,encoded",
+    )
+    def test_numeric_text_is_encoded_as_its_number(self, type_obj, value, encoded):
+        assert json.loads(_bind(type_obj, value)) == encoded
+
+    @testing.combinations(
+        ("word", datatype.INTEGER(), "abc", ValueError, "it is not a number"),
+        ("trailing_word", datatype.INTEGER(), "7 apples", ValueError, "it is not a number"),
+        ("fraction_text", datatype.INTEGER(), "2.5", ValueError, "in an integer element exactly"),
+        ("decimal_comma", datatype.DECIMAL(10, 2), "1,5", ValueError, "it is not a number"),
+        ("double_suffix", datatype.DOUBLE(), "1.5x", ValueError, "it is not a number"),
+        ("nan_text", datatype.DOUBLE(), "nan", ValueError, "cannot store"),
+        ("date", datatype.INTEGER(), date(2024, 1, 1), TypeError, "cannot store the date"),
+        ("bytes", datatype.DECIMAL(10, 2), b"1", TypeError, "cannot store the bytes"),
+        id_="iaaaa",
+        argnames="element_type,value,error,message",
+    )
+    def test_a_numeric_element_refuses_what_is_not_a_number(self, element_type, value, error, message):
+        """The element's CAST would turn the text into NULL, where a plain column of the type refuses it."""
+        with testing.expect_raises_message(error, message):
+            _bind(datatype.ARRAY(element_type), [value])
+
     @testing.combinations(("false",), ("0",), (2,), argnames="value")
     def test_a_boolean_element_is_as_strict_as_a_boolean_column(self, value):
         with testing.expect_raises((TypeError, ValueError)):

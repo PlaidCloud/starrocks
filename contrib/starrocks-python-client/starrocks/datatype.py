@@ -14,10 +14,11 @@
 # limitations under the License.
 
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from inspect import isclass
 import json
 import math
+import numbers
 import re
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple, Type, Union
 
@@ -504,17 +505,33 @@ def _encode_number(value: Any, integral: bool) -> str:
     The CAST yields NULL for text it cannot read, so an integer element gets a whole float or Decimal as an
     integer and refuses a fraction, and a float subclass such as numpy's is written as a plain float.
     """
-    if isinstance(value, bool):
+    if isinstance(value, int):
         return str(int(value))
+    number = _decimal_or_float(value)
+    if not (number.is_finite() if isinstance(number, Decimal) else math.isfinite(number)):
+        raise ValueError("cannot store %r in a numeric element" % (value,))
+    if integral:
+        if number != int(number):
+            raise ValueError("cannot store %r in an integer element exactly" % (value,))
+        return str(int(number))
+    return format(number, "f") if isinstance(number, Decimal) else repr(float(number))
+
+
+def _decimal_or_float(value: Any) -> Union[Decimal, float]:
+    """Return a Decimal or float as it is, and read a string or another kind of number from its text.
+
+    The text is what the driver sends for such a value in a plain column, numpy's ``float32`` for one, so the
+    element holds what the column would. Text that is not a number, and a value that is not a number or a
+    string, is refused rather than cast to NULL.
+    """
     if isinstance(value, (Decimal, float)):
-        if not (value.is_finite() if isinstance(value, Decimal) else math.isfinite(value)):
-            raise ValueError("cannot store %r in a numeric element" % (value,))
-        if integral:
-            if value != int(value):
-                raise ValueError("cannot store %r in an integer element exactly" % (value,))
-            return str(int(value))
-        return format(value, "f") if isinstance(value, Decimal) else repr(float(value))
-    return str(value)
+        return value
+    if not isinstance(value, (str, numbers.Number)):
+        raise TypeError("cannot store the %s %r in a numeric element" % (type(value).__name__, value))
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        raise ValueError("cannot store %r in a numeric element; it is not a number" % (value,)) from None
 
 
 def _encode_datetime(value: Any) -> str:

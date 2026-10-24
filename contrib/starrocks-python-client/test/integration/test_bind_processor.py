@@ -266,6 +266,28 @@ class ComplexValueRoundTripTest(fixtures.TestBase):
 
         assert rows == [value, value, value, None]
 
+    @testing.combinations(
+        ("integer", ARRAY(INTEGER()), ["2.0", "-3", "1E+2"], [2, -3, 100]),
+        ("decimal", ARRAY(DECIMAL(10, 2)), ["1.25", " 7 "], [Decimal("1.25"), Decimal("7.00")]),
+        ("double", MAP(VARCHAR(5), DOUBLE()), {"k": "1e-07"}, {"k": 1e-07}),
+        argnames="type_,value,stored",
+        id_="iaaa",
+    )
+    def test_numeric_text_is_stored_as_its_number(self, connection, metadata, type_, value, stored):
+        """A number given as text is cast from its exact digits, not turned into NULL."""
+        table = Table(
+            "test_bind_numeric_text",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("v", type_),
+            starrocks_distributed_by="HASH(id) BUCKETS 1",
+            starrocks_properties={"replication_num": "1"},
+        )
+        table.create(connection)
+        connection.execute(table.insert().values(id=1, v=value))
+
+        assert connection.execute(select(table.c.v)).scalar_one() == stored
+
     def test_literal_binds_value_round_trips(self, connection, metadata):
         type_ = ARRAY(STRUCT(s=VARCHAR(20), d=ARRAY(DECIMAL(10, 2))))
         value = [{"s": "it's 100%", "d": [Decimal("1.25"), None]}, None]
