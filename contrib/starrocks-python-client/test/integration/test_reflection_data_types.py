@@ -212,10 +212,8 @@ class DataTypeReflectionTest(fixtures.TestBase):
         assert isinstance(reflected_table.c.binary_col.type, (BINARY, VARBINARY))
         assert isinstance(reflected_table.c.varbinary_col.type, VARBINARY)
 
-        # Check lengths
-        # Length is not preserved on reflection for binary types; just ensure type is correct
-        # assert reflected_table.c.binary_col.type.length == 10
-        # assert reflected_table.c.varbinary_col.type.length == 255
+        assert reflected_table.c.binary_col.type.length == 10
+        assert reflected_table.c.varbinary_col.type.length == 255
 
     def test_reflect_datetime_types(self, connection):
         """Test reflection of datetime data types"""

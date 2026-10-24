@@ -87,6 +87,17 @@ def _is_integer_with_display_width(type_obj: sqltypes.TypeEngine) -> bool:
     return visit_name.upper() in INTEGER_VISIT_NAMES_WITH_DISPLAY_WIDTH
 
 
+def _binary_family_matches(metadata_type: Any, inspector_type: Any) -> bool:
+    """BINARY, VARBINARY and LargeBinary are one family: StarRocks stores them all as varbinary(n).
+
+    A declared type without a length matches any reflected length.
+    """
+    if not (isinstance(metadata_type, sqltypes._Binary) and isinstance(inspector_type, sqltypes._Binary)):
+        return False
+    declared_length = getattr(metadata_type, "length", None)
+    return declared_length is None or declared_length == getattr(inspector_type, "length", None)
+
+
 def compare_simple_type(impl: DefaultImpl, inspector_column: Column[Any], metadata_column: Column[Any]) -> bool:
     """
     Set StarRocks' specific simple type comparison logic for some special cases.
@@ -94,6 +105,7 @@ def compare_simple_type(impl: DefaultImpl, inspector_column: Column[Any], metada
     For some special cases:
         - meta.BOOLEAN equals to conn.TINYINT(1)
         - meta.STRING equals to conn.VARCHAR(65533)
+        - meta.BINARY, VARBINARY and LargeBinary equal conn.VARBINARY(n), ignoring a length the model omits
 
     NOTE: StarRocks will ignore the length of Integer types, so we need to care about the
     comparison of Integer types: ignore the comparison of the display width of Integer types.
@@ -136,6 +148,10 @@ def compare_simple_type(impl: DefaultImpl, inspector_column: Column[Any], metada
         getattr(metadata_type, 'length', None) == 65533 and
         isinstance(inspector_type, STRING)):
         logger.debug("compare_simple_type with VARCHAR(65533) vs STRING, treat them as the same.")
+        return False
+
+    # Scenario 2.c: BINARY, VARBINARY and LargeBinary are stored as varbinary(n)
+    if _binary_family_matches(metadata_type, inspector_type):
         return False
 
     # Scenario 3: ignore display_width when comparing integer types.

@@ -228,10 +228,16 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
         return f"VARCHAR({type_.length})"
 
     def visit_BINARY(self, type_, **kw):
-        return "BINARY"
+        return self._binary_with_length("BINARY", type_)
 
     def visit_VARBINARY(self, type_, **kw):
-        return "VARBINARY"
+        return self._binary_with_length("VARBINARY", type_)
+
+    @staticmethod
+    def _binary_with_length(keyword: str, type_: sqltypes.TypeEngine) -> str:
+        """Render a binary keyword with the declared length; StarRocks stores BINARY(n) as varbinary(n)."""
+        length = getattr(type_, "length", None)
+        return keyword if length is None else f"{keyword}({length})"
 
     def visit_ARRAY(self, type_: ARRAY, **kw):
         """Compiles the ARRAY type into the correct StarRocks syntax."""
@@ -267,7 +273,7 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
         return "VARIANT"
 
     def visit_BLOB(self, type_, **kw):
-        return "BINARY"
+        return self._binary_with_length("BINARY", type_)
 
 
 class StarRocksSQLCompiler(MySQLCompiler):
