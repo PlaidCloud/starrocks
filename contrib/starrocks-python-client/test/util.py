@@ -18,18 +18,6 @@ from alembic import util as alembic_util
 from sqlalchemy import testing
 
 
-STRUCT_FIELDS_BACKTICKED = testing.fails_on(
-    "starrocks>=4.1",
-    "StarRocks 4.1 reports STRUCT fields with backticked names, which the type parser rejects; reflecting the "
-    "column warns, which the testing plugin raises as an error, and leaves it NullType with no result processor",
-)
-TOLERATE_UNPARSED_STRUCT_REFLECTION = testing.emits_warning(r"Did not recognize type 'struct<")
-"""For tests whose checks on other columns hold while STRUCT_FIELDS_BACKTICKED leaves a STRUCT column NullType.
-
-Their STRUCT columns pass without being compared; the tests marked STRUCT_FIELDS_BACKTICKED track that bug.
-"""
-
-
 def alembic_runs_dialect_comparators_first(config: object) -> bool:
     """Whether Alembic runs the comparators in its global registry ahead of its own.
 
@@ -80,6 +68,11 @@ STATISTIC_COLLECT_PROPERTY_MISSING = testing.skip_if(
     "enable_statistic_collect_on_first_load is a table property from StarRocks 3.5.10 and 4.0.2",
 )
 FLAT_JSON_PROPERTIES_NEED_4_0 = testing.skip_if("starrocks<4.0", "flat_json.* are table properties from StarRocks 4.0")
+FLAT_JSON_NULL_AMONG_OBJECTS_READS_AS_EMPTY = testing.fails_if(
+    "starrocks>=4.0",
+    "Flat JSON, on by default from StarRocks 4.0, reads a JSON null stored with JSON objects back as {}: "
+    "StarRocks issue 81490",
+)
 DECIMAL256_NEEDS_4_0 = testing.skip_if("starrocks<4.0", "DECIMAL precision above 38 needs StarRocks 4.0")
 STRUCT_FIELD_NAMES_UNQUOTED = testing.skip_if(
     "starrocks<4.1.1",
