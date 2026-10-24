@@ -30,6 +30,7 @@ from starrocks.common.consts import TableConfigKey
 from starrocks.common.defaults import ReflectionMVDefaults
 from starrocks.common.params import (
     ColumnAggInfoKeyWithPrefix,
+    DialectName,
     SRKwargsPrefix,
     TableInfoKey,
     TableInfoKeyWithPrefix,
@@ -79,7 +80,8 @@ class StarRocksInspector(Inspector):
         :return: A ReflectedViewState object.
         :raises: NoSuchTableError if the view does not exist.
         """
-        return self.dialect.get_view(self.bind, view_name, schema=schema, **kwargs)
+        with self._operation_context() as conn:
+            return self.dialect.get_view(conn, view_name, schema=schema, **kwargs)
 
     def get_materialized_view(self, view_name: str, schema: Optional[str] = None, **kwargs: Any) -> Optional[ReflectedMVState]:
         """
@@ -90,7 +92,8 @@ class StarRocksInspector(Inspector):
         :param kwargs: Additional arguments passed to the dialect's get_materialized_view method.
         :return: A ReflectedMVState object, or None if the materialized view does not exist.
         """
-        return self.dialect.get_materialized_view(self.bind, view_name, schema=schema, **kwargs)
+        with self._operation_context() as conn:
+            return self.dialect.get_materialized_view(conn, view_name, schema=schema, **kwargs)
 
     def get_materialized_view_definition(self, view_name: str, schema: Optional[str] = None, **kwargs: Any) -> Optional[str]:
         """
@@ -127,7 +130,8 @@ class StarRocksInspector(Inspector):
         self._delete_comment_from_dialect_options(table)
 
         # 1. Get table_kind and parsed_state, which will use the cached parsed_state)
-        parsed_state = self.dialect._parsed_state_or_create(self.bind, table.name, table.schema, info_cache=self.info_cache)
+        with self._operation_context() as conn:
+            parsed_state = self.dialect._parsed_state_or_create(conn, table.name, table.schema, info_cache=self.info_cache)
         table_kind = parsed_state.table_kind
         logger.debug("reflect %s: %s, parsed_state: %s.", table_kind, table.name, parsed_state)
 
@@ -191,6 +195,8 @@ class StarRocksTableDefinitionParser(object):
     _BUCKETS_REPLACE_PATTERN = re.compile(r'\s+BUCKETS\s+\d+', re.IGNORECASE)
     _PARTITION_BY_PATTERN = re.compile(r"PARTITION BY\s*(.+?)(?=\s*(?:DISTRIBUTED BY|ORDER BY|REFRESH|PROPERTIES|AS\b|\Z))", re.IGNORECASE | re.DOTALL)
 
+    _ROW_PER_KEY_TABLE_KEYS = (TableInfoKey.PRIMARY_KEY, TableInfoKey.UNIQUE_KEY, TableInfoKey.AGGREGATE_KEY)
+
     _VIEW_SECURITY_PATTERN = re.compile(r'\s+SECURITY\s+(INVOKER|DEFINER|NONE)\b', re.IGNORECASE)
 
     # Patterns to parse CREATE MATERIALIZED VIEW statement
@@ -212,6 +218,7 @@ class StarRocksTableDefinitionParser(object):
         column_2_agg_type: Dict[str, str] = None,
         column_autoinc: dict[str, bool] = None,
         charset: str = None,
+        secondary_indexes: Optional[List[Dict[str, Any]]] = None,
     ) -> ReflectedState:
         """
         Parses the raw reflection data into a structured ReflectedState object.
@@ -246,9 +253,51 @@ class StarRocksTableDefinitionParser(object):
                 "parser": None,
                 "name": None,
             }],
+            secondary_indexes=list(secondary_indexes or []),
         )
         logger.debug("reflected table info for table: %r, info: '%s'", table.TABLE_NAME, reflected_table_info)
         return reflected_table_info
+
+    _SECONDARY_INDEX_LINE = re.compile(
+        r"^\s*INDEX\s+(?:`(?P<quoted_name>(?:[^`]|``)+)`|(?P<name>.+?))\s+\((?P<columns>(?:`(?:[^`]|``)*`|[^`)])*)\)"
+        r"\s+USING\s+(?P<type>\w+)(?:\s*\((?P<properties>[^)]*)\))?"
+        r"(?:\s+COMMENT\s+'(?P<comment>.*)')?\s*,?\s*$",
+        re.MULTILINE,
+    )
+    _INDEX_PROPERTY = re.compile(r'"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)"')
+    _BACKTICKED_NAME = re.compile(r"`((?:[^`]|``)*)`")
+
+    @classmethod
+    def parse_secondary_indexes(cls, create_table: str) -> List[Dict[str, Any]]:
+        """Parse the ``INDEX name (cols) USING type(properties) COMMENT '...'`` lines of SHOW CREATE TABLE.
+
+        StarRocks prints every BITMAP, NGRAMBF, GIN or VECTOR index in the column list, with the properties it
+        defaulted as well as those given. Each becomes a SQLAlchemy reflected index, with the type, properties and
+        comment as ``starrocks_using``, ``starrocks_properties`` and ``starrocks_comment``. The index name and
+        comment are printed as stored, without quoting or escaping, and the column names in backticks.
+        """
+        indexes: List[Dict[str, Any]] = []
+        for match in cls._SECONDARY_INDEX_LINE.finditer(create_table):
+            name = match.group("quoted_name").replace("``", "`") if match.group("quoted_name") else match.group("name")
+            dialect_options: Dict[str, Any] = {f"{DialectName}_using": match.group("type").upper()}
+            if match.group("properties"):
+                dialect_options[f"{DialectName}_properties"] = dict(cls._INDEX_PROPERTY.findall(match.group("properties")))
+            if match.group("comment"):
+                dialect_options[f"{DialectName}_comment"] = match.group("comment")
+            indexes.append({
+                "name": name,
+                "column_names": cls._index_column_names(match.group("columns")),
+                "unique": False,
+                "dialect_options": dialect_options,
+            })
+        return indexes
+
+    @classmethod
+    def _index_column_names(cls, column_list: str) -> List[str]:
+        quoted = cls._BACKTICKED_NAME.findall(column_list)
+        if quoted:
+            return [name.replace("``", "`") for name in quoted]
+        return [name.strip() for name in column_list.split(",")]
 
     def _parse_column(self, column: _DecodingRow, col_2_autoinc: dict | None = None, **kwargs: Any) -> dict:
         """
@@ -295,7 +344,11 @@ class StarRocksTableDefinitionParser(object):
         1. DATETIME CURRENT_TIMESTAMP defaults are emitted verbatim.
         2. Function-looking defaults become `(func_expr)`.
         3. Remaining literals are double quoted.
+        4. The NUL placeholder StarRocks reports for HLL, BITMAP and PERCENTILE columns is no default.
         """
+        _SKETCH_COLUMN_TYPES = ("HLL", "BITMAP", "PERCENTILE")
+        _SKETCH_PLACEHOLDER_DEFAULT = "\x00"
+
         def build(self, column: _DecodingRow) -> Optional[str]:
             raw_default = getattr(column, "COLUMN_DEFAULT", None)
             if raw_default is None:
@@ -305,6 +358,9 @@ class StarRocksTableDefinitionParser(object):
             if default is None or default.upper() == "NULL":
                 return None
 
+            if self._is_sketch_placeholder(column, default):
+                return None
+
             if self._is_datetime_column(column) and default.upper().startswith("CURRENT_TIMESTAMP"):
                 return default
 
@@ -312,6 +368,11 @@ class StarRocksTableDefinitionParser(object):
                 return self._wrap_function_default(default)
 
             return f"{default!r}"
+
+        @classmethod
+        def _is_sketch_placeholder(cls, column: _DecodingRow, default: str) -> bool:
+            column_type = (getattr(column, "COLUMN_TYPE", "") or "").upper()
+            return column_type in cls._SKETCH_COLUMN_TYPES and default == cls._SKETCH_PLACEHOLDER_DEFAULT
 
         @staticmethod
         def _is_datetime_column(column: _DecodingRow) -> bool:
@@ -355,22 +416,17 @@ class StarRocksTableDefinitionParser(object):
 
     def _get_mysql_key_type(self, table_config: Dict[str, Any]) -> str:
         """
-        Get key type from information_schema.tables_config table.
-        And return the MySQL's key type, as MySQLKeyType
-        But, directly return the MySQLKeyType.PRIMARY, for check only
+        Map the table model in information_schema.tables_config to the MySQL key type
+        that the inherited ``get_pk_constraint`` and ``get_indexes`` understand.
+
+        PRIMARY KEY, UNIQUE KEY and AGGREGATE KEY tables hold one row per key, so their
+        key columns are reported as the primary key. A DUPLICATE KEY table (or one whose
+        model is unknown) is only sorted by its key columns, so it has no primary key.
         """
-        # table_model_to_key_type_map: Dict[str, MySQLKeyType] = {
-        #     TableModel.DUP_KEYS: MySQLKeyType.UNIQUE,
-        #     TableModel.DUP_KEYS2: MySQLKeyType.UNIQUE,
-        #     TableModel.AGG_KEYS: MySQLKeyType.UNIQUE,
-        #     TableModel.AGG_KEYS2: MySQLKeyType.UNIQUE,
-        #     TableModel.PRI_KEYS: MySQLKeyType.PRIMARY,
-        #     TableModel.PRI_KEYS2: MySQLKeyType.PRIMARY,
-        #     TableModel.UNQ_KEYS: MySQLKeyType.UNIQUE,
-        #     TableModel.UNQ_KEYS2: MySQLKeyType.UNIQUE,
-        # }
-        # return str(table_model_to_key_type_map.get(table_config.get(TableConfigKey.TABLE_MODEL), "").value)
-        return str(MySQLKeyType.PRIMARY.value)
+        table_model = table_config.get(TableConfigKey.TABLE_MODEL)
+        if TableInfoKey.MODEL_TO_KEY_MAP.get(table_model) in self._ROW_PER_KEY_TABLE_KEYS:
+            return str(MySQLKeyType.PRIMARY.value)
+        return str(MySQLKeyType.DUPLICATE.value)
 
     def _sort_columns(self, columns: List[_DecodingRow]) -> List[_DecodingRow]:
         """
@@ -691,6 +747,7 @@ class StarRocksTableDefinitionParser(object):
         mv_row: _DecodingRow,
         table_row: Optional[_DecodingRow],
         config_row: Optional[_DecodingRow],
+        column_rows: Optional[List[_DecodingRow]] = None,
     ) -> ReflectedMVState:
         """
         Parses all raw reflection data for a Materialized View into a ReflectedMVState.
@@ -700,6 +757,7 @@ class StarRocksTableDefinitionParser(object):
             mv_row: A row from `information_schema.materialized_views`.
             table_row: An optional row from `information_schema.tables` for the same mv
             config_row: An optional row from `information_schema.tables_config` for the same mv
+            column_rows: Optional rows from `information_schema.columns` for the same mv
         Returns:
             A ReflectedMVState object.
         """
@@ -717,6 +775,10 @@ class StarRocksTableDefinitionParser(object):
             parsed_state = ReflectedMVState(table_name=mv_row.TABLE_NAME, definition=ddl)
         # logger.debug("partial parsed mv state. mv: %s, state: %s", mv_fqn, parsed_state)
 
+        if column_rows:
+            ordered_rows = self._order_like_mv_column_list(self._sort_columns(column_rows), ddl)
+            parsed_state.columns = [self._parse_column(col) for col in ordered_rows]
+
         # 2. Augment/overwrite with more reliable info from other sources.
         self._merge_table_options(
             parsed_state.table_options,
@@ -730,6 +792,52 @@ class StarRocksTableDefinitionParser(object):
 
         logger.debug("parsed mv state. mv: %s, state: %s", mv_fqn, parsed_state)
         return parsed_state
+
+    @classmethod
+    def _order_like_mv_column_list(cls, column_rows: List[_DecodingRow], create_mv_ddl: str) -> List[_DecodingRow]:
+        """Order an MV's information_schema columns as the column list of its CREATE statement names them.
+
+        information_schema lists an MV's columns in storage order, sort key first, while the column list in its
+        DDL follows the SELECT. A CREATE MATERIALIZED VIEW built from the reflection applies its column names to
+        the SELECT items by position, so it needs the DDL's order.
+        """
+        names = cls._mv_column_list(create_mv_ddl)
+        if not names:
+            return column_rows
+        position = {name: index for index, name in enumerate(names)}
+        return sorted(column_rows, key=lambda row: position.get(row.COLUMN_NAME, len(names)))
+
+    @staticmethod
+    def _mv_column_list(create_mv_ddl: str) -> List[str]:
+        """Return the column names in the parenthesised list after the MV's name, or [] when there is none."""
+        header = re.match(r"\s*CREATE\s+MATERIALIZED\s+VIEW\s+(?:`(?:[^`]|``)+`|[\w.]+)(?:\.`(?:[^`]|``)+`)?\s*\(",
+                          create_mv_ddl, re.IGNORECASE)
+        if header is None:
+            return []
+        names: List[str] = []
+        depth, quote, escaped, item_start = 1, None, False, header.end()
+        for position in range(header.end(), len(create_mv_ddl)):
+            char = create_mv_ddl[position]
+            if escaped:
+                escaped = False
+            elif quote:
+                escaped = char == "\\" and quote != "`"
+                quote = None if char == quote else quote
+            elif char in "`'\"":
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char in ",)" and depth == 1:
+                item = re.match(r"\s*(`(?:[^`]|``)+`|\w+)", create_mv_ddl[item_start:position])
+                if item:
+                    name = item.group(1)
+                    names.append(name[1:-1].replace("``", "`") if name.startswith("`") else name)
+                item_start = position + 1
+                if char == ")":
+                    return names
+            elif char == ")":
+                depth -= 1
+        return []
 
     def _merge_table_options(self, table_options: Dict[str, Any], new_options: Dict[str, Any]) -> None:
         """

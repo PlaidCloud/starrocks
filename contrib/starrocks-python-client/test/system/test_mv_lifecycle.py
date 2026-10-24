@@ -57,6 +57,48 @@ class MaterializedViewLifecycleTest(_AlembicLifecycleBase):
         mv_names = inspector.get_materialized_view_names()
         assert "mv1" not in mv_names
 
+    def test_recreate_downgrade_restores_the_mv_columns_and_data(self, alembic_env, sr_engine):
+        """A change ALTER cannot make drops and creates the MV; the downgrade recreates the database's MV.
+
+        The MV is sorted by its second SELECT column, which information_schema lists first, and the downgrade's
+        column list must still follow the SELECT.
+        """
+        Base = declarative_base()
+        Table(
+            "t_recreate",
+            Base.metadata,
+            Column("k", INTEGER),
+            Column("name", VARCHAR(10)),
+            starrocks_duplicate_key="k",
+            starrocks_properties={"replication_num": "1"},
+        )
+        mv = MaterializedView(
+            "mv_recreate",
+            Base.metadata,
+            definition="SELECT name, k FROM t_recreate",
+            starrocks_refresh="MANUAL",
+            starrocks_order_by="k",
+            starrocks_properties={"replication_num": "1"},
+        )
+        alembic_env.harness.generate_autogen_revision(metadata=Base.metadata, message="Create MV")
+        alembic_env.harness.upgrade("head")
+        with sr_engine.begin() as conn:
+            conn.exec_driver_sql("INSERT INTO t_recreate VALUES (1, 'alice')")
+
+        mv.comment = "changed"
+        alembic_env.harness.generate_autogen_revision(metadata=Base.metadata, message="Comment MV")
+        downgrade_content = ScriptContentParser.extract_downgrade_content(
+            ScriptContentParser.check_script_content(alembic_env, 1, "comment_mv")
+        )
+        assert "Reflected" not in downgrade_content
+        alembic_env.harness.upgrade("head")
+        alembic_env.harness.downgrade("-1")
+
+        with sr_engine.begin() as conn:
+            conn.exec_driver_sql("REFRESH MATERIALIZED VIEW mv_recreate WITH SYNC MODE")
+            assert conn.exec_driver_sql("SELECT name, k FROM mv_recreate").all() == [("alice", 1)]
+        assert [c["name"] for c in inspect(sr_engine).get_columns("mv_recreate")] == ["name", "k"]
+
     @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_create_mv_comprehensive(self, alembic_env, sr_engine):
         """Tests creating a comprehensive MV with all attributes."""

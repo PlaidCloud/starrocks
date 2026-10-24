@@ -19,7 +19,7 @@ from typing import Any, Mapping, Optional, Sequence, Tuple, Union
 
 from alembic.ddl import base as alembic_base
 from alembic.ddl.mysql import MySQLImpl
-from sqlalchemy import Column, MetaData, Table, text, util
+from sqlalchemy import Column, ForeignKeyConstraint, Index, MetaData, Table, UniqueConstraint, text, util
 from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.sql import Executable
 
@@ -140,6 +140,34 @@ class StarRocksImpl(MySQLImpl):
             # the poll is never issued without one.
             return None
         return table_name, getattr(construct, "schema", None)
+
+    def drop_index(self, index: Index, **kw: Any) -> None:
+        """Drop a secondary index, unless StarRocks already dropped it together with its column.
+
+        Dropping a column drops its index too, so a migration that drops an indexed column and then its index
+        would otherwise fail on the second statement. Once the column's job has ended, a ``drop_index`` that
+        finds its index gone does nothing.
+
+        StarRocks has no DROP INDEX IF EXISTS, so ``if_exists=True`` is met by that check, and the statement goes
+        without it. Offline (``--sql``) nothing can be checked, and the compiler refuses ``if_exists``.
+        """
+        table = index.table
+        if self.connection is not None and not self.as_sql:
+            dbapi_cursor = self.connection.connection.cursor()
+            try:
+                self.dialect.wait_while_schema_change_runs(dbapi_cursor, table.name, table.schema)
+            finally:
+                dbapi_cursor.close()
+            if not self._index_exists(index.name, table.name, table.schema):
+                logger.info("Index %r of table %r was already dropped with its column.", index.name, table.name)
+                return
+            kw.pop("if_exists", None)
+        super().drop_index(index, **kw)
+
+    def _index_exists(self, index_name: str, table_name: str, schema: Optional[str]) -> bool:
+        full_name = ".".join(self.dialect.identifier_preparer.quote(name) for name in (schema, table_name) if name)
+        rows = self.connection.exec_driver_sql(f"SHOW INDEX FROM {full_name}").mappings().all()
+        return any(row["Key_name"] == index_name for row in rows)
 
     def _wait_for_schema_change(self, table_name: str, schema: Optional[str]) -> None:
         """Poll ``SHOW ALTER TABLE COLUMN`` until the latest job reaches a terminal state.

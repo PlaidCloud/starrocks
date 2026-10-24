@@ -16,7 +16,7 @@ from functools import cache
 import logging
 import re
 from textwrap import dedent
-from typing import Any, Dict, Final, List, Optional, Tuple, Union
+from typing import Any, Collection, Dict, Final, List, Optional, Tuple, Union
 from typing import TYPE_CHECKING, Any, Collection, Dict, Final, List, Optional, Tuple, Type, Union
 
 from alembic.ddl.base import alter_table, format_column_name, format_server_default, format_table_name
@@ -58,6 +58,7 @@ from sqlalchemy.sql import bindparam, operators, sqltypes
 from sqlalchemy.sql.elements import BinaryExpression, ClauseElement, Grouping, TypeClause
 
 from starrocks.common import utils
+from starrocks.common.consts import TableConfigKey
 from starrocks.common.defaults import ReflectionMVDefaults, ReflectionTableDefaults, ReflectionViewDefaults
 from starrocks.common.params import (
     ColumnAggInfoKey,
@@ -68,7 +69,13 @@ from starrocks.common.params import (
     TableKind,
     TableObjectInfoKey,
 )
-from starrocks.common.types import ColumnAggType, SystemRunMode, TableEngine, TableType, ViewSecurityType
+from starrocks.common.types import (
+    ColumnAggType,
+    SystemRunMode,
+    TableEngine,
+    TableType,
+    ViewSecurityType,
+)
 from starrocks.common.utils import TableAttributeNormalizer
 from starrocks.reserved_words import STARROCKS_RESERVED_WORDS
 from starrocks.sql.schema import View
@@ -1751,6 +1758,9 @@ class StarRocksDialect(MySQLDialect_pymysql):
 
     ischema_names = ischema_names
     colspecs = colspecs
+
+    _PRELOADED_STATES_KEY = "starrocks_preloaded_table_states"
+    _MULTI_REFLECT_CHUNK_SIZE = 500
     inspector = StarRocksInspector
 
     statement_compiler = StarRocksSQLCompiler
@@ -1929,7 +1939,9 @@ class StarRocksDialect(MySQLDialect_pymysql):
 
         Key: Query table_kind only once here, leveraging @reflection.cache.
         """
-        # logger.debug("setup parser for table object: %s, schema: %s", table_name, schema)
+        if (state := self._preloaded_table_state(kwargs.get("info_cache"), table_name, schema)) is not None:
+            return state
+
         # 1. Query object type (only once)
         table_kind = self._get_table_kind_from_db(connection, table_name, schema)
 
@@ -1971,6 +1983,24 @@ class StarRocksDialect(MySQLDialect_pymysql):
 
         return TableKind.TABLE  # Default fallback
 
+    def _parsed_state_or_create(
+        self, connection: Connection, table_name: str, schema: Optional[str] = None, **kw: Any
+    ) -> ReflectedState:
+        """
+        Look the parsed state up under plain string names.
+
+        ``@reflection.cache`` keys a ``quoted_name`` by ``(name, quote)`` but a plain
+        ``str`` by its value alone, so the same table reached once through the
+        ``Table`` (a ``quoted_name``) and once through a name list (a ``str``) used to
+        miss the cache and be reflected twice.
+        """
+        return super()._parsed_state_or_create(
+            connection,
+            None if table_name is None else str(table_name),
+            None if schema is None else str(schema),
+            **kw,
+        )
+
     @reflection.cache
     def get_table_kind(self, connection, table_name, schema = None, **kwargs):
         """
@@ -1986,7 +2016,6 @@ class StarRocksDialect(MySQLDialect_pymysql):
         self, connection, table_name, schema = None, **kwargs
     ):
         charset: Optional[str] = self._connection_charset
-        parser: _reflection.StarRocksTableDefinitionParser = self._tabledef_parser
         # logger.debug("setup table parser for table: %s, schema: %s", table_name, schema)
 
         if not schema:
@@ -2039,13 +2068,38 @@ class StarRocksDialect(MySQLDialect_pymysql):
             table_name=table_name,
         )
 
+        return self._parse_table_state(
+            connection, table_name, schema, table_rows[0], table_config_row, column_rows, charset
+        )
+
+    def _parse_table_state(
+        self,
+        connection: Connection,
+        table_name: str,
+        schema: str,
+        table_row: _DecodingRow,
+        table_config_row: Any,
+        column_rows: List[_DecodingRow],
+        charset: Optional[str],
+        read_aggregate_types: bool = True,
+    ) -> ReflectedState:
+        """
+        Complete the reflected state of a table from the rows already read from information_schema.
+
+        SHOW CREATE TABLE gives the partition clause and the auto increment columns, and SHOW FULL COLUMNS gives the
+        aggregate type of each column. Only an AGGREGATE KEY table has aggregate types, so a caller that knows the
+        table is not one can skip that statement.
+        """
+        parser: _reflection.StarRocksTableDefinitionParser = self._tabledef_parser
         full_name = self._get_quote_full_table_name(table_name, schema=schema)
         show_create_table = self._show_create_table(connection, None, charset, full_name)
         column_autoinc = self._get_autoinc_from_show_create_table(show_create_table)
 
         # Get aggregate info from `SHOW FULL COLUMNS`
-        full_column_rows: List[Row] = self._get_show_full_columns(
-            connection, table_name=table_name, schema=schema
+        full_column_rows: List[Row] = (
+            self._get_show_full_columns(connection, table_name=table_name, schema=schema)
+            if read_aggregate_types
+            else []
         )
         column_2_agg_type: Dict[str, str] = {
             row.Field: row.Extra.upper()
@@ -2053,7 +2107,12 @@ class StarRocksDialect(MySQLDialect_pymysql):
             if row.Extra
         }
 
+        generated_partition_columns = self._generated_partition_columns(show_create_table)
+        if generated_partition_columns:
+            column_rows = [row for row in column_rows if row.COLUMN_NAME not in generated_partition_columns]
         partition_clause = self._get_partition_clause_from_create_table(show_create_table)
+        for name, expression in generated_partition_columns.items() if partition_clause else ():
+            partition_clause = partition_clause.replace(self.identifier_preparer.quote_identifier(name), expression)
         # Add the partition info into table_config row for convenience
         # But the row object is immutable, so we convert it to a dictionary to modify it.
         table_config_dict = dict(table_config_row)
@@ -2061,13 +2120,134 @@ class StarRocksDialect(MySQLDialect_pymysql):
             table_config_dict['PARTITION_CLAUSE'] = partition_clause
 
         return parser.parse_table(
-            table=table_rows[0],
+            table=table_row,
             table_config=table_config_dict,
             columns=column_rows,
             column_2_agg_type=column_2_agg_type,
             column_autoinc=column_autoinc,
             charset=charset,
+            secondary_indexes=parser.parse_secondary_indexes(show_create_table),
         )
+
+    def get_multi_columns(self, connection: Connection, **kw: Any) -> Any:
+        """
+        Reflect the columns of many tables, reading information_schema once per schema instead of once per table.
+
+        SQLAlchemy 2.0's ``MetaData.reflect()`` calls this first, and the other multi methods and the single table
+        ones then find the tables already parsed in the inspector's cache. Views and materialized views, and any
+        table the bulk read cannot cover, are reflected one by one as before.
+        """
+        self._preload_table_states(connection, **kw)
+        return super().get_multi_columns(connection, **kw)
+
+    def _preload_table_states(
+        self,
+        connection: Connection,
+        kind: Any = None,
+        schema: Optional[str] = None,
+        filter_names: Optional[Collection[str]] = None,
+        **kw: Any,
+    ) -> None:
+        """
+        Parse every requested base table of a schema into the inspector cache, from one read of each of
+        information_schema.tables, tables_config and columns, plus SHOW CREATE TABLE per table.
+
+        Nothing is read when there is no inspector cache to hold the result, when the request excludes tables, or
+        when the server has no tables_config view; the single table path then does the work.
+        """
+        info_cache: Optional[Dict[Any, Any]] = kw.get("info_cache")
+        object_kind = getattr(reflection, "ObjectKind", None)
+        if info_cache is None or (object_kind is not None and kind is not None and object_kind.TABLE not in kind):
+            return
+        schema = schema or connection.dialect.default_schema_name
+        names = None if not filter_names else sorted(set(filter_names))
+        charset: Optional[str] = self._connection_charset
+        try:
+            table_rows = self._read_schema_rows(connection, "tables", schema, names, charset)
+            base_table_rows = {row.TABLE_NAME: row for row in table_rows if row.TABLE_TYPE == "BASE TABLE"}
+            if not base_table_rows:
+                return
+            config_rows = {
+                row.TABLE_NAME: row
+                for row in self._read_schema_rows(connection, "tables_config", schema, list(base_table_rows), charset)
+            }
+        except exc.NoSuchTableError:
+            return
+        column_rows = self._group_rows_by_table(
+            self._read_schema_rows(connection, "columns", schema, list(base_table_rows), charset)
+        )
+
+        states: Dict[Tuple[str, str], ReflectedState] = info_cache.setdefault(self._PRELOADED_STATES_KEY, {})
+        for table_name, table_row in base_table_rows.items():
+            config_row = config_rows.get(table_name, {})
+            states[(schema, table_name)] = self._parse_table_state(
+                connection,
+                table_name,
+                schema,
+                table_row,
+                config_row,
+                column_rows.get(table_name, []),
+                charset,
+                read_aggregate_types=self._is_aggregate_key_model(config_row),
+            )
+
+    def _preloaded_table_state(
+        self, info_cache: Optional[Dict[Any, Any]], table_name: str, schema: Optional[str]
+    ) -> Optional[ReflectedState]:
+        """The state of a table that get_multi_columns already parsed, or None."""
+        if info_cache is None:
+            return None
+        return info_cache.get(self._PRELOADED_STATES_KEY, {}).get((schema or self.default_schema_name, table_name))
+
+    @staticmethod
+    def _is_aggregate_key_model(table_config_row: Any) -> bool:
+        table_model = table_config_row.get(TableConfigKey.TABLE_MODEL) if table_config_row else None
+        return TableInfoKey.MODEL_TO_KEY_MAP.get(table_model) == TableInfoKey.AGGREGATE_KEY
+
+    @staticmethod
+    def _group_rows_by_table(rows: List[_DecodingRow]) -> Dict[str, List[_DecodingRow]]:
+        grouped: Dict[str, List[_DecodingRow]] = {}
+        for row in rows:
+            grouped.setdefault(row.TABLE_NAME, []).append(row)
+        return grouped
+
+    def _read_schema_rows(
+        self,
+        connection: Connection,
+        inf_sch_table: str,
+        schema: str,
+        table_names: Optional[List[str]],
+        charset: Optional[str],
+    ) -> List[_DecodingRow]:
+        """
+        Read the rows of an information_schema view for one schema, restricted to ``table_names`` when given.
+
+        The names are sent in chunks so a long list does not become one huge statement.
+        """
+        chunks: List[Optional[List[str]]] = (
+            [None]
+            if table_names is None
+            else [
+                table_names[start:start + self._MULTI_REFLECT_CHUNK_SIZE]
+                for start in range(0, len(table_names), self._MULTI_REFLECT_CHUNK_SIZE)
+            ]
+        )
+        rows: List[_DecodingRow] = []
+        for chunk in chunks:
+            where = "table_schema = :table_schema" + ("" if chunk is None else " AND table_name IN :table_names")
+            statement = text(f"SELECT * FROM information_schema.{inf_sch_table} WHERE {where}").bindparams(
+                bindparam("table_schema", type_=sqltypes.Unicode),
+                *([] if chunk is None else [bindparam("table_names", type_=sqltypes.Unicode, expanding=True)]),
+            )
+            params = {"table_schema": schema, **({} if chunk is None else {"table_names": chunk})}
+            try:
+                result = connection.execution_options(skip_user_error_events=False).execute(statement, params)
+                rows.extend(_DecodingRow(row, charset) for row in result.mappings().fetchall())
+            except exc.DBAPIError as e:
+                if self._extract_error_code(e.orig) == 1146:
+                    raise exc.NoSuchTableError(f"information_schema.{inf_sch_table}") from e
+                raise
+        return rows
 
     def _get_quote_full_table_name(
         self, table_name: str, schema: Optional[str] = None
@@ -2101,6 +2281,21 @@ class StarRocksDialect(MySQLDialect_pymysql):
         }
         # logger.debug("get auto increment info from show create table: %s", col_autoinc)
         return col_autoinc
+
+    _GENERATED_PARTITION_COLUMN: Final[re.Pattern[str]] = re.compile(
+        r'^\s*`(__generated_partition_column_\d+)`\s.*?\sAS\s(.+?)\sCOMMENT\s"', re.MULTILINE
+    )
+
+    @classmethod
+    def _generated_partition_columns(cls, create_table: str) -> Dict[str, str]:
+        """Return the hidden columns StarRocks generated for an expression partition, with their expressions.
+
+        StarRocks 3.5 partitions by an expression such as ``substr(s, 1, 2)`` or ``time_slice(dt, ..., ceil)``
+        through a generated column ``__generated_partition_column_N``, which SHOW CREATE TABLE and information_schema
+        list and PARTITION BY names. The model has neither, so reflection leaves the column out and puts its
+        expression back into the partition clause. StarRocks 4.1 hides the column itself.
+        """
+        return {match.group(1): match.group(2) for match in cls._GENERATED_PARTITION_COLUMN.finditer(create_table)}
 
     def _get_partition_clause_from_create_table(self, create_table: str) -> Optional[str]:
         """
@@ -2260,6 +2455,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
                 index_d["dialect_options"] = dialect_options
 
             indexes.append(index_d)
+        indexes.extend(dict(index) for index in parsed_state.secondary_indexes)
         return indexes
 
     @reflection.cache
@@ -2422,9 +2618,17 @@ class StarRocksDialect(MySQLDialect_pymysql):
             except Exception as e:
                 self.logger.info(f"Could not retrieve config for MV '{schema}.{view_name}': {e}")
 
-            # 4. Pass all raw data to the parser
+            # 4. Get the columns from information_schema.columns, as the view path does
+            column_rows: List[_DecodingRow] = self._read_from_information_schema(
+                connection=connection,
+                inf_sch_table="columns",
+                table_schema=schema,
+                table_name=view_name,
+            )
+
+            # 5. Pass all raw data to the parser
             parser = self._tabledef_parser
-            return parser.parse_mv(mv_row, table_row, config_row)
+            return parser.parse_mv(mv_row, table_row, config_row, column_rows)
 
         except Exception as e:
             self.logger.warning(f"Failed to get materialized view info for '{schema}.{view_name}': {e}")

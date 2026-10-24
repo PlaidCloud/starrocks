@@ -887,3 +887,65 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
 
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+
+
+class EngineBoundInspectorMaterializedViewTest(fixtures.TestBase):
+    """An inspector bound to an Engine opens its own connection, as SQLAlchemy's own methods do."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @testing.requires.sqlalchemy_2
+    def test_materialized_view_through_engine_inspector(self):
+        mv_name = "engine_inspector_mv"
+        schema = config.db.url.database
+        with config.db.begin() as connection:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+            connection.execute(text("DROP TABLE IF EXISTS engine_inspector_base"))
+            connection.execute(text(
+                "CREATE TABLE engine_inspector_base (id INT) DISTRIBUTED BY HASH(id) "
+                'PROPERTIES ("replication_num" = "1")'
+            ))
+            connection.execute(text(
+                f"CREATE MATERIALIZED VIEW {mv_name} REFRESH MANUAL "
+                'PROPERTIES ("replication_num" = "1") AS SELECT id FROM engine_inspector_base'
+            ))
+        try:
+            inspector = inspect(config.db)
+
+            assert inspector.get_materialized_view(mv_name, schema=schema).name == mv_name
+            assert "SELECT" in inspector.get_materialized_view_definition(mv_name, schema=schema)
+        finally:
+            with config.db.begin() as connection:
+                connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+                connection.execute(text("DROP TABLE IF EXISTS engine_inspector_base"))
+
+
+class ReflectionMaterializedViewColumnsTest(fixtures.TestBase):
+    """A reflected materialized view has the columns of its select, like a view."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @testing.requires.sqlalchemy_2
+    def test_reflect_materialized_view_columns(self, connection):
+        mv_name = "reflect_mv_columns"
+        connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+        connection.execute(text("DROP TABLE IF EXISTS reflect_mv_columns_base"))
+        connection.execute(text(
+            "CREATE TABLE reflect_mv_columns_base (id INT, name VARCHAR(20)) "
+            'DISTRIBUTED BY HASH(id) PROPERTIES ("replication_num" = "1")'
+        ))
+        connection.execute(text(
+            f"CREATE MATERIALIZED VIEW {mv_name} REFRESH MANUAL "
+            'PROPERTIES ("replication_num" = "1") AS SELECT id, name FROM reflect_mv_columns_base'
+        ))
+        try:
+            columns = inspect(connection).get_columns(mv_name)
+            table = Table(mv_name, MetaData(), autoload_with=connection)
+
+            assert [c["name"] for c in columns] == ["id", "name"]
+            assert [c.name for c in table.columns] == ["id", "name"]
+        finally:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+            connection.execute(text("DROP TABLE IF EXISTS reflect_mv_columns_base"))
