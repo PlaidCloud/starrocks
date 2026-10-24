@@ -1782,6 +1782,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
         """
         self._prepare_connection_for(cursor, statement, context)
         super().do_execute(cursor, statement, parameters, context)
+        self._read_every_ddl_result(cursor, context)
         self._track_transaction_control(statement, context)
 
     def do_executemany(
@@ -1801,7 +1802,20 @@ class StarRocksDialect(MySQLDialect_pymysql):
     ) -> None:
         self._prepare_connection_for(cursor, statement, context)
         super().do_execute_no_params(cursor, statement, context)
+        self._read_every_ddl_result(cursor, context)
         self._track_transaction_control(statement, context)
+
+    @staticmethod
+    def _read_every_ddl_result(cursor: "DBAPICursor", context: Optional[ExecutionContext]) -> None:
+        """Read the results of every statement a DDL construct compiled to, so a later statement's error raises.
+
+        ALTER MATERIALIZED VIEW with a refresh and properties, and ALTER TABLE SET with properties StarRocks takes
+        one at a time, compile to several statements. The driver reads a later statement's result only when the
+        cursor closes, and logs its error there instead of raising it.
+        """
+        if context is not None and context.isddl:
+            while cursor.nextset():
+                pass
 
     def _prepare_connection_for(
         self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext]
