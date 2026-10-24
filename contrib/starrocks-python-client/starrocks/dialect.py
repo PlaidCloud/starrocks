@@ -32,7 +32,7 @@ from alembic.ddl.mysql import (
     MySQLModifyColumn,
 )
 from alembic.operations.ops import AlterColumnOp
-from alembic.util.sqla_compat import compiles
+from alembic.util.sqla_compat import _literal_bindparam, compiles
 from sqlalchemy import (
     Column,
     Table,
@@ -3330,6 +3330,25 @@ def _starrocks_alter_default(element: MySQLAlterDefault, compiler: StarRocksDDLC
     StarRocks rejects it with "Column's type is null" even before it reaches the real limitation.
     """
     raise column_default_change_error(element.table_name, element.column_name)
+
+
+@compiles(_literal_bindparam, DialectName)
+def _starrocks_inline_literal(
+    element: _literal_bindparam,
+    compiler: StarRocksSQLCompiler,
+    skip_bind_expression: bool = False,
+    **kw: Any,
+) -> str:
+    """Render an Alembic inline literal inside its type's bind expression, as SQLAlchemy renders a literal bind.
+
+    Alembic renders ``op.inline_literal`` and, in offline mode, each value of ``op.bulk_insert`` as this
+    construct, and compiles it to the literal alone. An ARRAY, MAP or STRUCT literal is the JSON document that
+    its bind expression builds the value from, and the server cast the bare document to NULLs.
+    """
+    impl = element.type.dialect_impl(compiler.dialect)
+    if not skip_bind_expression and impl._has_bind_expression:
+        return compiler.process(impl.bind_expression(element), skip_bind_expression=True, **kw)
+    return compiler.render_literal_bindparam(element, **kw)
 
 
 def column_default_change_error(table_name: str, column_name: str) -> exc.CompileError:
