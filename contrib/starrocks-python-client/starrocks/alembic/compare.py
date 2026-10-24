@@ -2136,7 +2136,7 @@ def _compare_single_table_attribute(
         1. If meta specifies value != (conn value or default value) -> change needed
         2. If meta specifies value == (conn value or default value) -> no change
         3. If meta not specified and (conn is None or conn == default) -> no change
-        4. If meta not specified and conn != default -> log error, return False (user must decide)
+        4. If meta not specified and conn != default -> leave the database value alone, return False
     """
     # Convert values to strings for comparison (handle None gracefully)
     conn_str = str(conn_value) if conn_value is not None else None
@@ -2203,15 +2203,10 @@ def _compare_single_table_attribute(
                 )
                 pass
             else:
-                error_msg = (
-                    f"{object_label} {table_fqn!r}: Attribute '{attribute_name}' "
-                    f"in database has non-default value '{conn_str}' (default: '{default_str}'), "
-                    f"but not specified in metadata. Please specify this attribute explicitly "
-                    "in your table definition to avoid unexpected behavior. "
-                    "No ALTER statement will be generated automatically."
+                logger.debug(
+                    f"{object_label} {table_fqn!r}: Attribute '{attribute_name}' is '{conn_str}' in the database "
+                    f"(default: '{default_str}') and not set in metadata, so it is left as it is."
                 )
-                logger.error(error_msg)
-                raise NotImplementedError(error_msg)  # Don't generate ALTER - user must decide explicitly
         # Case 3: meta not specified, conn is default (or no default defined) -> no change
         return False
 

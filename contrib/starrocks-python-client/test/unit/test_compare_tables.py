@@ -45,7 +45,6 @@ def _starrocks_autogen_context() -> Mock:
     return autogen_context
 
 
-LOG_ATTRIBUTE_NEED_SPECIFIED = "Please specify this attribute explicitly"
 LOG_NO_DEFAULT_VALUE = "no default is defined in ReflectionTableDefaults"
 LOG_NO_ALERT_AUTO_GENERATED = "No ALTER TABLE SET operation will be generated"
 
@@ -392,7 +391,7 @@ class EngineChangesTest(fixtures.TestBase):
         assert len(result) == 0
 
     def test_engine_non_default_to_none(self):
-        """Test ENGINE from a non-default value ('MYSQL') to None."""
+        """ENGINE the metadata omits is left alone, whatever the database has."""
         autogen_context = _starrocks_autogen_context()
 
         conn_table = Mock()  # Table reflected from SR database, explicitly MYSQL
@@ -411,12 +410,11 @@ class EngineChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert LOG_ATTRIBUTE_NEED_SPECIFIED in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
 
     def test_engine_change(self):
         """Test ENGINE value changes ('OLAP' to 'MYSQL')."""
@@ -595,7 +593,7 @@ class KeyChangesTest(fixtures.TestBase):
         assert len(result) == 0
 
     def test_key_non_default_to_none(self):
-        """Test KEY from a non-default value ('PRIMARY KEY') to None."""
+        """KEY the metadata omits is left alone, whatever the database has."""
         autogen_context = _starrocks_autogen_context()
 
         conn_table = Mock()  # Table reflected from SR database, explicitly PRIMARY KEY
@@ -614,13 +612,11 @@ class KeyChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-
-        assert LOG_ATTRIBUTE_NEED_SPECIFIED in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
 
     def test_key_change(self):
         """Test KEY value changes ('DUPLICATE KEY' to 'UNIQUE KEY')."""
@@ -745,7 +741,7 @@ class PartitionChangesTest(fixtures.TestBase):
         assert "StarRocks does not support 'ALTER TABLE PARTITION BY'" in str(exc_info.error)
 
     def test_partition_value_to_none(self):
-        """Test PARTITION_BY from value to None."""
+        """PARTITION_BY the metadata omits is left alone, whatever the database has."""
         autogen_context = _starrocks_autogen_context()
 
         conn_table = Mock()  # Database has PARTITION_BY set
@@ -764,12 +760,11 @@ class PartitionChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert LOG_ATTRIBUTE_NEED_SPECIFIED in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
 
     def test_partition_change(self):
         """Test PARTITION_BY value changes."""
@@ -948,7 +943,7 @@ class DistributionChangesTest(fixtures.TestBase):
         assert len(result) == 0
 
     def test_distribution_non_default_to_none(self):
-        """Test DISTRIBUTED_BY from a non-default value to None."""
+        """DISTRIBUTED_BY the metadata omits is left alone, whatever the database has."""
         autogen_context = _starrocks_autogen_context()
 
         conn_table = Mock()  # Database has non-default DISTRIBUTED_BY
@@ -962,12 +957,11 @@ class DistributionChangesTest(fixtures.TestBase):
         )
         meta_table.dialect_options = {DialectName: extract_starrocks_dialect_attributes(meta_table.kwargs)}
 
-        with expect_raises(NotImplementedError) as exc_info:
-            upgrade_ops = UpgradeOps([])
-            compare_starrocks_table(
-                autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
-            )
-        assert LOG_ATTRIBUTE_NEED_SPECIFIED in str(exc_info.error)
+        upgrade_ops = UpgradeOps([])
+        compare_starrocks_table(
+            autogen_context, upgrade_ops, conn_table.schema, conn_table.name, conn_table, meta_table
+        )
+        assert upgrade_ops.ops == []
 
     def test_distribution_change(self):
         """Test DISTRIBUTED_BY value changes."""
