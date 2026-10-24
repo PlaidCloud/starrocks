@@ -769,10 +769,19 @@ def compile_structured_bind_expression(element: StructuredBindExpression, compil
 
 
 def _check_json_path_key(element: Any) -> None:
-    """Refuse a key StarRocks' JSON path cannot name: an empty one reads the whole document, and one holding a
-    double quote cannot be escaped, so either would read the wrong value."""
-    if not isinstance(element, int) and (element == "" or '"' in str(element)):
-        raise ValueError(f"StarRocks JSON paths cannot name the key {element!r}, which is empty or holds a double quote")
+    """Refuse a key StarRocks' JSON path cannot name, which would read the wrong value.
+
+    An empty key and ``$`` read the whole document, a key holding ``[`` is read as an array index, and a key
+    holding a double quote cannot be escaped.
+    """
+    if isinstance(element, int):
+        return
+    key = str(element)
+    if key in ("", "$") or '"' in key or "[" in key:
+        raise ValueError(
+            f"StarRocks JSON paths cannot name the key {element!r}; an empty key and $ read the whole document, "
+            "and a key holding [ or a double quote reads another value"
+        )
 
 
 class JSONIndexType(mysql_json.JSONIndexType):

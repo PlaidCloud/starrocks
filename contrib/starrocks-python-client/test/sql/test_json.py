@@ -220,7 +220,15 @@ class JsonAccessTest(fixtures.TablesTest):
         eq_(self._scalar(connection, data["grid"][(1, 1, "deep")].as_integer()), 4)
         eq_(self._scalar(connection, data[("nested",)][("deep", "leaf")]), 7)
 
-    @testing.combinations(("empty", ""), ("double_quote", 'q"uote'), id_="ia", argnames="key")
+    @testing.combinations(
+        ("empty", ""),
+        ("double_quote", 'q"uote'),
+        ("dollar", "$"),
+        ("index_suffix", "a[0]"),
+        ("index_only", "[0]"),
+        id_="ia",
+        argnames="key",
+    )
     def test_a_key_a_path_cannot_name_is_refused(self, connection, key):
         data = self.tables.json_access.c.data
         with testing.expect_raises_message(exc.StatementError, "cannot name the key"):
