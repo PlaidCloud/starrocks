@@ -267,6 +267,49 @@ class CompareMaterializedViewTest(fixtures.TestBase):
         eq_(len(upgrade_ops.ops), 0)
 
 
+    @testing.combinations(
+        ("DEFERRED ASYNC", "ASYNC"),
+        ("DEFERRED ASYNC EVERY(INTERVAL 1 HOUR)", "ASYNC EVERY(INTERVAL 1 HOUR)"),
+        ("DEFERRED MANUAL", "MANUAL"),
+        ("DEFERRED ASYNC", "DEFERRED ASYNC"),
+        ("ASYNC", "ASYNC"),
+        argnames="conn_refresh, meta_refresh",
+    )
+    def test_no_change_when_model_states_no_refresh_moment(self, conn_refresh, meta_refresh):
+        """ALTER ... REFRESH ASYNC leaves a DEFERRED view deferred, so a model that states no moment is unchanged."""
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", refresh=conn_refresh)
+        meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_refresh=meta_refresh)
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        eq_(len(upgrade_ops.ops), 0)
+
+    @testing.combinations(
+        ("DEFERRED ASYNC", "IMMEDIATE ASYNC", "from DEFERRED to IMMEDIATE"),
+        ("ASYNC", "DEFERRED ASYNC", "from IMMEDIATE to DEFERRED"),
+        argnames="conn_refresh, meta_refresh, reason",
+    )
+    def test_refresh_moment_the_model_states_is_recreated(self, caplog, conn_refresh, meta_refresh, reason):
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", refresh=conn_refresh)
+        meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_refresh=meta_refresh)
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        self._assert_recreated(upgrade_ops, caplog, reason)
+
+    def test_refresh_scheme_change_on_a_deferred_view_is_altered(self):
+        upgrade_ops = ops.UpgradeOps([])
+        conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", refresh="DEFERRED MANUAL")
+        meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_refresh="ASYNC")
+
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+
+        eq_([type(op) for op in upgrade_ops.ops], [AlterMaterializedViewOp])
+        eq_(upgrade_ops.ops[0].refresh, "ASYNC")
+
+
 class AutogenerateMaterializedViewsTest(fixtures.TestBase):
     """Test full autogenerate flow with mock inspector for MVs."""
 

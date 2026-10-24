@@ -1191,6 +1191,59 @@ def _compare_mv_comment(
         )
 
 
+def _split_refresh_moment(refresh: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Split a refresh string into its stated moment (IMMEDIATE, DEFERRED or None) and the rest.
+
+    The result is upper-cased with whitespace collapsed; the scheme keeps whatever follows the moment.
+    """
+    if refresh is None:
+        return None, None
+    normalized = " ".join(str(refresh).split()).upper()
+    for moment in ("IMMEDIATE", "DEFERRED"):
+        if normalized.startswith(moment + " "):
+            return moment, normalized[len(moment) + 1:]
+    return None, normalized
+
+
+def _normalize_refresh_scheme(refresh: Optional[str]) -> Optional[str]:
+    """Normalize the scheme of a refresh string for comparison, leaving out its IMMEDIATE or DEFERRED moment.
+
+    SHOW CREATE spells a periodic refresh SCHEDULE since 4.1.1 where the model says ASYNC, and quotes START("...")
+    with double quotes where the model uses single quotes.
+    """
+    _, scheme = _split_refresh_moment(refresh)
+    if scheme is None:
+        return None
+    if scheme.startswith("SCHEDULE"):
+        scheme = "ASYNC" + scheme[len("SCHEDULE"):]
+    return scheme.replace('"', "'")
+
+
+def _compare_mv_refresh_moment(
+    schema: Optional[str],
+    mv_name: str,
+    conn_mv_attributes: Dict[str, Any],
+    meta_mv_attributes: Dict[str, Any],
+) -> None:
+    """Raise UnalterableChange when the model states a refresh moment the database does not have.
+
+    Only the model's stated moment counts. IMMEDIATE is the default and SHOW CREATE never renders it, so an absent
+    moment in the database means IMMEDIATE, and ALTER MATERIALIZED VIEW ... REFRESH keeps whatever moment the view
+    was created with, so a different moment needs the view recreated.
+    """
+    meta_moment, _ = _split_refresh_moment(meta_mv_attributes.get(TableInfoKey.REFRESH))
+    if meta_moment is None:
+        return
+    conn_moment, _ = _split_refresh_moment(conn_mv_attributes.get(TableInfoKey.REFRESH))
+    if (conn_moment or "IMMEDIATE") != meta_moment:
+        mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
+        raise UnalterableChange(
+            f"Detected REFRESH moment change on materialized view {mv_fqn!r}, "
+            f"from {conn_moment or 'IMMEDIATE'} to {meta_moment}. "
+            f"StarRocks does not support altering the refresh moment of a materialized view."
+        )
+
+
 def _compare_mv_refresh(
     ops_list: List,
     schema: Optional[str],
@@ -1199,34 +1252,17 @@ def _compare_mv_refresh(
     meta_mv_attributes: Dict[str, Any]
 ) -> None:
     """
-    Compare MV refresh attributes and add AlterMaterializedViewOp if changed.
+    Compare MV refresh schemes and add AlterMaterializedViewOp if changed.
 
-    This is a mutable attribute that can be altered using ALTER MATERIALIZED VIEW.
+    This is a mutable attribute that can be altered using ALTER MATERIALIZED VIEW. The refresh moment
+    (IMMEDIATE or DEFERRED) is not part of the comparison, see `_compare_mv_refresh_moment`.
     """
-    def _normalize_refresh_string(val: Optional[str]) -> Optional[str]:
-        if val is None:
-            return None
-        # Collapse whitespace and compare case-insensitively
-        normalized = " ".join(str(val).split()).upper()
-        # IMMEDIATE is not rendered in SHOW CREATE, so drop
-        if normalized.startswith("IMMEDIATE "):
-            normalized = normalized[len("IMMEDIATE "):]
-        # SCHEDULE keyword replaced ASYNC 4.1.1, replace with ASYNC for backwards compatibility 
-        for moment_prefix in ("", "DEFERRED "):
-            keyword = moment_prefix + "SCHEDULE"
-            if normalized.startswith(keyword):
-                normalized = moment_prefix + "ASYNC" + normalized[len(keyword):]
-                break
-        # Normalize START("...") (SHOW CREATE) vs START('...') (metadata) quote styles.
-        normalized = normalized.replace('"', "'")
-        return normalized
-
     conn_refresh_raw = conn_mv_attributes.get(TableInfoKey.REFRESH)
     meta_refresh_raw = meta_mv_attributes.get(TableInfoKey.REFRESH)
     logger.debug("Compare mv refresh: conn_refresh_raw=%s, meta_refresh_raw=%s", conn_refresh_raw, meta_refresh_raw)
 
-    conn_refresh = _normalize_refresh_string(conn_refresh_raw)
-    meta_refresh = _normalize_refresh_string(meta_refresh_raw)
+    conn_refresh = _normalize_refresh_scheme(conn_refresh_raw)
+    meta_refresh = _normalize_refresh_scheme(meta_refresh_raw)
 
     if conn_refresh != meta_refresh:
 
@@ -1369,6 +1405,7 @@ def _compare_mv(
             object_label="Materialized view",
         ),
         lambda: _compare_mv_comment(upgrade_ops.ops, schema, mv_name, conn_mv, metadata_mv),
+        lambda: _compare_mv_refresh_moment(schema, mv_name, conn_mv_attributes, meta_mv_attributes),
     ])
     if unalterable_changes:
         _recreate_materialized_view(upgrade_ops, schema, mv_name, conn_mv, metadata_mv, unalterable_changes)

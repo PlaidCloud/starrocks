@@ -331,6 +331,31 @@ class AlterMaterializedViewTest(_MaterializedViewAutogenerateBase):
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
+    def test_deferred_view_converges_after_altering_its_refresh(self, connection) -> None:
+        """A DEFERRED MANUAL view altered to REFRESH ASYNC reflects as DEFERRED ASYNC, which a model saying ASYNC matches."""
+        mv_name = "test_mv_deferred_after_alter"
+        connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+        connection.execute(text(
+            f"CREATE MATERIALIZED VIEW {mv_name} REFRESH DEFERRED MANUAL "
+            "PROPERTIES ('replication_num' = '1') AS SELECT val FROM t_autogen"
+        ))
+        connection.execute(text(f"ALTER MATERIALIZED VIEW {mv_name} REFRESH ASYNC"))
+        try:
+            target_metadata = MetaData()
+            MaterializedView(
+                mv_name,
+                target_metadata,
+                definition="SELECT val FROM t_autogen",
+                starrocks_refresh="ASYNC",
+                starrocks_properties={"replication_num": "1"},
+            )
+            mc = create_migration_context(connection, target_metadata)
+            migration_script = api.produce_migrations(mc, target_metadata)
+
+            assert migration_script.upgrade_ops.ops == []
+        finally:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+
     def test_no_diff_when_distribution_omitted(self, connection) -> None:
         """No change/crash: omitting DISTRIBUTED BY in metadata must not diff or raise.
 
