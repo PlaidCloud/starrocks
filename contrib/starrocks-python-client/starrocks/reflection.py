@@ -30,6 +30,7 @@ from starrocks.common.consts import TableConfigKey
 from starrocks.common.defaults import ReflectionMVDefaults
 from starrocks.common.params import (
     ColumnAggInfoKeyWithPrefix,
+    DialectName,
     SRKwargsPrefix,
     TableInfoKey,
     TableInfoKeyWithPrefix,
@@ -217,6 +218,7 @@ class StarRocksTableDefinitionParser(object):
         column_2_agg_type: Dict[str, str] = None,
         column_autoinc: dict[str, bool] = None,
         charset: str = None,
+        secondary_indexes: Optional[List[Dict[str, Any]]] = None,
     ) -> ReflectedState:
         """
         Parses the raw reflection data into a structured ReflectedState object.
@@ -251,9 +253,51 @@ class StarRocksTableDefinitionParser(object):
                 "parser": None,
                 "name": None,
             }],
+            secondary_indexes=list(secondary_indexes or []),
         )
         logger.debug("reflected table info for table: %r, info: '%s'", table.TABLE_NAME, reflected_table_info)
         return reflected_table_info
+
+    _SECONDARY_INDEX_LINE = re.compile(
+        r"^\s*INDEX\s+(?:`(?P<quoted_name>(?:[^`]|``)+)`|(?P<name>.+?))\s+\((?P<columns>(?:`(?:[^`]|``)*`|[^`)])*)\)"
+        r"\s+USING\s+(?P<type>\w+)(?:\s*\((?P<properties>[^)]*)\))?"
+        r"(?:\s+COMMENT\s+'(?P<comment>.*)')?\s*,?\s*$",
+        re.MULTILINE,
+    )
+    _INDEX_PROPERTY = re.compile(r'"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)"')
+    _BACKTICKED_NAME = re.compile(r"`((?:[^`]|``)*)`")
+
+    @classmethod
+    def parse_secondary_indexes(cls, create_table: str) -> List[Dict[str, Any]]:
+        """Parse the ``INDEX name (cols) USING type(properties) COMMENT '...'`` lines of SHOW CREATE TABLE.
+
+        StarRocks prints every BITMAP, NGRAMBF, GIN or VECTOR index in the column list, with the properties it
+        defaulted as well as those given. Each becomes a SQLAlchemy reflected index, with the type, properties and
+        comment as ``starrocks_using``, ``starrocks_properties`` and ``starrocks_comment``. The index name and
+        comment are printed as stored, without quoting or escaping, and the column names in backticks.
+        """
+        indexes: List[Dict[str, Any]] = []
+        for match in cls._SECONDARY_INDEX_LINE.finditer(create_table):
+            name = match.group("quoted_name").replace("``", "`") if match.group("quoted_name") else match.group("name")
+            dialect_options: Dict[str, Any] = {f"{DialectName}_using": match.group("type").upper()}
+            if match.group("properties"):
+                dialect_options[f"{DialectName}_properties"] = dict(cls._INDEX_PROPERTY.findall(match.group("properties")))
+            if match.group("comment"):
+                dialect_options[f"{DialectName}_comment"] = match.group("comment")
+            indexes.append({
+                "name": name,
+                "column_names": cls._index_column_names(match.group("columns")),
+                "unique": False,
+                "dialect_options": dialect_options,
+            })
+        return indexes
+
+    @classmethod
+    def _index_column_names(cls, column_list: str) -> List[str]:
+        quoted = cls._BACKTICKED_NAME.findall(column_list)
+        if quoted:
+            return [name.replace("``", "`") for name in quoted]
+        return [name.strip() for name in column_list.split(",")]
 
     def _parse_column(self, column: _DecodingRow, col_2_autoinc: dict | None = None, **kwargs: Any) -> dict:
         """

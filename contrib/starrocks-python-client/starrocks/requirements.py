@@ -62,7 +62,11 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
 
     @property
     def index_reflection(self):
-        # ToDo - open when multi-column index is supported
+        """Closed: the suite's fixture tables carry multi-column and unique indexes, which StarRocks does not have.
+
+        StarRocks' single-column BITMAP, NGRAMBF, GIN and VECTOR indexes are reflected, and tested in
+        ``test/integration/test_reflection_indexes.py``.
+        """
         return exclusions.closed()
 
     @property

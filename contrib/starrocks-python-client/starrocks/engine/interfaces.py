@@ -60,6 +60,7 @@ class ReflectedState:
     keys: List[Union['ReflectedIndexInfo', 'ReflectedPKInfo', 'ReflectedUKInfo']] = dataclasses.field(default_factory=list)
     fk_constraints: List['ReflectedFKInfo'] = dataclasses.field(default_factory=list)
     ck_constraints: List['ReflectedCKInfo'] = dataclasses.field(default_factory=list)
+    secondary_indexes: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
 
     @property
     def name(self) -> Optional[str]:

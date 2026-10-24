@@ -453,3 +453,51 @@ class ColumnFlagReflectionTest(fixtures.TestBase):
         assert table.c.k_not_null.nullable is False
         assert table.c.v.primary_key is False
         assert table.c.v.nullable is True
+
+
+class SecondaryIndexParserTest(fixtures.TestBase):
+    CREATE_TABLE = """CREATE TABLE `events` (
+  `id` int(11) NULL COMMENT "",
+  `city` varchar(20) NULL COMMENT "",
+  `name` varchar(50) NULL COMMENT "",
+  `note, with comma` varchar(50) NULL COMMENT "",
+  INDEX ix_city (`city`) USING BITMAP COMMENT 'city's index',
+  INDEX ix name (`name`, `city`) USING NGRAMBF("bloom_filter_fpp" = "0.05", "gram_num" = "4") COMMENT '',
+  INDEX ix_note (`note, with comma`) USING BITMAP COMMENT ''
+) ENGINE=OLAP
+DUPLICATE KEY(`id`)
+DISTRIBUTED BY HASH(`id`) BUCKETS 1
+PROPERTIES (
+"replication_num" = "1"
+);"""
+
+    def test_reflects_type_properties_and_comment(self):
+        indexes = StarRocksTableDefinitionParser.parse_secondary_indexes(self.CREATE_TABLE)
+
+        assert indexes[:2] == [
+            {
+                "name": "ix_city",
+                "column_names": ["city"],
+                "unique": False,
+                "dialect_options": {"starrocks_using": "BITMAP", "starrocks_comment": "city's index"},
+            },
+            {
+                "name": "ix name",
+                "column_names": ["name", "city"],
+                "unique": False,
+                "dialect_options": {
+                    "starrocks_using": "NGRAMBF",
+                    "starrocks_properties": {"bloom_filter_fpp": "0.05", "gram_num": "4"},
+                },
+            },
+        ]
+
+    def test_column_name_containing_a_comma(self):
+        indexes = StarRocksTableDefinitionParser.parse_secondary_indexes(self.CREATE_TABLE)
+
+        assert indexes[2]["column_names"] == ["note, with comma"]
+
+    def test_table_without_indexes(self):
+        assert StarRocksTableDefinitionParser.parse_secondary_indexes(
+            "CREATE TABLE `t` (\n  `id` int(11) NULL COMMENT \"\"\n) ENGINE=OLAP"
+        ) == []

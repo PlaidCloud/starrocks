@@ -2102,6 +2102,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
             column_2_agg_type=column_2_agg_type,
             column_autoinc=column_autoinc,
             charset=charset,
+            secondary_indexes=parser.parse_secondary_indexes(show_create_table),
         )
 
     def get_multi_columns(self, connection: Connection, **kw: Any) -> Any:
@@ -2415,6 +2416,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
                 index_d["dialect_options"] = dialect_options
 
             indexes.append(index_d)
+        indexes.extend(dict(index) for index in parsed_state.secondary_indexes)
         return indexes
 
     @reflection.cache

@@ -1083,12 +1083,10 @@ def _combine_column_alters(context, revision, op: ops.ModifyTableOps):
     operations keep their relative position. With fewer than two column changes
     there is nothing to combine and the container is returned unchanged.
 
-    No index-drop reordering hazard: the dialect's ``get_indexes`` does not
-    reflect StarRocks bitmap/secondary indexes, so autogenerate never emits a
-    ``DropIndexOp`` for them — removing an indexed column yields only a
-    ``DropColumnOp``. There is therefore no ``DROP INDEX`` that could be
-    reordered relative to a column drop, and StarRocks removes a column's index
-    together with the column anyway.
+    Index operations stay separate and keep their position. Removing an indexed
+    column yields a ``DropIndexOp`` before the column drop; the dialect waits
+    for the index job before the combined ``ALTER TABLE``, which also drops any
+    index of a removed column the ``DropIndexOp`` did not.
     """
     adds: List[Column] = []
     drops: List[Column] = []
