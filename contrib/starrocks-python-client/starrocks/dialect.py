@@ -284,9 +284,12 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
     def visit_enum(self, type_: sqltypes.Enum, **kw: Any) -> str:
         """StarRocks has no ENUM type, so sa.Enum is always stored as VARCHAR.
 
-        VARCHAR(n) counts bytes in StarRocks, so n is the longest value's UTF-8 length, not its character count.
+        VARCHAR(n) counts bytes in StarRocks, so n is at least the longest value's UTF-8 length, not its character
+        count, and at least the ``length`` the Enum asks for.
         """
         longest_value_bytes = max((len(value.encode("utf-8")) for value in type_.enums), default=None)
+        if longest_value_bytes is not None and type_.length:
+            longest_value_bytes = max(longest_value_bytes, type_.length)
         return self.visit_VARCHAR(sqltypes.String(longest_value_bytes), **kw)
 
     def visit_TEXT(self, type_, **kw):

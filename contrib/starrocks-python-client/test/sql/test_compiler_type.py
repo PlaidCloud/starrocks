@@ -80,6 +80,7 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         (Enum("a", "bb"), "VARCHAR(2)"),
         (Enum("réveillé", "b"), "VARCHAR(10)"),
         (Enum("a", native_enum=True), "VARCHAR(1)"),
+        (Enum("a", "bb", length=50, native_enum=False), "VARCHAR(50)"),
         (BINARY(), "BINARY"),
         (BINARY(10), "BINARY(10)"),
         (VARBINARY(), "VARBINARY"),
