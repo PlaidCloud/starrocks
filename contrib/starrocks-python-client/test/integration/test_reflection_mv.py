@@ -128,7 +128,10 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
 
     @testing.requires.sqlalchemy_2
     def test_reflect_simple_mv(self, connection):
-        """Test reflection of a simple materialized view with basic SELECT statement."""
+        """Test reflection of a simple materialized view with basic SELECT statement.
+
+        StarRocks ends the CREATE statement it reports with ``;``, which the definition leaves out.
+        """
         mv_name = "test_reflect_simple_mv"
 
         # Clean up any existing MV
@@ -158,6 +161,7 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
             expected_def = "SELECT id, name FROM users WHERE active = true"
             assert TableAttributeNormalizer.normalize_sql(expected_def, remove_qualifiers=True) \
                 in TableAttributeNormalizer.normalize_sql(mv_definition, remove_qualifiers=True)
+            assert not mv_definition.endswith(";")
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
@@ -563,6 +567,26 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
         with expect_raises(NoSuchTableError):
             Table("nonexistent_mv_12345", MetaData(), autoload_with=connection)
 
+    def test_comments_naming_clauses_are_not_read_as_them(self, connection):
+        """A column comment and the MV comment may say PARTITION BY, REFRESH or AS SELECT."""
+        mv_name = "test_reflect_mv_clause_comments"
+        connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+        connection.execute(text(
+            f"CREATE MATERIALIZED VIEW {mv_name} (id COMMENT 'no PARTITION BY id', name) "
+            "COMMENT 'was \"REFRESH ASYNC EVERY (INTERVAL 1 DAY)\", AS SELECT 1' "
+            "DISTRIBUTED BY HASH(id) REFRESH MANUAL AS SELECT id, name FROM users"
+        ))
+        try:
+            mv_state = inspect(connection).get_materialized_view(mv_name)
+        finally:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+
+        assert mv_state.refresh_info.type == "MANUAL"
+        assert mv_state.partition_info is None
+        assert TableAttributeNormalizer.normalize_sql(mv_state.definition, remove_qualifiers=True) == (
+            "select id, name from users"
+        )
+
     @testing.requires.sqlalchemy_2
     def test_reflect_mv_case_normalization(self, connection):
         """Test reflection of materialized view properties normalizes case."""
@@ -887,3 +911,68 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
 
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+
+
+class EngineBoundInspectorMaterializedViewTest(fixtures.TestBase):
+    """An inspector bound to an Engine opens its own connection, as SQLAlchemy's own methods do."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    def test_materialized_view_through_engine_inspector(self):
+        mv_name = "engine_inspector_mv"
+        schema = config.db.url.database
+        with config.db.begin() as connection:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+            connection.execute(text("DROP TABLE IF EXISTS engine_inspector_base"))
+            connection.execute(text(
+                "CREATE TABLE engine_inspector_base (id INT) DISTRIBUTED BY HASH(id) "
+                'PROPERTIES ("replication_num" = "1")'
+            ))
+            connection.execute(text(
+                f"CREATE MATERIALIZED VIEW {mv_name} REFRESH MANUAL "
+                'PROPERTIES ("replication_num" = "1") AS SELECT id FROM engine_inspector_base'
+            ))
+        try:
+            inspector = inspect(config.db)
+
+            assert mv_name in inspector.get_materialized_view_names(schema=schema)
+            assert inspector.get_materialized_view(mv_name, schema=schema).name == mv_name
+            assert "SELECT" in inspector.get_materialized_view_definition(mv_name, schema=schema)
+        finally:
+            with config.db.begin() as connection:
+                connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+                connection.execute(text("DROP TABLE IF EXISTS engine_inspector_base"))
+
+
+class ReflectionMaterializedViewColumnsTest(fixtures.TestBase):
+    """A reflected materialized view has the columns of its select, like a view."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @testing.combinations(
+        ("first_column_sort_key", ""), ("later_column_sort_key", "ORDER BY (name) "), argnames="order_by", id_="ia"
+    )
+    def test_reflect_materialized_view_columns(self, connection, order_by):
+        """information_schema lists an MV's columns sort key first, and reflection keeps the select's order."""
+        mv_name = "reflect_mv_columns"
+        connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+        connection.execute(text("DROP TABLE IF EXISTS reflect_mv_columns_base"))
+        connection.execute(text(
+            "CREATE TABLE reflect_mv_columns_base (id INT, name VARCHAR(20)) "
+            'DISTRIBUTED BY HASH(id) PROPERTIES ("replication_num" = "1")'
+        ))
+        connection.execute(text(
+            f"CREATE MATERIALIZED VIEW {mv_name} {order_by}REFRESH MANUAL "
+            'PROPERTIES ("replication_num" = "1") AS SELECT id, name FROM reflect_mv_columns_base'
+        ))
+        try:
+            columns = inspect(connection).get_columns(mv_name)
+            table = Table(mv_name, MetaData(), autoload_with=connection)
+
+            assert [c["name"] for c in columns] == ["id", "name"]
+            assert [c.name for c in table.columns] == ["id", "name"]
+        finally:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+            connection.execute(text("DROP TABLE IF EXISTS reflect_mv_columns_base"))

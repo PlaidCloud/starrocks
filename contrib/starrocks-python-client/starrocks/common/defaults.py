@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 try:
     from sqlalchemy.engine.reflection import ReflectionDefaults
@@ -65,8 +65,24 @@ class ReflectionTableDefaults(ReflectionDefaults):
         'mutable_bucket_num': '0',
         'primary_index_cache_expire_sec': '0',
         'storage_type': 'column',
-        # 'bloom_filter_columns': None,
-        # 'colocate_with': None,
+
+        # Added when a dynamic_partition.* property is set, whatever it is (even enable=false).
+        # time_zone is the FE time zone, so any value here only marks the key as known.
+        'dynamic_partition.history_partition_num': '0',
+        'dynamic_partition.time_zone': 'Etc/UTC',
+        # Added when the table sets no start, and for a WEEK or MONTH time_unit when it sets no first day.
+        'dynamic_partition.start': '-2147483648',
+        'dynamic_partition.start_day_of_week': '1',
+        'dynamic_partition.start_day_of_month': '1',
+
+        # Added when flat_json.enable is true.
+        'flat_json.null.factor': '0.3',
+        'flat_json.sparsity.factor': '0.3',
+        'flat_json.column.max': '100',
+
+        # Absent until set; SET to the empty string clears them again.
+        'bloom_filter_columns': '',
+        'colocate_with': '',
     }
     _DEFAULT_PROPERTIES_SHARED_NOTHING = {**{
         'replication_num': '3',
@@ -91,10 +107,16 @@ class ReflectionTableDefaults(ReflectionDefaults):
         'compaction_strategy',
         'compression',
         'persistent_index_type',
+        'query_rewrite_consistency',
         'storage_format',
         'storage_medium',
         'storage_type',
         'write_quorum',
+    })
+
+    # Properties that hold a set of column names, which StarRocks reports in its own order.
+    _COLUMN_SET_PROPERTIES: frozenset = frozenset({
+        'bloom_filter_columns',
     })
 
     # Default table options
@@ -171,10 +193,13 @@ class ReflectionTableDefaults(ReflectionDefaults):
     @classmethod
     def normalize_property_value(cls, key: str, value: Optional[str]) -> Optional[str]:
         """Normalize a property value for comparison: booleans and the enums in
-        ``_CASE_INSENSITIVE_PROPERTIES`` compare case-insensitively.
+        ``_CASE_INSENSITIVE_PROPERTIES`` compare case-insensitively, and the column sets of
+        ``_COLUMN_SET_PROPERTIES`` in any order and case, as StarRocks column names are.
         """
         if value is None:
             return None
+        if key in cls._COLUMN_SET_PROPERTIES:
+            return ", ".join(sorted({name.strip().strip('`').lower() for name in value.split(",") if name.strip()}))
         if key in cls._CASE_INSENSITIVE_PROPERTIES or value.lower() in ('true', 'false'):
             return value.lower()
         return value
@@ -244,16 +269,24 @@ class ReflectionMVDefaults(ReflectionViewDefaults):
     # SHOW CREATE MATERIALIZED VIEW also prints effective values that tables_config leaves out
     # on purpose (e.g. replicated_storage), and those have no entry in _DEFAULT_PROPERTIES, so
     # merging them in would warn about an unmanaged database value on every autogenerate.
+    #
+    # StarRocks 3.3.22, 3.5.21 and 4.1.6 all leave out these, and every session.* property.
     _DDL_ONLY_PROPERTY_KEYS: frozenset = frozenset({
         'colocate_with',
+        'enable_query_rewrite',
+        'force_external_table_query_rewrite',
+        'query_rewrite_consistency',
     })
+    _DDL_ONLY_PROPERTY_PREFIXES: Tuple[str, ...] = ('session.',)
 
     @classmethod
-    def ddl_only_property_keys(cls) -> frozenset:
-        """Property names (lowercase) to take from the MV ddl instead of tables_config.
+    def is_ddl_only_property(cls, key: str) -> bool:
+        """Whether to take the MV property from the MV's DDL, because tables_config leaves it out.
+
         See ``_DDL_ONLY_PROPERTY_KEYS``.
         """
-        return cls._DDL_ONLY_PROPERTY_KEYS
+        key = key.lower()
+        return key in cls._DDL_ONLY_PROPERTY_KEYS or key.startswith(cls._DDL_ONLY_PROPERTY_PREFIXES)
 
     @classmethod
     def apply(cls, *, name: str, definition: str, comment: Union[str, None] = None, security: Union[str, None] = None) -> ReflectedMVState:

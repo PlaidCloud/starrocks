@@ -14,17 +14,7 @@
 
 import re
 
-from alembic import util as alembic_util
 from sqlalchemy import testing
-
-
-def alembic_runs_dialect_comparators_first(config: object) -> bool:
-    """Whether Alembic runs the comparators in its global registry ahead of its own.
-
-    Alembic's PriorityDispatcher (1.18 and later) copies the global registry, which holds the dialect's
-    comparators, before adding its own, so the dialect's ``schema`` and ``table`` comparators run first.
-    """
-    return hasattr(alembic_util, "PriorityDispatcher")
 
 
 def normalize_sql(sql: str) -> str:
@@ -77,7 +67,29 @@ JSON_TO_MAP_CAST_NEEDS_3_4_3 = testing.skip_if("starrocks<3.4.3", "StarRocks cas
 TIME_SLICE_CEIL_PARTITION_NEEDS_3_4_1 = testing.skip_if(
     "starrocks<3.4.1", "StarRocks before 3.4.1 refuses time_slice(..., ceil) in PARTITION BY"
 )
+AUTO_INCREMENT_COMMENT_MODIFY_NEEDS_4_1_3 = testing.skip_if(
+    "starrocks<4.1.3",
+    "Before 4.1.3, StarRocks refuses any MODIFY COLUMN of an AUTO_INCREMENT column; from 4.1.3 it takes one that "
+    "changes nothing but the comment",
+)
+GENERATED_COLUMN_IN_THE_DEFAULT_KEY_BEFORE_3_4 = testing.skip_if(
+    "starrocks<3.4",
+    "Before 3.4, StarRocks puts a generated column in the DUPLICATE KEY it picks for a table that names no key, "
+    "and then refuses it",
+)
+MV_TEXT_REWRITTEN_BEFORE_4_0_2 = testing.skip_if(
+    "starrocks<4.0.2", "Before 4.0.2 StarRocks shows an MV definition rewritten, so its text is not compared"
+)
+MV_TEXT_STORED_AS_WRITTEN_FROM_4_0_2 = testing.skip_if(
+    "starrocks>=4.0.2", "From 4.0.2 StarRocks shows an MV definition as written, so its text is compared"
+)
 VIEW_TEXT_REWRITTEN_BEFORE_4_0_7 = testing.skip_if(
     "starrocks<4.0.7",
     "Before 4.0.7 StarRocks stores a view's SQL rewritten, and the backslash of an escape such as \\t is lost",
+)
+VIEW_TEXT_NOT_COMPARED_BEFORE_4_0_7 = testing.skip_if(
+    "starrocks<4.0.7", "Before 4.0.7 StarRocks keeps a view's SQL rewritten, so its text is not compared"
+)
+VIEW_TEXT_COMPARED_FROM_4_0_7 = testing.skip_if(
+    "starrocks>=4.0.7", "From 4.0.7 StarRocks keeps a view's SQL as written, so its text is compared"
 )

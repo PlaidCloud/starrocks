@@ -66,8 +66,8 @@ class _FakeConn:
         self.calls = []
         self._reflected = reflected_definition
 
-    def exec_driver_sql(self, sql, params=None):
-        self.calls.append((sql, params))
+    def exec_driver_sql(self, sql, params=None, execution_options=None):
+        self.calls.append((sql, params, execution_options))
         if sql.strip().upper().startswith("SELECT VIEW_DEFINITION"):
             return _FakeResult((self._reflected,))
         return _FakeResult(None)
