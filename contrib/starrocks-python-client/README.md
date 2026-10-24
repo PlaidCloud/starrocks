@@ -23,7 +23,7 @@ StarRocks 3.3.3 or later; the dialect is tested on 3.3, 3.4, 3.5, 4.0 and 4.1. A
 | Feature | Needs |
 |---|---|
 | View `starrocks_security` | 3.4.1 |
-| RANGE distribution (`starrocks_distributed_by="RANGE"`) | 4.1, with the FE configuration `enable_range_distribution` on |
+| RANGE distribution (`starrocks_distributed_by="RANGE"`) | 4.1, with `enable_range_distribution` on in the FE configuration or the session |
 | `VARIANT` columns | 4.1 |
 
 Older versions also differ in ways the dialect handles for you:
@@ -32,7 +32,7 @@ Older versions also differ in ways the dialect handles for you:
 - `@@run_mode` exists from 4.0.7. Older servers report the run mode only through `ADMIN SHOW FRONTEND CONFIG`, which needs the OPERATE privilege; without it the dialect assumes shared-nothing.
 - Some table properties are newer than 3.3: `compaction_strategy` (4.0), `enable_statistic_collect_on_first_load` (3.5.10 and 4.0.2), and `bucket_size` defaults to 4 GiB before 4.0 and 1 GiB from 4.0. Declare only the properties your servers know.
 
-The `starrocks+asyncmy` driver needs SQLAlchemy 2.0.
+Views, materialized views, Alembic autogenerate and the `starrocks+asyncmy` driver need SQLAlchemy 2.0. On SQLAlchemy 1.4 the dialect covers tables, types, queries and reflection.
 
 #### Using a Virtual Environment (Recommended)
 
@@ -372,7 +372,7 @@ pytest test/integration/test_reflection_table.py -k ReflectionTableOptionsTest
 
 | Path | What it covers |
 | --- | --- |
-| `test/sql` | Compiling DDL and DML with `assert_compile`, without executing it |
+| `test/sql` | Compiling DDL and DML with `assert_compile`; a few classes also run what they compile against the server |
 | `test/unit` | Parsing, reflection helpers, the defaults tables, and Alembic comparison and rendering, without executing SQL |
 | `test/integration` | Reflection, result processing and Alembic autogenerate comparison, against tables the tests create |
 | `test/system` | Alembic revisions end to end (autogenerate, upgrade and downgrade), each test in a fresh database |

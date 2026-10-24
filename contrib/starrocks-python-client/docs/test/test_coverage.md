@@ -14,6 +14,9 @@ This suite verifies that Python schema definitions are correctly compiled into S
 - **`test_compiler_view.py`**: Covers `CREATE`, `ALTER`, and `DROP VIEW` statements.
 - **`test_compiler_mv.py`**: Covers `CREATE`, `ALTER`, and `DROP MATERIALIZED VIEW` statements.
 - **`test_compiler_type.py`**: Covers data type compilation.
+- **`test_compiler_dml.py`**: Covers multi-table UPDATE and DELETE, `INSERT OVERWRITE` and `WITH LABEL`, and runs them.
+- **`test_compiler_version_gates.py`**: Covers the features refused on servers older than they need.
+- **`test_json.py`**: Covers JSON path access and JSON scalar round trips, against the server.
 
 ## 2. Database Reflection (`test/integration/test_reflection_*.py`)
 
@@ -24,6 +27,9 @@ These integration tests ensure that the dialect can accurately inspect a live St
 - **`test_reflection_data_types.py`**: Verifies reflection of various data types.
 - **`test_reflection_view.py`**: Verifies reflection of views.
 - **`test_reflection_mv.py`**: Verifies reflection of materialized views.
+- **`test_reflection_indexes.py`**: Verifies reflection of BITMAP, NGRAMBF, GIN and VECTOR indexes.
+
+Other integration tests (`test/integration/`) cover binding and reading ARRAY, MAP and STRUCT values (`test_bind_processor.py`, `test_result_processor.py`), `create_all` and `drop_all` with views (`test_metadata_create_drop.py`), RANGE distribution (`test_range_distribution.py`), the run mode (`test_run_mode.py`), the wait for schema changes (`test_schema_change_wait.py`), column-change coalescing (`test_combine_column_alters*.py`), and transactions (`test_transactions.py`).
 
 ## 3. Alembic `autogenerate` Comparison (`test/integration/test_autogenerate_*.py`)
 
@@ -33,6 +39,9 @@ This suite of integration tests verifies that Alembic's `autogenerate` feature c
 - **`test_autogenerate_columns.py`**: Tests detection of changes for column properties (`type`, `nullable`, `default`, `comment`, `agg_type`).
 - **`test_autogenerate_views.py`**: Covers `CREATE`, `DROP`, and `ALTER` operations for Views.
 - **`test_autogenerate_mvs.py`**: Covers `CREATE`, `DROP`, and `ALTER` operations for Materialized Views.
+- **`test_autogenerate_constraints.py`**: Covers leaving unique and foreign key constraints out of the comparison.
+- **`test_autogenerate_defaults.py`**: Covers server defaults and the properties StarRocks fills in.
+- **`test_autogenerate_unexpressible_changes.py`**: Covers changes ALTER cannot make, which warn or recreate.
 
 ## 4. Unit Tests (`test/unit/`)
 
@@ -68,6 +77,10 @@ Tests the comparison logic that detects differences between database state and m
 - **`test_reflection_defaults.py`**: Tests default value reflection logic.
 - **`test_sql_normalization.py`**: Tests SQL normalization utilities.
 - **`test_view_schema.py`**: Tests view schema handling.
+- **`test_complex_value_decoding.py`** and **`test_structured_type.py`**: Test reading ARRAY, MAP and STRUCT values.
+- **`test_schema_change_blocking.py`**: Tests which statements wait for a running schema change.
+- **`test_reflection_mv_columns.py`**, **`test_reflection_mv_properties.py`** and **`test_reflection_mv_refresh.py`**: Test parsing a materialized view's DDL.
+- **`test_transaction_mode.py`**: Tests the isolation levels and how statements are classified for transactions.
 
 ## 5. End-to-End System Tests (`test/system/`)
 
@@ -147,7 +160,7 @@ The following features and scenarios are not yet fully covered by automated test
 
 ### 6.1 Materialized View Extended Features
 
-The basic MV lifecycle tests are currently skipped. The following MV features need comprehensive testing:
+The following MV features need more testing:
 
 - **Extended CREATE clauses**:
   - `PARTITION BY`
@@ -162,19 +175,12 @@ The basic MV lifecycle tests are currently skipped. The following MV features ne
 - **Reflection**: Extended MV properties (`partition`, `distribution`, `order by`, `refresh_type`, `status`).
 - **Autogenerate**: Detection of changes in all the properties listed above.
 
-### 6.2 Bitmap Index Lifecycle
-
-- `CREATE INDEX ... USING BITMAP` compilation and execution.
-- `DROP INDEX` compilation and execution.
-- Reflection of Bitmap indexes via `inspector.get_indexes()`.
-- `autogenerate` detection for the creation and deletion of Bitmap indexes.
-
-### 6.3 `AUTO_INCREMENT` Property
+### 6.2 `AUTO_INCREMENT` Property
 
 - Full reflection of the `AUTO_INCREMENT` property on columns. Current tests are marked as `xfail`.
 - `autogenerate` comparison to produce an `ALTER` operation for adding/removing `AUTO_INCREMENT` (currently only a warning is logged).
 
-### 6.4 Complex Mixed-Operation Scenarios
+### 6.3 Complex Mixed-Operation Scenarios
 
 While individual operations are well-tested, the following complex scenarios need coverage:
 
@@ -182,7 +188,7 @@ While individual operations are well-tested, the following complex scenarios nee
 - Cross-object dependencies in migrations (e.g., dropping a table that a view depends on).
 - Schema-qualified objects across multiple schemas in a single migration.
 
-### 6.5 Performance and Scale Testing
+### 6.4 Performance and Scale Testing
 
 - Large-scale migrations with many objects (e.g., 100+ tables).
 - Migration performance benchmarks.
