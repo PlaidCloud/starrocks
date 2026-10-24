@@ -264,11 +264,10 @@ class ResultProcessorWithDateTypesTest(fixtures.TestBase):
 
 
 class ArrayJsonResultProcessorTest(fixtures.TestBase):
-    """ARRAY<JSON> is returned as a raw string.
+    """ARRAY<JSON> is read as a list of decoded JSON values.
 
-    StarRocks serializes ARRAY<JSON> wire values using single-quoted element
-    strings (e.g. ['{"a":1}','{"b":2}']), which is not valid JSON.  Rather
-    than add a special-case parser, we leave the raw string value intact.
+    StarRocks writes the elements as single-quoted strings, as in ['{"a":1}','{"b":2}'], which is not JSON; the
+    dialect's parser reads them, and decodes each element as JSON.
     """
 
     __backend__ = True
