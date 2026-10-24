@@ -926,6 +926,28 @@ def parse_complex_value(text: Union[str, bytes]) -> Any:
     return _ComplexValueParser(text).parse()
 
 
+def _nests_binary_as_hex(version: Optional[Tuple[int, ...]]) -> bool:
+    """Whether the server writes a VARBINARY inside a collection as hex: from 4.0.10 and 4.1.1, and when unknown.
+
+    StarRocks PR 71346 brought hex to those releases; 3.5 and earlier write the bytes themselves.
+    """
+    if not version:
+        return True
+    version = tuple(version)
+    return (4, 0, 10) <= version < (4, 1) or version >= (4, 1, 1)
+
+
+def _nested_binary_reader(dialect: Dialect) -> Callable[[Any], bytes]:
+    """Read a VARBINARY element of a collection as the bytes it holds.
+
+    A server that writes the bytes themselves sends them inside the collection's text, which the driver has
+    decoded as UTF-8, so they are encoded back; bytes that are not UTF-8 make the driver fail before this.
+    """
+    if _nests_binary_as_hex(getattr(dialect, "server_version_info", None)):
+        return lambda value: value if isinstance(value, bytes) else bytes.fromhex(value)
+    return lambda value: value if isinstance(value, bytes) else value.encode("utf-8")
+
+
 def _element_converter(type_: Any, dialect: Dialect) -> Callable[[Any], Any]:
     type_ = StructuredType._check_subtype(type_)
     if isinstance(type_, StructuredType):
@@ -940,8 +962,7 @@ def _element_converter(type_: Any, dialect: Dialect) -> Callable[[Any], Any]:
     if isinstance(impl, sqltypes.Numeric):
         return (lambda value: Decimal(str(value))) if impl.asdecimal else float
     if isinstance(impl, sqltypes._Binary):
-        # Binary values nested in a complex value are rendered as hex.
-        return lambda value: value if isinstance(value, bytes) else bytes.fromhex(value)
+        return _nested_binary_reader(dialect)
     if isinstance(impl, sqltypes.String):
         return str
     processor = impl.result_processor(dialect, None)

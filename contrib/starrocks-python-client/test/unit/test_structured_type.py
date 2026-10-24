@@ -211,6 +211,22 @@ class ArrayResultProcessorTest(fixtures.TestBase):
         result = _process(datatype.ARRAY(datatype.DATETIME()), '["2024-01-15 10:30:00"]')
         assert result == [datetime(2024, 1, 15, 10, 30, 0)]
 
+    @testing.combinations(
+        ("unknown", None, '["616263"]'),
+        ("hex_4_1", (4, 1, 6), '["616263"]'),
+        ("hex_4_0", (4, 0, 10), '["616263"]'),
+        ("raw_4_1_0", (4, 1, 0), '["abc"]'),
+        ("raw_4_0_9", (4, 0, 9), '["abc"]'),
+        ("raw_3_5", (3, 5, 21), '["abc"]'),
+        id_="iaa",
+        argnames="version,text",
+    )
+    def test_nested_binary_is_read_as_the_server_writes_it(self, version, text):
+        dialect = StarRocksDialect()
+        dialect.server_version_info = version
+        processor = datatype.ARRAY(datatype.VARBINARY()).result_processor(dialect, None)
+        assert processor(text) == [b"abc"]
+
     def test_non_finite_doubles_are_read(self):
         """StarRocks writes a non-finite DOUBLE inside a collection as a bare inf, -inf or nan."""
         values = _process(datatype.ARRAY(datatype.DOUBLE()), "[inf,-inf,nan,1.5]")
