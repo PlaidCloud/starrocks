@@ -164,6 +164,20 @@ class InsertOverwriteAndLabelTest(fixtures.TablesTest):
             connection.execute(insert(target).with_dialect_options(**options), [{"id": 7}, {"id": 8}])
         eq_(connection.execute(select(target.c.id)).all(), [(1,)])
 
+    @testing.combinations(
+        ("commented_overwrite", "/* load */ INSERT OVERWRITE overwrite_target VALUES (:id)"),
+        ("overwrite_of_an_expression", "INSERT OVERWRITE overwrite_target VALUES (abs(:id))"),
+        ("label", "INSERT INTO overwrite_target WITH LABEL sqla_label_never_used VALUES (:id)"),
+        id_="ia",
+        argnames="statement",
+    )
+    def test_executemany_of_text_is_refused(self, connection, statement):
+        target = self.tables.overwrite_target
+        connection.execute(insert(target).values(id=1))
+        with expect_raises_message(exc.InvalidRequestError, "need the rows in one statement"):
+            connection.execute(text(statement), [{"id": 7}, {"id": 8}])
+        eq_(connection.execute(select(target.c.id)).all(), [(1,)])
+
     def test_overwrite_with_several_rows_in_one_statement(self, connection):
         target = self.tables.overwrite_target
         connection.execute(insert(target).values(id=1))

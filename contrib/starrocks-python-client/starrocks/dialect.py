@@ -1897,24 +1897,31 @@ class StarRocksDialect(MySQLDialect_pymysql):
         self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext]
     ) -> None:
         """Refuse what StarRocks would run other than as asked, then ready the transaction and the table."""
-        self._refuse_split_overwrite_or_label(context)
+        self._refuse_split_overwrite_or_label(statement, context)
         self._match_transaction_to(cursor, statement, context)
         self._wait_for_schema_change_blocking(cursor, statement, context)
 
-    def _refuse_split_overwrite_or_label(self, context: Optional[ExecutionContext]) -> None:
+    def _refuse_split_overwrite_or_label(self, statement: str, context: Optional[ExecutionContext]) -> None:
         """Refuse an ``INSERT OVERWRITE`` or ``INSERT ... WITH LABEL`` run with many parameter sets.
 
         The driver sends an executemany as one statement per row or per batch of rows. Each overwrite would replace
         the rows the statement before it wrote, and each statement after the first would reuse a label whose load
-        has already committed.
+        has already committed. An ``insert()`` says so in its dialect options, and text in its INSERT keywords.
         """
-        if context is None or not (context.executemany and context.isinsert):
+        if context is None or not context.executemany:
             return
-        options = context.compiled.statement.dialect_options[self.name]
-        if options["overwrite"] or options["label"] is not None:
+        if context.isinsert:
+            options = context.compiled.statement.dialect_options[self.name]
+            keeps_rows_together = bool(options["overwrite"]) or options["label"] is not None
+        else:
+            keyword = self._statement_keyword_token(statement)
+            keeps_rows_together = keyword is not None and bool(
+                self._INSERT_KEEPING_ROWS_TOGETHER.match(statement, keyword.start())
+            )
+        if keeps_rows_together:
             raise exc.InvalidRequestError(
-                "starrocks_overwrite and starrocks_label need the rows in one statement, but executemany sends "
-                "several; pass the rows to insert().values([...]) instead"
+                "INSERT OVERWRITE and INSERT ... WITH LABEL (starrocks_overwrite and starrocks_label) need the rows "
+                "in one statement, but executemany sends several; pass the rows to insert().values([...]) instead"
             )
 
     _ISOLATION_LEVELS: Final[Tuple[str, ...]] = ("AUTOCOMMIT", "READ COMMITTED")
@@ -1943,6 +1950,11 @@ class StarRocksDialect(MySQLDialect_pymysql):
     )
     _INSERT_INTO_FILES: Final[re.Pattern[str]] = re.compile(
         rf"INSERT\b{_GAP}*INTO\b{_GAP}*FILES{_GAP}*\(", re.IGNORECASE | re.DOTALL
+    )
+    _INSERT_KEEPING_ROWS_TOGETHER: Final[re.Pattern[str]] = re.compile(
+        rf"INSERT\b{_GAP}*(?:OVERWRITE\b|INTO\b{_GAP}*{_QUALIFIED_NAME}{_GAP}*"
+        rf"(?:(?:TEMPORARY{_GAP}+)?PARTITION{_GAP}*\([^)]*\){_GAP}*)?WITH{_GAP}+LABEL\b)",
+        re.IGNORECASE | re.DOTALL,
     )
     _KEYED_MODELS_WITHOUT_PRIMARY_KEY: Final[frozenset[str]] = frozenset({
         TableModel.DUP_KEYS, TableModel.DUP_KEYS2, TableModel.AGG_KEYS, TableModel.AGG_KEYS2,
