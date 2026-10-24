@@ -889,3 +889,35 @@ class ReflectionMaterializedViewsTest(fixtures.TestBase):
 
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+
+
+class EngineBoundInspectorMaterializedViewTest(fixtures.TestBase):
+    """An inspector bound to an Engine opens its own connection, as SQLAlchemy's own methods do."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @testing.requires.sqlalchemy_2
+    def test_materialized_view_through_engine_inspector(self):
+        mv_name = "engine_inspector_mv"
+        schema = config.db.url.database
+        with config.db.begin() as connection:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+            connection.execute(text("DROP TABLE IF EXISTS engine_inspector_base"))
+            connection.execute(text(
+                "CREATE TABLE engine_inspector_base (id INT) DISTRIBUTED BY HASH(id) "
+                'PROPERTIES ("replication_num" = "1")'
+            ))
+            connection.execute(text(
+                f"CREATE MATERIALIZED VIEW {mv_name} REFRESH MANUAL "
+                'PROPERTIES ("replication_num" = "1") AS SELECT id FROM engine_inspector_base'
+            ))
+        try:
+            inspector = inspect(config.db)
+
+            assert inspector.get_materialized_view(mv_name, schema=schema).name == mv_name
+            assert "SELECT" in inspector.get_materialized_view_definition(mv_name, schema=schema)
+        finally:
+            with config.db.begin() as connection:
+                connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+                connection.execute(text("DROP TABLE IF EXISTS engine_inspector_base"))

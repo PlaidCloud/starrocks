@@ -79,7 +79,8 @@ class StarRocksInspector(Inspector):
         :return: A ReflectedViewState object.
         :raises: NoSuchTableError if the view does not exist.
         """
-        return self.dialect.get_view(self.bind, view_name, schema=schema, **kwargs)
+        with self._operation_context() as conn:
+            return self.dialect.get_view(conn, view_name, schema=schema, **kwargs)
 
     def get_materialized_view(self, view_name: str, schema: Optional[str] = None, **kwargs: Any) -> Optional[ReflectedMVState]:
         """
@@ -90,7 +91,8 @@ class StarRocksInspector(Inspector):
         :param kwargs: Additional arguments passed to the dialect's get_materialized_view method.
         :return: A ReflectedMVState object, or None if the materialized view does not exist.
         """
-        return self.dialect.get_materialized_view(self.bind, view_name, schema=schema, **kwargs)
+        with self._operation_context() as conn:
+            return self.dialect.get_materialized_view(conn, view_name, schema=schema, **kwargs)
 
     def get_materialized_view_definition(self, view_name: str, schema: Optional[str] = None, **kwargs: Any) -> Optional[str]:
         """
@@ -127,7 +129,8 @@ class StarRocksInspector(Inspector):
         self._delete_comment_from_dialect_options(table)
 
         # 1. Get table_kind and parsed_state, which will use the cached parsed_state)
-        parsed_state = self.dialect._parsed_state_or_create(self.bind, table.name, table.schema, info_cache=self.info_cache)
+        with self._operation_context() as conn:
+            parsed_state = self.dialect._parsed_state_or_create(conn, table.name, table.schema, info_cache=self.info_cache)
         table_kind = parsed_state.table_kind
         logger.debug("reflect %s: %s, parsed_state: %s.", table_kind, table.name, parsed_state)
 
