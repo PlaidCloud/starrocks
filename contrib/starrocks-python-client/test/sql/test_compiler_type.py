@@ -126,6 +126,7 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         (STRUCT(("a b", INTEGER), ("Caps", VARCHAR(5))), "STRUCT<`a b` INTEGER, `Caps` VARCHAR(5)>"),
         (STRUCT(("1st", STRING)), "STRUCT<`1st` STRING>"),
         (STRUCT(("p%ct", INTEGER)), "STRUCT<`p%%ct` INTEGER>"),
+        (STRUCT(key=INTEGER, select=STRING, files=INTEGER), "STRUCT<`key` INTEGER, `select` STRING, `files` INTEGER>"),
         (
             STRUCT(id=INTEGER, name=VARCHAR(100), active=BOOLEAN),
             "STRUCT<id INTEGER, name VARCHAR(100), active BOOLEAN>",
