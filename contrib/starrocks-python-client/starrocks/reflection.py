@@ -299,7 +299,7 @@ class StarRocksTableDefinitionParser(object):
         Apply StarRocks-friendly default value rendering:
         1. DATETIME CURRENT_TIMESTAMP defaults are emitted verbatim.
         2. Function-looking defaults become `(func_expr)`.
-        3. Remaining literals are double quoted.
+        3. Remaining literals are single quoted SQL string literals.
         4. The NUL placeholder StarRocks reports for HLL, BITMAP and PERCENTILE columns is no default.
         """
         _SKETCH_COLUMN_TYPES = ("HLL", "BITMAP", "PERCENTILE")
@@ -323,7 +323,7 @@ class StarRocksTableDefinitionParser(object):
             if self._looks_like_function(default):
                 return self._wrap_function_default(default)
 
-            return f"{default!r}"
+            return utils.quote_sql_string_literal(default)
 
         @classmethod
         def _is_sketch_placeholder(cls, column: _DecodingRow, default: str) -> bool:

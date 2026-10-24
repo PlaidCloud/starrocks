@@ -244,6 +244,31 @@ class StarRocksImpl(MySQLImpl):
             if isinstance(collection, set):
                 collection.clear()
 
+    def compare_server_default(
+        self,
+        inspector_column: Column[Any],
+        metadata_column: Column[Any],
+        rendered_metadata_default: Optional[str],
+        rendered_inspector_default: Optional[str],
+    ) -> bool:
+        """
+        Compare column defaults, treating a default that only differs in how it is written as the same.
+
+        MySQL's comparison reads ``uuid()`` and the ``(uuid())`` that StarRocks reports as different defaults, and
+        compares function names case sensitively, so a default such as that diffed on every run. Defaults that
+        still differ fall through to MySQL's comparison.
+
+        Returns:
+            True if the defaults are different, False if they are the same.
+        """
+        if compare.server_defaults_match(
+            self.dialect, metadata_column, rendered_metadata_default, rendered_inspector_default
+        ):
+            return False
+        return super().compare_server_default(
+            inspector_column, metadata_column, rendered_metadata_default, rendered_inspector_default
+        )
+
     def compare_type(self, inspector_column: Column[Any], metadata_column: Column[Any]) -> bool:
         """
         Set StarRocks' specific type comparison logic for some special cases.

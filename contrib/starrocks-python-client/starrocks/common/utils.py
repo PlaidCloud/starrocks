@@ -428,3 +428,58 @@ def find_matching_parenthesis(text: str, start_index: int = 0) -> int:
 def gen_simple_qualified_name(table_name: str, schema: Optional[str] = None) -> str:
     """Generate a simple qualified name for a table."""
     return f"{schema}.{table_name}" if schema else table_name
+
+
+_SQL_STRING_LITERAL_BODY = re.compile(r"(?:[^'\\]|''|\\.)*", re.DOTALL)
+_SQL_STRING_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\x00", "b": "\b", "Z": "\x1a"}
+_FUNCTION_DEFAULT = re.compile(r"[A-Za-z_]\w*\s*\(.*\)", re.DOTALL)
+_KEYWORD_DEFAULT = re.compile(r"[A-Za-z_]\w*")
+
+
+def quote_sql_string_literal(value: str) -> str:
+    """
+    Render a string as the SQL literal StarRocks accepts: quotes doubled, backslashes and NUL escaped.
+
+    This is what SQLAlchemy emits for ``server_default="..."``, so a reflected default renders back to the DDL
+    that created it.
+    """
+    escaped = value.replace("\\", "\\\\").replace("'", "''").replace("\x00", "\\0")
+    return f"'{escaped}'"
+
+
+def unquote_sql_string_literal(text: str) -> Optional[str]:
+    """
+    Return the value of a single-quoted SQL string literal, or None if ``text`` is not one.
+    """
+    text = text.strip()
+    if len(text) < 2 or text[0] != "'" or text[-1] != "'" or not _SQL_STRING_LITERAL_BODY.fullmatch(text, 1, len(text) - 1):
+        return None
+    body = text[1:-1].replace("''", "'")
+    return re.sub(r"\\(.)", lambda m: _SQL_STRING_ESCAPES.get(m.group(1), m.group(1)), body, flags=re.DOTALL)
+
+
+def strip_wrapping_parentheses(text: str) -> str:
+    """
+    Remove the parentheses that wrap the whole expression, however many, as in ``((uuid()))``.
+    """
+    text = text.strip()
+    while text.startswith("(") and find_matching_parenthesis(text, 0) == len(text) - 1:
+        text = text[1:-1].strip()
+    return text
+
+
+def canonical_server_default(sql: str) -> Tuple[str, str]:
+    """
+    Reduce a column default, as SQL text, to a ``(kind, value)`` pair that is equal for equal defaults.
+
+    - ``("literal", value)`` for a quoted string literal, compared by its decoded value;
+    - ``("expression", text)`` for a function call or keyword such as ``uuid()`` or ``CURRENT_TIMESTAMP``, with
+      wrapping parentheses removed and the case and spacing normalised, as these are case insensitive;
+    - ``("literal", text)`` for anything else, such as a bare number.
+    """
+    unwrapped = strip_wrapping_parentheses(sql)
+    if (decoded := unquote_sql_string_literal(unwrapped)) is not None:
+        return "literal", decoded
+    if _FUNCTION_DEFAULT.fullmatch(unwrapped) or _KEYWORD_DEFAULT.fullmatch(unwrapped):
+        return "expression", re.sub(r"\s+", "", unwrapped).lower()
+    return "literal", unwrapped

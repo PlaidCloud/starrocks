@@ -24,9 +24,11 @@ from alembic.ddl import DefaultImpl
 from alembic.operations.ops import AlterColumnOp, AlterTableOp, UpgradeOps
 from alembic.util import to_list
 from sqlalchemy import Column
+from sqlalchemy.engine import Dialect
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.sql import quoted_name, schema as sa_schema, sqltypes
+from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.sql.schema import Table
 from sqlalchemy.util import OrderedSet
 
@@ -2378,3 +2380,34 @@ def compare_starrocks_column_autoincrement(
         )
     return None
 
+
+def server_defaults_match(
+    dialect: Dialect,
+    metadata_column: Column[Any],
+    rendered_metadata_default: Optional[str],
+    rendered_inspector_default: Optional[str],
+) -> bool:
+    """
+    Whether a column's default in the metadata is the default reflected from StarRocks.
+
+    Alembic renders a string column's default as a quoted literal even when it is an expression such as
+    ``text("uuid()")``, and StarRocks reports a function default wrapped in parentheses, ``(uuid())``. So the
+    metadata default is read from the column itself, and both sides are compared as canonical defaults: a
+    literal by its decoded value, a function or keyword case insensitively and without wrapping parentheses.
+    """
+    if not rendered_metadata_default or not rendered_inspector_default:
+        return False
+    metadata_sql = _metadata_default_sql(dialect, metadata_column, rendered_metadata_default)
+    return utils.canonical_server_default(metadata_sql) == utils.canonical_server_default(rendered_inspector_default)
+
+
+def _metadata_default_sql(dialect: Dialect, metadata_column: Column[Any], rendered_metadata_default: str) -> str:
+    """The SQL a metadata column's server default stands for: a str is a literal, an expression is its text."""
+    default = metadata_column.server_default
+    if not isinstance(default, sa_schema.DefaultClause):
+        return rendered_metadata_default
+    if isinstance(default.arg, str):
+        return utils.quote_sql_string_literal(default.arg)
+    if isinstance(default.arg, TextClause):
+        return default.arg.text
+    return str(default.arg.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))

@@ -16,11 +16,12 @@
 
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import Column, MetaData, Table, inspect, testing
+from sqlalchemy import Column, MetaData, Table, func, inspect, testing, text
 from sqlalchemy.testing import fixtures
 
 import starrocks.alembic  # noqa: F401
-from starrocks.datatype import BITMAP, HLL, INTEGER, PERCENTILE
+from starrocks.common.utils import unquote_sql_string_literal
+from starrocks.datatype import BITMAP, HLL, INTEGER, PERCENTILE, VARCHAR
 
 
 class _DefaultsTestBase(fixtures.TestBase):
@@ -62,3 +63,66 @@ class SketchColumnDefaultTest(_DefaultsTestBase):
         assert [c.name for c in reflected.columns if c.server_default is not None] == []
         assert inspect(connection).get_columns("sketch_defaults")[1]["default"] is None
         assert self._diff_ops(connection, metadata, "sketch_defaults") == []
+
+
+class ServerDefaultComparisonTest(_DefaultsTestBase):
+    """A default that is only written differently is not a change, and a different default still is."""
+
+    @staticmethod
+    def _table(metadata: MetaData, name: str, **column_defaults) -> Table:
+        return Table(
+            name,
+            metadata,
+            Column("id", INTEGER),
+            *[Column(column, VARCHAR(40), server_default=default) for column, default in column_defaults.items()],
+            starrocks_duplicate_key="id",
+            starrocks_distributed_by="HASH(id) BUCKETS 1",
+            starrocks_properties={"replication_num": "1"},
+        )
+
+    @testing.combinations(
+        ("bare_function", text("uuid()")),
+        ("upper_case_function", text("UUID()")),
+        ("wrapped_function", text("(uuid())")),
+        ("function_element", func.uuid()),
+        argnames="metadata_default",
+        id_="ia",
+    )
+    @testing.requires.sqlalchemy_2
+    def test_uuid_default_converges(self, connection, metadata, metadata_default):
+        self._table(metadata, "default_uuid", token=text("(uuid())"))
+        metadata.create_all(connection)
+        model = MetaData()
+        self._table(model, "default_uuid", token=metadata_default)
+
+        assert self._diff_ops(connection, model, "default_uuid") == []
+
+    @testing.combinations(
+        ("plain", "a-b"),
+        ("single_quote", "it's"),
+        ("backslash", "x\\y"),
+        ("double_quote", 'say "hi"'),
+        ("number_like", "5"),
+        argnames="value",
+        id_="ia",
+    )
+    @testing.requires.sqlalchemy_2
+    def test_literal_default_round_trips(self, connection, metadata, value):
+        self._table(metadata, "default_literal", label=value)
+        metadata.create_all(connection)
+
+        reflected = Table("default_literal", MetaData(), autoload_with=connection)
+
+        assert unquote_sql_string_literal(reflected.c.label.server_default.arg.text) == value
+        assert self._diff_ops(connection, metadata, "default_literal") == []
+
+    @testing.requires.sqlalchemy_2
+    def test_changed_literal_default_is_still_a_difference(self, connection, metadata):
+        self._table(metadata, "default_changed", label="before")
+        metadata.create_all(connection)
+        model = MetaData()
+        self._table(model, "default_changed", label="after")
+
+        ops = self._diff_ops(connection, model, "default_changed")
+
+        assert [op[0] for op in ops[0]] == ["modify_default"]

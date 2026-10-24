@@ -69,7 +69,7 @@ class ColumnDefaultValueRendererTest(fixtures.TestBase):
         ("hll", "hll", "\x00", None),
         ("bitmap", "bitmap", "\x00", None),
         ("percentile", "percentile", "\x00", None),
-        ("varchar_keeps_nul", "varchar(10)", "\x00", "'\\x00'"),
+        ("varchar_keeps_nul", "varchar(10)", "\x00", "'\\0'"),
         ("no_default", "int", None, None),
         ("null_default", "int", "NULL", None),
         ("function", "varchar(36)", "uuid()", "(uuid())"),
