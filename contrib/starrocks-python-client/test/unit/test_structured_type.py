@@ -487,6 +487,27 @@ class _Cents(TypeDecorator):
         return round(value * 100)
 
 
+class _Wrapped(TypeDecorator):
+    """A JSON decorator that stores a value inside an object, and reads it back out."""
+
+    impl = datatype.JSON()
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return {"v": value}
+
+    def process_result_value(self, value, dialect):
+        return value["v"]
+
+
+class _NoneToEmpty(TypeDecorator):
+    impl = datatype.VARCHAR(10)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return "" if value is None else value
+
+
 class _Color(enum.Enum):
     RED = 1
     GREEN = 2
@@ -509,11 +530,21 @@ class StructuredLeafBindProcessingTest(fixtures.TestBase):
         ("type_decorator", datatype.ARRAY(_Reversed()), ["abc"], ["cba"]),
         ("type_decorator_number", datatype.STRUCT(m=_Cents()), {"m": 5.5}, ["550"]),
         ("enum", datatype.ARRAY(Enum(_Color)), [_Color.GREEN], ["GREEN"]),
+        ("json_decorator", datatype.ARRAY(_Wrapped()), [{"a": 1}, None], [{"v": {"a": 1}}, {"v": None}]),
+        ("json_decorator_in_map", datatype.MAP(datatype.VARCHAR(5), _Wrapped()), {"k": 1}, [["k"], [{"v": 1}]]),
+        ("none_through_decorator", datatype.ARRAY(_NoneToEmpty()), [None, "x"], ["", "x"]),
+        ("none_through_struct_decorator", datatype.STRUCT(s=_NoneToEmpty()), {"s": None}, [""]),
         id_="iaaa",
         argnames="type_obj,value,encoded",
     )
     def test_encoded(self, type_obj, value, encoded):
         assert json.loads(_bind(type_obj, value)) == encoded
+
+    def test_a_json_element_uses_the_engine_json_serializer(self):
+        """A plain JSON column serialises with the engine's ``json_serializer``; so does a JSON element."""
+        dialect = StarRocksDialect(json_serializer=lambda value: json.dumps(value, default=str))
+        process = datatype.ARRAY(datatype.JSON()).bind_processor(dialect)
+        assert json.loads(process([{"day": date(2024, 1, 2)}])) == [{"day": "2024-01-02"}]
 
     def test_a_fraction_in_an_integer_element_is_refused(self):
         with testing.expect_raises_message(ValueError, "cannot store 1.7 in an integer element exactly"):

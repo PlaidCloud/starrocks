@@ -27,8 +27,8 @@ Each class inserts its rows once, through ``insert_data``, and its tests read th
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Column, Integer, Table, select, testing
-from sqlalchemy.testing import fixtures
+from sqlalchemy import Column, Integer, Table, TypeDecorator, select, testing, type_coerce
+from sqlalchemy.testing import eq_, fixtures
 
 from starrocks.datatype import (
     ARRAY,
@@ -304,3 +304,58 @@ class ComplexValueRoundTripTest(fixtures.TestBase):
         connection.exec_driver_sql(str(statement.compile(connection, compile_kwargs={"literal_binds": True})))
 
         assert connection.execute(select(table.c.v)).scalar_one() == value
+
+
+class _Wrapped(TypeDecorator):
+    """A JSON decorator that stores a value inside an object, and reads it back out."""
+
+    impl = JSON()
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return {"v": value}
+
+    def process_result_value(self, value, dialect):
+        return value["v"]
+
+
+class _NoneToEmpty(TypeDecorator):
+    impl = VARCHAR(10)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return "" if value is None else value
+
+
+class TypeDecoratorElementTest(fixtures.TestBase):
+    """An element of a decorated type is written and read through the decorator, as a plain column is.
+
+    Each value is read back twice: through the decorated type, and through the same type without the decorator,
+    which shows what was stored.
+    """
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @testing.combinations(
+        ("array", ARRAY(_Wrapped()), ARRAY(JSON()), [{"a": 1}, [2]], [{"v": {"a": 1}}, {"v": [2]}], None),
+        ("struct", STRUCT(w=_Wrapped()), STRUCT(w=JSON()), {"w": {"a": 1}}, {"w": {"v": {"a": 1}}}, None),
+        ("map", MAP(VARCHAR(5), _Wrapped()), MAP(VARCHAR(5), JSON()), {"k": "x"}, {"k": {"v": "x"}}, None),
+        ("none_to_empty", ARRAY(_NoneToEmpty()), ARRAY(VARCHAR(10)), [None, "x"], ["", "x"], ["", "x"]),
+        argnames="type_,plain_type,value,stored,read",
+        id_="iaaaaa",
+    )
+    def test_value_round_trips_through_the_decorator(self, connection, metadata, type_, plain_type, value, stored, read):
+        table = Table(
+            "test_bind_decorated_element",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("v", type_),
+            starrocks_distributed_by="HASH(id) BUCKETS 1",
+            starrocks_properties={"replication_num": "1"},
+        )
+        table.create(connection)
+        connection.execute(table.insert().values(id=1, v=value))
+
+        eq_(connection.scalar(select(type_coerce(table.c.v, plain_type))), stored)
+        eq_(connection.scalar(select(table.c.v)), value if read is None else read)

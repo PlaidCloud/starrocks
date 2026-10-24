@@ -546,8 +546,6 @@ def _encode_datetime(value: Any) -> str:
 
 
 def _encode_structured_leaf(kind: str, value: Any, integral: bool = False) -> Any:
-    if kind == "json":
-        return value
     if kind == "boolean":
         return "true" if value else "false"
     if kind == "number":
@@ -629,19 +627,33 @@ def structured_value_encoder(type_: sqltypes.TypeEngine, dialect: Dialect) -> Ca
 
 
 def _structured_leaf_encoder(type_: sqltypes.TypeEngine, dialect: Dialect) -> Callable[[Any], Any]:
+    """Build the encoder of a non-structured element, which applies its type's bind processing first.
+
+    That processing is what a plain column's value gets, ``None`` included, so a TypeDecorator's
+    ``process_bind_param`` sees every element. A JSON element is then nested as the document that processing
+    serialises, which applies the engine's ``json_serializer`` too.
+    """
     kind = _structured_leaf_kind(type_, dialect)
+    process = type_.dialect_impl(dialect).bind_processor(dialect) or _unprocessed
     if kind == "json":
-        return lambda value: value
-    process = type_.dialect_impl(dialect).bind_processor(dialect)
+        return lambda value: _nested_json_document(process(value))
     integral = kind == "number" and isinstance(_structured_leaf_impl(type_, dialect), sqltypes.Integer)
 
     def encode_leaf(value: Any) -> Any:
-        if value is not None and process is not None:
-            value = process(value)
+        value = process(value)
         _refuse_collection_in_scalar_element(type_, value)
         return None if value is None else _encode_structured_leaf(kind, value, integral)
 
     return encode_leaf
+
+
+def _unprocessed(value: Any) -> Any:
+    return value
+
+
+def _nested_json_document(serialized: Optional[Union[str, bytes]]) -> Any:
+    """Parse a JSON element's serialised document back, to nest it in the collection's document."""
+    return None if serialized is None else json.loads(serialized)
 
 
 def _refuse_collection_in_scalar_element(type_: sqltypes.TypeEngine, value: Any) -> None:
