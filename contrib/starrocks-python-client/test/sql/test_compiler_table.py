@@ -35,7 +35,7 @@ from sqlalchemy import (
     func,
     testing,
 )
-from sqlalchemy.schema import CreateIndex, CreateTable
+from sqlalchemy.schema import CreateIndex, CreateTable, DropIndex
 from sqlalchemy.testing import expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
@@ -530,12 +530,20 @@ class CreateIndexCompileTest(fixtures.TestBase, AssertsCompiledSQL):
                 dialect=self.__dialect__
             )
 
-    def test_several_columns(self):
+    def test_several_columns_are_refused(self):
+        """StarRocks answers "index can only apply to a single column"."""
         table = self._table()
-        self.assert_compile(
-            CreateIndex(Index("ix_city_tags", table.c.city, table.c.tags)),
-            "CREATE INDEX ix_city_tags ON events (city, tags)",
-        )
+        with expect_raises_message(exc.CompileError, "covers one column"):
+            CreateIndex(Index("ix_city_tags", table.c.city, table.c.tags)).compile(dialect=self.__dialect__)
+
+    def test_drop_index(self):
+        table = self._table()
+        self.assert_compile(DropIndex(Index("ix_city", table.c.city)), "DROP INDEX ix_city ON events")
+
+    def test_drop_index_if_exists_is_refused(self):
+        table = self._table()
+        with expect_raises_message(exc.CompileError, "no DROP INDEX IF EXISTS"):
+            DropIndex(Index("ix_city", table.c.city), if_exists=True).compile(dialect=self.__dialect__)
 
     def test_unknown_index_type_raises(self):
         table = self._table()

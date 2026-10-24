@@ -662,9 +662,9 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         ``starrocks_using`` names the type, ``starrocks_properties`` its properties (for example NGRAMBF's
         ``gram_num``) and ``starrocks_comment`` the comment.
 
-        StarRocks indexes are BITMAP, GIN, NGRAMBF or VECTOR indexes on plain columns. It has no unique or
-        expression indexes and no ``IF NOT EXISTS``, so those raise here rather than at the server, and the
-        index type is a keyword, never a quoted identifier.
+        StarRocks indexes are BITMAP, GIN, NGRAMBF or VECTOR indexes on one plain column. It has no unique,
+        multi-column or expression indexes and no ``IF NOT EXISTS``, so those raise here rather than at the
+        server, and the index type is a keyword, never a quoted identifier.
         """
         index = create.element
         self._verify_index_table(index)
@@ -674,6 +674,8 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             )
         if create.if_not_exists:
             raise exc.CompileError(f"StarRocks has no CREATE INDEX IF NOT EXISTS (index {index.name!r})")
+        if len(index.expressions) != 1:
+            raise exc.CompileError(f"A StarRocks index covers one column; index {index.name!r} lists several")
         columns = ", ".join(self._indexed_column_name(index, expression) for expression in index.expressions)
         text = "CREATE INDEX %s ON %s (%s)" % (
             self._prepared_index_name(index),
@@ -688,6 +690,12 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         if options["comment"] is not None:
             text += " COMMENT " + self.sql_compiler.render_literal_value(options["comment"], sqltypes.String())
         return text
+
+    def visit_drop_index(self, drop: sa_schema.DropIndex, **kw: Any) -> str:  # type: ignore[override]
+        """Compile ``DROP INDEX name ON table``; StarRocks has no ``IF EXISTS`` for it, so that raises here."""
+        if getattr(drop, "if_exists", False):
+            raise exc.CompileError(f"StarRocks has no DROP INDEX IF EXISTS (index {drop.element.name!r})")
+        return super().visit_drop_index(drop, **kw)
 
     def _index_property_list(self, index: sa_schema.Index, index_type: Optional[str], properties: Dict[str, Any]) -> str:
         """Render ``("key" = "value", ...)``, which StarRocks accepts only after an index type such as NGRAMBF."""
