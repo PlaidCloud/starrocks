@@ -17,6 +17,8 @@
 Tests are re-bound to the upstream function wrapped in an exclusion, so upstream combinations are kept.
 """
 
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from alembic.testing import suite as alembic_suite
 from alembic.testing.suite import *  # noqa: F403
 from alembic.testing.suite import (
@@ -28,9 +30,6 @@ from sqlalchemy import testing
 from sqlalchemy.testing.fixtures import TestBase
 
 
-MODIFY_KEY_COLUMN_WITHOUT_KEY = testing.fails_on(
-    "starrocks", "the dialect leaves KEY out of MODIFY COLUMN for a key column, so StarRocks finds no key column left"
-)
 FLOAT_FIRST_COLUMN = testing.skip("starrocks", "StarRocks cannot use FLOAT as a table's first (key) column")
 DEFAULT_CANNOT_CHANGE = testing.skip("starrocks", "StarRocks cannot change a column's default value")
 UNQUOTED_DEFAULT = testing.skip(
@@ -78,13 +77,19 @@ class AutoincrementTest(_AutoincrementTest):
 
 
 class BackendAlterColumnTest(_BackendAlterColumnTest):
+    def setUp(self):
+        """Wait for each schema change to end before the test reads the table back.
+
+        StarRocks runs a column change as an asynchronous job, so without the wait the test can reflect the
+        table as it was.
+        """
+        super().setUp()
+        self.ctx = MigrationContext.configure(self.conn, opts={"starrocks_wait_for_schema_change": True})
+        self.op = Operations(self.ctx)
+
     test_add_server_default_int = DEFAULT_CANNOT_CHANGE(_BackendAlterColumnTest.test_add_server_default_int)
     test_modify_server_default_int = UNQUOTED_DEFAULT(_BackendAlterColumnTest.test_modify_server_default_int)
-    test_modify_non_nullable_to_nullable = MODIFY_KEY_COLUMN_WITHOUT_KEY(
-        _BackendAlterColumnTest.test_modify_non_nullable_to_nullable
-    )
     test_modify_nullable_to_non = NULLABLE_TO_NOT_NULL(_BackendAlterColumnTest.test_modify_nullable_to_non)
-    test_modify_type_int_str = MODIFY_KEY_COLUMN_WITHOUT_KEY(_BackendAlterColumnTest.test_modify_type_int_str)
 
 
 def _require_sqlalchemy_2(namespace: dict[str, object]) -> None:

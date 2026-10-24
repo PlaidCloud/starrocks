@@ -1138,6 +1138,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             type_: sqltypes.TypeEngine,
             autoincrement: Optional[bool],
             comment: Optional[Any],
+            key_or_aggregate: Optional[str] = None,
              **kw: Any) -> str:
         """Builds ALTER COLUMN DDL for StarRocks, handling StarRocks-specific features.
 
@@ -1156,8 +1157,9 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         Args:
             column: The `sqlalchemy.schema.Column` object to process.
+            key_or_aggregate: ``KEY`` for a key column, or a value column's aggregate type, which StarRocks wants
+                after the type of a MODIFY COLUMN. The Alembic impl reads it from the database.
             **kw: Additional keyword arguments from the compiler.
-                - aggregate info should be stored here. But, it's not passed now.
 
         Returns:
             The DDL string for the alter column definition, without name.
@@ -1168,11 +1170,8 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         if type_:
             type_: str = self.dialect.type_compiler.process(type_)
             colspec.append(type_)
-
-            # Get and set column-level aggregate information for aggregate key tables.
-            # TODO: But currently it's not supported. we need to implement it.
-            # if agg_info := self._get_column_agg_info(column):
-            #     colspec.append(agg_info)
+            if key_or_aggregate:
+                colspec.append(key_or_aggregate)
 
         # NULL or NOT NULL.
         if nullable is not None:
@@ -2977,6 +2976,7 @@ TODO: Then, we can add more StarRocks specific attributes, such as KEY/agg_type.
 
 @compiles(MySQLModifyColumn, DialectName)
 def _starrocks_modify_column(element: MySQLModifyColumn, compiler: StarRocksDDLCompiler, **kw: Any) -> str:
+    """Compile MODIFY COLUMN, with the ``KEY`` or aggregate type the Alembic impl found for the column, if any."""
     return "%s MODIFY COLUMN %s %s" % (
         alter_table(compiler, element.table_name, element.schema),
         format_column_name(compiler, element.column_name),
@@ -2987,8 +2987,13 @@ def _starrocks_modify_column(element: MySQLModifyColumn, compiler: StarRocksDDLC
             type_=element.type_,
             autoincrement=element.autoincrement,
             comment=element.comment,
+            key_or_aggregate=getattr(element, KEY_OR_AGGREGATE_ATTRIBUTE, None),
         ),
     )
+
+
+KEY_OR_AGGREGATE_ATTRIBUTE: Final[str] = "starrocks_key_or_aggregate"
+"""The attribute of a MODIFY or CHANGE COLUMN element that holds the column's ``KEY`` or aggregate type."""
 
 
 @compiles(MySQLChangeColumn, DialectName)
@@ -3014,6 +3019,7 @@ def _starrocks_change_column(element: MySQLChangeColumn, compiler: StarRocksDDLC
             type_=element.type_,
             autoincrement=element.autoincrement,
             comment=element.comment,
+            key_or_aggregate=getattr(element, KEY_OR_AGGREGATE_ATTRIBUTE, None),
         ),
     ) if (element.nullable is not None
             or element.type_ is not None

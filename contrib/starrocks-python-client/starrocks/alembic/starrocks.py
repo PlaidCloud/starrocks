@@ -18,16 +18,18 @@ import time
 from typing import Any, Collection, Mapping, Optional, Sequence, Tuple, Union
 
 from alembic.ddl import base as alembic_base
-from alembic.ddl.mysql import MySQLImpl
+from alembic.ddl.mysql import MySQLChangeColumn, MySQLImpl, MySQLModifyColumn
 from sqlalchemy import Column, ForeignKeyConstraint, Index, MetaData, Table, UniqueConstraint, text, util
+from sqlalchemy.engine import Connection
 from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.sql import Executable
 from sqlalchemy.sql.elements import TextClause
 
 from starrocks import datatype
 from starrocks.alembic import compare
+from starrocks.common.types import TableModel
 from starrocks.datatype import BIGINT, VARCHAR
-from starrocks.dialect import StarRocksDialect, column_default_change_error
+from starrocks.dialect import KEY_OR_AGGREGATE_ATTRIBUTE, StarRocksDialect, column_default_change_error
 from starrocks.sql.ddl import AlterTableColumns, AlterTableDistribution, AlterTableOrder, AlterTableProperties
 
 
@@ -122,6 +124,8 @@ class StarRocksImpl(MySQLImpl):
         starts no job, and an old cancelled job of the table or of a dropped table of the same name,
         are not mistaken for it.
         """
+        if isinstance(construct, (MySQLModifyColumn, MySQLChangeColumn)):
+            self._mark_key_or_aggregate(construct)
         target = self._schema_change_target(construct)
         waiting = target is not None and self._should_wait_for_schema_change()
         alter_type = self._schema_change_job_kind(construct)
@@ -138,6 +142,46 @@ class StarRocksImpl(MySQLImpl):
             self._wait_for_schema_change(*target, alter_type=alter_type, after_job_id=previous_job_id)
 
         return result
+
+    _KEY_COLUMN_KINDS = frozenset({"DUP", "UNI", "AGG"})
+    _AGGREGATE_MODELS = frozenset({TableModel.AGG_KEYS, TableModel.AGG_KEYS2})
+
+    def _mark_key_or_aggregate(self, construct: Union[MySQLModifyColumn, MySQLChangeColumn]) -> None:
+        """Give a column change the ``KEY`` or aggregate type that StarRocks wants repeated in MODIFY COLUMN.
+
+        Without ``KEY``, StarRocks takes a modified key column of a DUPLICATE or UNIQUE KEY table for a value
+        column and fails with "No key column left"; without its aggregate type, a value column of an AGGREGATE KEY
+        table fails with "Can not change aggregation type". Neither shows in the migration, so it is read from
+        the database. Offline (``--sql``), or on anything but a live connection, there is no database to read, and
+        the statement stays as it is.
+        """
+        if self.as_sql or not isinstance(self.connection, Connection) or construct.type_ is None:
+            return
+        schema_condition = "TABLE_SCHEMA = :schema" if construct.schema else "TABLE_SCHEMA = DATABASE()"
+        names = {"table": construct.table_name, "column": construct.column_name, "schema": construct.schema}
+        column_key = self._scalar(
+            f"SELECT COLUMN_KEY FROM information_schema.columns WHERE {schema_condition} "
+            "AND TABLE_NAME = :table AND COLUMN_NAME = :column",
+            names,
+        )
+        if column_key in self._KEY_COLUMN_KINDS:
+            setattr(construct, KEY_OR_AGGREGATE_ATTRIBUTE, "KEY")
+            return
+        table_model = self._scalar(
+            f"SELECT TABLE_MODEL FROM information_schema.tables_config WHERE {schema_condition} AND TABLE_NAME = :table",
+            names,
+        )
+        if table_model in self._AGGREGATE_MODELS:
+            full_name = ".".join(
+                self.dialect.identifier_preparer.quote(name) for name in (construct.schema, construct.table_name) if name
+            )
+            for row in self.connection.exec_driver_sql(f"SHOW FULL COLUMNS FROM {full_name}").mappings():
+                if row["Field"] == construct.column_name and row["Extra"]:
+                    setattr(construct, KEY_OR_AGGREGATE_ATTRIBUTE, row["Extra"].upper())
+
+    def _scalar(self, query: str, parameters: Mapping[str, Any]) -> Any:
+        """Return the first value of the first row a query returns, or None."""
+        return self.connection.execute(text(query), parameters).scalar()
 
     def _should_wait_for_schema_change(self) -> bool:
         """Whether to block on column schema changes (opt-in, online mode only)."""
