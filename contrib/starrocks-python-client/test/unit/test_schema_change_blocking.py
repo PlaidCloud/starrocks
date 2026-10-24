@@ -32,15 +32,26 @@ class TableAlteredByTest(fixtures.TestBase):
         return Table("events", MetaData(), Column("id", INTEGER), Column("city", INTEGER), schema="analytics")
 
     @staticmethod
-    def _altered(ddl, statement=None):
+    def _altered(ddl, statement=None, schema_translate_map=None):
         dialect = StarRocksDialect()
         statement = statement if statement is not None else str(ddl.compile(dialect=dialect))
-        return StarRocksDialect._table_altered_by(statement, SimpleNamespace(isddl=True, compiled=SimpleNamespace(statement=ddl)))
+        context = SimpleNamespace(
+            isddl=True,
+            compiled=SimpleNamespace(statement=ddl),
+            execution_options={"schema_translate_map": schema_translate_map} if schema_translate_map else {},
+        )
+        return StarRocksDialect._table_altered_by(statement, context)
 
     def test_create_and_drop_index_wait(self):
         index = Index("ix_city", self._table().c.city)
         assert self._altered(CreateIndex(index)) == ("events", "analytics")
         assert self._altered(DropIndex(index)) == ("events", "analytics")
+
+    def test_the_schema_translate_map_names_the_schema_waited_on(self):
+        index = Index("ix_city", self._table().c.city)
+        assert self._altered(CreateIndex(index), schema_translate_map={"analytics": "staging"}) == ("events", "staging")
+        add = alembic_base.AddColumn("events", Column("note", INTEGER))
+        assert self._altered(add, "ALTER TABLE events ADD COLUMN note INTEGER", {None: "staging"}) == ("events", "staging")
 
     def test_alembic_alter_table_waits(self):
         add = alembic_base.AddColumn("events", Column("note", INTEGER), schema="analytics")

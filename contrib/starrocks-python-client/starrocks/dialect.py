@@ -2122,17 +2122,24 @@ class StarRocksDialect(MySQLDialect_pymysql):
     ) -> Optional[Tuple[str, Optional[str]]]:
         """Return the (name, schema) of the table a DELETE deletes from, or None for other statements.
 
-        A ``delete()`` construct names its table; text is read past comments and optimizer hints, and a
-        catalog-qualified ``catalog.database.table`` gives the database as the schema.
+        A ``delete()`` construct names its table, in the schema the ``schema_translate_map`` gives it; text is read
+        past comments and optimizer hints, and a catalog-qualified ``catalog.database.table`` gives the database as
+        the schema.
         """
         if context is not None and context.isdelete:
             table = context.compiled.statement.table
-            return table.name, getattr(table, "schema", None)
+            return table.name, cls._schema_as_executed(getattr(table, "schema", None), context)
         target = cls._DELETE_TARGET.match(statement, cls._LEADING_COMMENTS.match(statement).end())
         if target is None:
             return None
         names = [cls._unquote_identifier(name) for name in target.groups() if name]
         return names[-1], names[-2] if len(names) > 1 else None
+
+    @staticmethod
+    def _schema_as_executed(schema: Optional[str], context: ExecutionContext) -> Optional[str]:
+        """Return the schema a construct's table has in the executed statement, after the ``schema_translate_map``."""
+        schema_translate_map = context.execution_options.get("schema_translate_map")
+        return schema_translate_map.get(schema, schema) if schema_translate_map else schema
 
     @staticmethod
     def _unquote_identifier(name: str) -> str:
@@ -2158,9 +2165,9 @@ class StarRocksDialect(MySQLDialect_pymysql):
         if altered is not None:
             self.wait_while_schema_change_runs(cursor, *altered)
 
-    @staticmethod
+    @classmethod
     def _table_altered_by(
-        statement: str, context: Optional[ExecutionContext]
+        cls, statement: str, context: Optional[ExecutionContext]
     ) -> Optional[Tuple[str, Optional[str]]]:
         """Return the (name, schema) of the existing table a compiled DDL statement changes, if it changes one."""
         if context is None or not context.isddl:
@@ -2168,14 +2175,14 @@ class StarRocksDialect(MySQLDialect_pymysql):
         ddl = context.compiled.statement
         if isinstance(ddl, (sa_schema.CreateIndex, sa_schema.DropIndex)):
             table = ddl.element.table
-            return (table.name, table.schema) if table is not None else None
+            return (table.name, cls._schema_as_executed(table.schema, context)) if table is not None else None
         if statement.lstrip()[:11].upper() != "ALTER TABLE":
             return None
         if isinstance(getattr(ddl, "table_name", None), str):
-            return ddl.table_name, getattr(ddl, "schema", None)
+            return ddl.table_name, cls._schema_as_executed(getattr(ddl, "schema", None), context)
         element = getattr(ddl, "element", None)
         if isinstance(element, Table):
-            return element.name, element.schema
+            return element.name, cls._schema_as_executed(element.schema, context)
         return None
 
     def wait_while_schema_change_runs(self, cursor: "DBAPICursor", table_name: str, schema: Optional[str]) -> None:

@@ -44,6 +44,14 @@ class TransactionTest(fixtures.TablesTest):
     def define_tables(cls, metadata):
         Table("txn_keyed", metadata, Column("id", INTEGER, primary_key=True, autoincrement=False), Column("v", INTEGER))
         Table("txn_logged", metadata, Column("id", INTEGER), Column("v", INTEGER), starrocks_duplicate_key="id")
+        Table(
+            "txn_translated",
+            metadata,
+            Column("id", INTEGER),
+            Column("v", INTEGER),
+            starrocks_duplicate_key="id",
+            schema=config.test_schema,
+        )
 
     @staticmethod
     def _read_committed_engine():
@@ -167,6 +175,18 @@ class TransactionTest(fixtures.TablesTest):
                 else:
                     conn.exec_driver_sql(f"DELETE FROM default_catalog.`{database}`.txn_logged WHERE id = 2")
         eq_(self._ids("txn_logged"), [1, 2])
+
+    @TRANSACTIONS_NEED_3_5
+    def test_a_delete_through_a_schema_translate_map_is_refused(self):
+        with config.db.begin() as conn:
+            conn.execute(insert(self.tables[f"{config.test_schema}.txn_translated"]), {"id": 1, "v": 1})
+        untranslated = Table("txn_translated", MetaData(), Column("id", INTEGER), Column("v", INTEGER))
+        engine = self._read_committed_engine().execution_options(schema_translate_map={None: config.test_schema})
+        with expect_raises_message(exc.InvalidRequestError, "at once, outside the transaction"):
+            with engine.begin() as conn:
+                conn.execute(delete(untranslated).where(untranslated.c.id == 1))
+        with config.db.connect() as conn:
+            eq_(conn.execute(select(self.tables[f"{config.test_schema}.txn_translated"].c.id)).scalars().all(), [1])
 
     def test_delete_on_a_duplicate_key_table_under_autocommit_runs(self):
         self._insert_logged_rows()

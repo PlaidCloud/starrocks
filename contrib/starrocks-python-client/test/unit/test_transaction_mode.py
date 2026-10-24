@@ -16,11 +16,12 @@
 
 from types import SimpleNamespace
 
-from sqlalchemy import exc, testing
+from sqlalchemy import Column, MetaData, Table, delete, exc, testing
 from sqlalchemy.engine import make_url
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.assertions import eq_, expect_raises_message
 
+from starrocks import INTEGER
 from starrocks.dialect import StarRocksDialect
 
 
@@ -153,3 +154,20 @@ class DeleteTargetTest(fixtures.TestBase):
     )
     def test_target(self, statement, target):
         eq_(StarRocksDialect._delete_target(statement), target)
+
+    @testing.combinations(
+        ("untranslated", None, {}, ("t", None)),
+        ("default_schema", None, {None: "other"}, ("t", "other")),
+        ("named_schema", "s", {"s": "other"}, ("t", "other")),
+        ("unmapped_schema", "s", {None: "other"}, ("t", "s")),
+        id_="iaaa",
+        argnames="schema,schema_translate_map,target",
+    )
+    def test_a_construct_target_is_in_the_translated_schema(self, schema, schema_translate_map, target):
+        table = Table("t", MetaData(), Column("id", INTEGER), schema=schema)
+        context = SimpleNamespace(
+            isdelete=True,
+            compiled=SimpleNamespace(statement=delete(table)),
+            execution_options={"schema_translate_map": schema_translate_map} if schema_translate_map else {},
+        )
+        eq_(StarRocksDialect._delete_target("DELETE FROM t", context), target)
