@@ -211,6 +211,9 @@ class StarRocksImpl(MySQLImpl):
         Dropping a column drops its index too, so a migration that drops an indexed column and then its index
         would otherwise fail on the second statement. Once the column's job has ended, a ``drop_index`` that
         finds its index gone does nothing.
+
+        StarRocks has no DROP INDEX IF EXISTS, so ``if_exists=True`` is met by that check, and the statement goes
+        without it. Offline (``--sql``) nothing can be checked, and the compiler refuses ``if_exists``.
         """
         table = index.table
         if self.connection is not None and not self.as_sql:
@@ -222,6 +225,7 @@ class StarRocksImpl(MySQLImpl):
             if not self._index_exists(index.name, table.name, table.schema):
                 logger.info("Index %r of table %r was already dropped with its column.", index.name, table.name)
                 return
+            kw.pop("if_exists", None)
         super().drop_index(index, **kw)
 
     def _index_exists(self, index_name: str, table_name: str, schema: Optional[str]) -> bool:

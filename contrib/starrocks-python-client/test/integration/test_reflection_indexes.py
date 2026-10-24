@@ -147,6 +147,13 @@ class SecondaryIndexReflectionTest(fixtures.TestBase):
         operations.drop_index("old_idx", table_name=INDEXED_TABLE)
         assert self._state(connection) == (["id", "keep"], [])
 
+    def test_drop_index_if_exists_drops_an_index_that_exists(self, connection, indexed_table):
+        """StarRocks has no DROP INDEX IF EXISTS; online, the impl checks first and drops without it."""
+        operations = Operations(MigrationContext.configure(connection=connection))
+        operations.drop_index("old_idx", table_name=INDEXED_TABLE, if_exists=True)
+        assert self._state(connection)[1] == []
+        operations.drop_index("old_idx", table_name=INDEXED_TABLE, if_exists=True)
+
 
 class SecondaryIndexCreateTest(fixtures.TestBase):
     """Indexes declared on a model are created with the StarRocks index type the model names."""
