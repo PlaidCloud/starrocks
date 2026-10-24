@@ -15,8 +15,8 @@
 from functools import cache
 import logging
 import re
-import time
 from textwrap import dedent
+import time
 from typing import TYPE_CHECKING, Any, Collection, Dict, Final, List, Optional, Tuple, Type, Union
 
 from alembic.ddl.base import (
@@ -41,10 +41,8 @@ from sqlalchemy import (
     log,
     schema as sa_schema,
     text,
-    types as sqltypes,
     util,
 )
-from sqlalchemy.engine import Connection
 from sqlalchemy.dialects.mysql.base import (
     MySQLCompiler,
     MySQLDDLCompiler,
@@ -56,15 +54,14 @@ from sqlalchemy.dialects.mysql.base import (
 from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
 from sqlalchemy.dialects.mysql.reserved_words import RESERVED_WORDS_MYSQL
 import sqlalchemy.dialects.mysql.types as mysql_types
-from sqlalchemy.engine import reflection
 from sqlalchemy.engine import URL, Connection, reflection
 from sqlalchemy.engine.interfaces import ExecutionContext
+
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
 from sqlalchemy.engine.row import Row
-from sqlalchemy.sql import sqltypes, bindparam
-from sqlalchemy.sql.expression import Delete, Insert, Select, Update, TableClause
 from sqlalchemy.sql import bindparam, operators, sqltypes
 from sqlalchemy.sql.elements import BinaryExpression, ClauseElement, Grouping, TypeClause
+from sqlalchemy.sql.expression import Delete, Insert, Select, TableClause, Update
 
 from starrocks.common import utils
 from starrocks.common.consts import TableConfigKey
@@ -1784,9 +1781,8 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         else:
             order_by = alter.order_by
 
-        # notice users about such a time consuming operation
         from_db_clause = f"FROM {alter.schema} " if alter.schema else ""
-        show_clause = f"SHOW ALTER TABLE OPTIMIZE {from_db_clause}WHERE TableName='{alter.table_name}'"
+        show_clause = f"SHOW ALTER TABLE COLUMN {from_db_clause}WHERE TableName='{alter.table_name}'"
         logger.info(f"You probably should use ({show_clause}) to check the execution status "
                     f"of altering ORDER before doing another ALTER TABLE statement.")
 
