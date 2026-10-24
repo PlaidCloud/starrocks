@@ -79,6 +79,7 @@ class TransactionTest(fixtures.TablesTest):
                 raise _RollBack()
         eq_(self._ids("txn_keyed"), [1])
 
+    @TRANSACTIONS_NEED_3_5
     def test_read_committed_execution_option_is_reset_when_the_connection_returns(self):
         engine = engines.testing_engine()
         with engine.connect() as conn:
@@ -336,8 +337,15 @@ class TransactionTest(fixtures.TablesTest):
                 conn.exec_driver_sql("BEGIN WORK")
 
     @testing.only_if("starrocks<3.5", "StarRocks has transactions from 3.5")
-    def test_read_committed_dml_is_refused_before_3_5(self):
+    def test_a_read_committed_engine_is_refused_before_3_5(self):
+        """Refused at the first connection, before a migration's first statement can run."""
         with expect_raises_message(exc.InvalidRequestError, "needs StarRocks 3.5 or later"):
-            with self._read_committed_engine().begin() as conn:
-                conn.execute(insert(self.tables.txn_keyed), {"id": 1, "v": 1})
-        eq_(self._ids("txn_keyed"), [])
+            with self._read_committed_engine().connect():
+                pass
+
+    @testing.only_if("starrocks<3.5", "StarRocks has transactions from 3.5")
+    def test_a_read_committed_execution_option_is_refused_before_3_5(self):
+        with config.db.connect() as conn:
+            with expect_raises_message(exc.InvalidRequestError, "needs StarRocks 3.5 or later"):
+                conn.execution_options(isolation_level="READ COMMITTED")
+            eq_(conn.get_isolation_level(), "AUTOCOMMIT")

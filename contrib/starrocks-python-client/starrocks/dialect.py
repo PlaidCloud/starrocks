@@ -1829,8 +1829,15 @@ class StarRocksDialect(MySQLDialect_pymysql):
         return [], connect_args
 
     def initialize(self, connection: Connection) -> None:
+        """Read the server's version and run mode, and refuse a ``READ COMMITTED`` first connection before 3.5.
+
+        SQLAlchemy sets the first connection's isolation level before the server version is known, so
+        :meth:`set_isolation_level` can't refuse it there.
+        """
         super().initialize(connection)
         self._init_run_mode(connection)
+        if not self._driver_autocommits(connection.connection):
+            self._require_transactions(self._READ_COMMITTED_CONNECTION)
 
     def _init_run_mode(self, connection: Connection) -> None:
         if self.run_mode is None:
@@ -1926,6 +1933,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
 
     _ISOLATION_LEVELS: Final[Tuple[str, ...]] = ("AUTOCOMMIT", "READ COMMITTED")
     _TRANSACTIONS_SINCE: Final[Tuple[int, ...]] = (3, 5)
+    _READ_COMMITTED_CONNECTION: Final[str] = "A READ COMMITTED connection (StarRocks transactions)"
     _TRANSACTION_OPEN: Final[str] = "starrocks_transaction_open"
     _DML_KEYWORDS: Final[frozenset[str]] = frozenset({"INSERT", "UPDATE", "DELETE"})
     _DDL_KEYWORDS: Final[frozenset[str]] = frozenset(
@@ -1974,7 +1982,9 @@ class StarRocksDialect(MySQLDialect_pymysql):
 
         StarRocks ignores ``SET AUTOCOMMIT`` and the session isolation level, and keeps committing each statement
         on its own until a ``BEGIN WORK``. Off, the driver's autocommit tells :meth:`_match_transaction_to` to open
-        one for the connection's first INSERT, UPDATE or DELETE.
+        one for the connection's first INSERT, UPDATE or DELETE. ``READ COMMITTED`` is refused before StarRocks
+        3.5, which has no transactions, so a migration fails before its first statement rather than part way
+        through; :meth:`initialize` refuses it for the first connection, whose server version isn't known here yet.
         """
         level = level.replace("_", " ").upper()
         if level not in self._ISOLATION_LEVELS:
@@ -1982,6 +1992,8 @@ class StarRocksDialect(MySQLDialect_pymysql):
                 f"Invalid value {level!r} for isolation_level. "
                 f"Valid isolation levels for {self.name!r} are {', '.join(self._ISOLATION_LEVELS)}"
             )
+        if level == "READ COMMITTED":
+            self._require_transactions(self._READ_COMMITTED_CONNECTION)
         self._dbapi_connection_of(dbapi_connection).autocommit(level == "AUTOCOMMIT")
 
     @staticmethod

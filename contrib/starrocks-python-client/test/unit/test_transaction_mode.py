@@ -69,6 +69,15 @@ class IsolationLevelTest(fixtures.TestBase):
         eq_(connection.autocommit_mode, autocommit_mode)
         eq_(dialect.get_isolation_level(connection), reported)
 
+    def test_read_committed_is_refused_before_3_5(self):
+        dialect = StarRocksDialect()
+        dialect.server_version_info = (3, 3, 22)
+        connection = _DriverConnection(True)
+        with expect_raises_message(exc.InvalidRequestError, "needs StarRocks 3.5 or later; the server is 3.3.22"):
+            dialect.set_isolation_level(connection, "READ COMMITTED")
+        eq_(connection.autocommit_mode, True)
+        dialect.set_isolation_level(connection, "AUTOCOMMIT")
+
     def test_a_pooled_connection_is_unwrapped(self):
         dialect = StarRocksDialect()
         connection = _DriverConnection(True)

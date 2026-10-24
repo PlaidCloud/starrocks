@@ -41,7 +41,7 @@ with engine.connect() as connection:
         ...
 ```
 
-Other isolation levels, such as `SERIALIZABLE`, raise an `ArgumentError`. Before StarRocks 3.5, `BEGIN WORK` is accepted and does nothing. So the dialect raises an `InvalidRequestError` at the first INSERT, UPDATE or DELETE on a `READ COMMITTED` connection, and at a `BEGIN` or `START TRANSACTION` sent as text.
+Other isolation levels, such as `SERIALIZABLE`, raise an `ArgumentError`. Before StarRocks 3.5, `BEGIN WORK` is accepted and does nothing. So the dialect raises an `InvalidRequestError` when a `READ COMMITTED` connection is made or a connection is switched to it, before a migration's first statement runs, and at a `BEGIN` or `START TRANSACTION` sent as text.
 
 StarRocks restricts what a transaction can do, and refuses the statement when the transaction oversteps:
 

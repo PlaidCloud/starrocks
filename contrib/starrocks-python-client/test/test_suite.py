@@ -46,6 +46,7 @@ from sqlalchemy.testing.suite import (
     CompositeKeyReflectionTest as _CompositeKeyReflectionTest,
     CTETest as _CTETest,
     FetchLimitOffsetTest as _FetchLimitOffsetTest,
+    IsolationLevelTest as _IsolationLevelTest,
     JSONLegacyStringCastIndexTest as _JSONLegacyStringCastIndexTest,
     JSONTest as _JSONTest,
     LongNameBlowoutTest,
@@ -500,6 +501,15 @@ class JSONLegacyStringCastIndexTest(_JSONLegacyStringCastIndexTest):
 
 
 TRANSACTIONS_NEED_3_5 = testing.skip_if("starrocks<3.5", "StarRocks has transactions from 3.5")
+
+
+class IsolationLevelTest(_IsolationLevelTest):
+    """Upstream's tests; before StarRocks 3.5 AUTOCOMMIT is the only level, so none can be switched to."""
+
+    if IS_SQLALCHEMY_2:
+        test_dialect_user_setting_is_restored = TRANSACTIONS_NEED_3_5(
+            _IsolationLevelTest.test_dialect_user_setting_is_restored
+        )
 
 
 class AutocommitIsolationTest(_AutocommitIsolationTest):

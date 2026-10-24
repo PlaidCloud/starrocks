@@ -331,11 +331,12 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
         return exclusions.open()
 
     def get_isolation_levels(self, config: Any) -> Dict[str, Any]:
+        """The default level, and the levels the server can run: ``READ COMMITTED`` needs StarRocks 3.5."""
         with config.db.connect() as conn:
-            return {
-                "default": conn.dialect.default_isolation_level,
-                "supported": list(conn.dialect.get_isolation_level_values(None)),
-            }
+            supported = list(conn.dialect.get_isolation_level_values(None))
+            if conn.dialect.server_version_info < (3, 5):
+                supported = [level for level in supported if level == "AUTOCOMMIT"]
+            return {"default": conn.dialect.default_isolation_level, "supported": supported}
 
     @property
     def nvarchar_types(self) -> exclusions.compound:
