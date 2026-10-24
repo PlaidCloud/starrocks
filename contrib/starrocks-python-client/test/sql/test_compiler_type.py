@@ -109,6 +109,8 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         (MAP(VARCHAR(50), DOUBLE), "MAP<VARCHAR(50), DOUBLE>"),
         (MAP(STRING, MAP(INTEGER, STRING)), "MAP<STRING, MAP<INTEGER, STRING>>"),
         (STRUCT(name=STRING, age=INTEGER), "STRUCT<name STRING, age INTEGER>"),
+        (STRUCT(("a b", INTEGER), ("Caps", VARCHAR(5))), "STRUCT<`a b` INTEGER, Caps VARCHAR(5)>"),
+        (STRUCT(("odd`name", INTEGER), ("1st", STRING)), "STRUCT<`odd``name` INTEGER, `1st` STRING>"),
         (
             STRUCT(id=INTEGER, name=VARCHAR(100), active=BOOLEAN),
             "STRUCT<id INTEGER, name VARCHAR(100), active BOOLEAN>",

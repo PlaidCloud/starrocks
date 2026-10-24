@@ -359,6 +359,13 @@ class MAP(StructuredType):
 _PLAIN_FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+def quote_struct_field_name(name: str) -> str:
+    """Backquote a STRUCT field name unless it is a plain identifier."""
+    if _PLAIN_FIELD_NAME.fullmatch(name):
+        return name
+    return "`" + name.replace("`", "``") + "`"
+
+
 class STRUCT(StructuredType):
     """
     Usage:
@@ -403,9 +410,7 @@ class STRUCT(StructuredType):
         fields_sql = []
         for name, type_ in self.field_tuples:
             type_sql = self.get_sub_type_col_spec(type_, **kw)
-            if not _PLAIN_FIELD_NAME.fullmatch(name):
-                name = "`" + name.replace("`", "``") + "`"
-            fields_sql.append(f"{name} {type_sql}")
+            fields_sql.append(f"{quote_struct_field_name(name)} {type_sql}")
         return f"STRUCT<{', '.join(fields_sql)}>"
 
     def get_sub_item_types(self) -> Set[sqltypes.TypeEngine]:

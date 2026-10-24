@@ -253,6 +253,22 @@ class DataTypeReflectionTest(fixtures.TestBase):
         assert isinstance(reflected_table.c.fsp_col.type, DATETIME)
         assert isinstance(reflected_table.c.timestamp_col.type, DATETIME)
 
+    def test_struct_field_names_needing_quotes_are_created(self, connection):
+        """STRUCT field names that are not plain identifiers must be backquoted in the CREATE TABLE."""
+        table_name = "test_reflect_struct_quoted_fields"
+        table = Table(
+            table_name,
+            MetaData(),
+            Column("id_col", INTEGER()),
+            Column("struct_col", STRUCT(("a b", INTEGER()), ("Caps", VARCHAR(5)))),
+            starrocks_distributed_by='HASH(id_col)',
+            starrocks_properties={"replication_num": "1"},
+        )
+
+        reflected_table = self._create_and_reflect_table(connection, table_name, table)
+
+        assert [name for name, _ in reflected_table.c.struct_col.type.field_tuples] == ["a b", "Caps"]
+
     def test_reflect_datetime_types(self, connection):
         """Test reflection of datetime data types"""
         table_name = "test_reflect_datetime_types"

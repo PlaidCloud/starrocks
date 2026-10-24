@@ -94,6 +94,7 @@ from .datatype import (
     VARCHAR,
     VARIANT,
     StructuredType,
+    quote_struct_field_name,
 )
 from .engine.interfaces import ReflectedMVState, ReflectedState, ReflectedViewState
 from .reflection import StarRocksInspector, StarRocksTableDefinitionParser
@@ -276,10 +277,9 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
     def visit_STRUCT(self, type_: STRUCT, **kw):
         # logger.debug("visit_STRUCT: type_: %r, kw: %s", type_, kw)
         fields_sql = []
-        for name, type_ in type_.field_tuples:
-            name_sql = self.process(name, **kw) if isinstance(name, sqltypes.TypeEngine) else name
-            type_sql = self.process(type_, **kw)
-            fields_sql.append(f"{name_sql} {type_sql}")
+        for name, field_type in type_.field_tuples:
+            type_sql = self.process(field_type, **kw)
+            fields_sql.append(f"{quote_struct_field_name(name)} {type_sql}")
         return f"STRUCT<{', '.join(fields_sql)}>"
 
     def visit_HLL(self, type_, **kw):
