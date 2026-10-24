@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from functools import cache
 import logging
 import re
 from textwrap import dedent
@@ -53,7 +54,7 @@ from sqlalchemy.engine.row import Row
 from sqlalchemy.sql import sqltypes, bindparam
 from sqlalchemy.sql.expression import Delete, Insert, Select, Update, TableClause
 from sqlalchemy.sql import bindparam, operators, sqltypes
-from sqlalchemy.sql.elements import BinaryExpression, Grouping, TypeClause
+from sqlalchemy.sql.elements import BinaryExpression, ClauseElement, Grouping, TypeClause
 
 from starrocks.common import utils
 from starrocks.common.defaults import ReflectionMVDefaults, ReflectionTableDefaults, ReflectionViewDefaults
@@ -66,7 +67,7 @@ from starrocks.common.params import (
     TableKind,
     TableObjectInfoKey,
 )
-from starrocks.common.types import ColumnAggType, SystemRunMode, TableEngine, TableType
+from starrocks.common.types import ColumnAggType, SystemRunMode, TableEngine, TableType, ViewSecurityType
 from starrocks.common.utils import TableAttributeNormalizer
 from starrocks.sql.schema import View
 
@@ -205,6 +206,21 @@ colspecs = {
     sqltypes.JSON.JSONIndexType: JSONIndexType,
     sqltypes.JSON.JSONPathType: JSONPathType,
 }
+
+@cache
+def _dialect_leaving_percents_single() -> "StarRocksDialect":
+    """A StarRocks dialect with the ``named`` paramstyle, as Alembic configures one for offline SQL scripts."""
+    return StarRocksDialect(paramstyle="named")
+
+
+def stored_sql_text(clause: ClauseElement) -> str:
+    """Compile a clause to the SQL text StarRocks keeps and shows back, such as a view definition, values inline.
+
+    A dialect whose paramstyle does not format with ``%`` leaves each ``%`` single, as in the text StarRocks
+    reflects. :meth:`StarRocksDDLCompiler.sql_text` doubles it when the text goes into DDL.
+    """
+    return str(clause.compile(dialect=_dialect_leaving_percents_single(), compile_kwargs={"literal_binds": True}))
+
 
 class StarRocksTypeCompiler(MySQLTypeCompiler):
     """
@@ -894,7 +910,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         # Handle MV-specific REFRESH clause
         if refresh := opts.get(TableInfoKey.REFRESH):
-            table_opts.append(f"REFRESH {str(refresh)}")
+            table_opts.append(f"REFRESH {self._refresh_scheme(refresh)}")
 
         # Properties
         properties = opts.get(TableInfoKey.PROPERTIES)
@@ -1279,7 +1295,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             raise exc.CompileError("View definition is required")
         security = utils.get_dialect_option(table, TableInfoKey.SECURITY)
 
-        or_replace_clause = "OR REPLACE " if create.or_replace else ""
+        or_replace_clause = "OR REPLACE " if getattr(create, "or_replace", False) else ""
         if_not_exists_clause = "IF NOT EXISTS " if create.if_not_exists else ""
 
         text = f"CREATE {or_replace_clause}VIEW {if_not_exists_clause}{view_name}"
@@ -1289,13 +1305,50 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             text += self._get_view_column_clauses(table)
 
         if table.comment:
-            text += f"\nCOMMENT '{table.comment}'"
+            text += "\nCOMMENT " + self.sql_compiler.render_literal_value(table.comment, sqltypes.String())
         if security:
-            text += f"\nSECURITY {security}"
+            text += "\nSECURITY " + self._view_security_keyword(table, security)
         text += f"\nAS\n{definition}"
 
         logger.debug("Compiled SQL for CreateView: \n%s", text)
         return text
+
+    @staticmethod
+    def _refuse_synchronous_mv(mv: Table) -> None:
+        """Refuse a MaterializedView that StarRocks would build as a synchronous materialized view.
+
+        Without a REFRESH or DISTRIBUTED BY clause, StarRocks creates a synchronous materialized view, a rollup that
+        ``information_schema`` does not list. The dialect could neither reflect nor compare it, and autogenerate
+        would try to create it on every run.
+        """
+        opts = utils.extract_dialect_options_as_case_insensitive(mv)
+        if not opts.get(TableInfoKey.REFRESH) and not opts.get(TableInfoKey.DISTRIBUTED_BY):
+            raise exc.CompileError(
+                f"Materialized view {mv.name!r} needs starrocks_refresh, for example 'ASYNC' or 'MANUAL': without "
+                "a refresh scheme or a distribution StarRocks builds a synchronous materialized view, which the "
+                "dialect cannot reflect or compare"
+            )
+
+    _SCHEDULE_REFRESH = re.compile(r"^(\s*(?:(?:IMMEDIATE|DEFERRED)\s+)?)SCHEDULE\b", re.IGNORECASE)
+
+    @classmethod
+    def _refresh_scheme(cls, refresh: Any) -> str:
+        """Return a materialized view's refresh scheme with ``SCHEDULE`` spelled ``ASYNC``.
+
+        ``REFRESH SCHEDULE [START(...)] EVERY(...)`` is the 4.1.1 synonym of ``REFRESH ASYNC [START(...)]
+        EVERY(...)``, which every version knows; reflection reads either back as ASYNC.
+        """
+        return cls._SCHEDULE_REFRESH.sub(r"\1ASYNC", str(refresh), count=1)
+
+    @staticmethod
+    def _view_security_keyword(view: Table, security: str) -> str:
+        """Return the view's SECURITY keyword, refusing anything but the NONE and INVOKER that StarRocks has."""
+        keyword = str(security).upper()
+        if keyword not in ViewSecurityType.ALLOWED_ITEMS - {ViewSecurityType.EMPTY}:
+            raise exc.CompileError(
+                f"StarRocks views have SECURITY NONE or INVOKER, not {security!r} (view {view.name!r})"
+            )
+        return keyword
 
     def visit_create_view(self, create: CreateView, **kw: Any) -> str:
         """
@@ -1304,6 +1357,19 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         But, this is still needed for alembic's `CreateViewOp`.
         """
         return self._compile_create_view_from_table(create.element, create, **kw)
+
+    def visit_drop_table(self, drop: sa_schema.DropTable, **kw: Any) -> str:
+        """Drop a View or MaterializedView held in a MetaData with its own DROP statement.
+
+        ``MetaData.drop_all()`` issues a ``DropTable`` for every member, and StarRocks rejects ``DROP TABLE`` for a
+        view or a materialized view.
+        """
+        table_kind = drop.element.info.get(TableObjectInfoKey.TABLE_KIND, TableKind.TABLE).upper()
+        if table_kind == TableKind.VIEW:
+            return self.visit_drop_view(drop, **kw)
+        if table_kind == TableKind.MATERIALIZED_VIEW:
+            return self.visit_drop_materialized_view(drop, **kw)
+        return super().visit_drop_table(drop, **kw)
 
     def visit_drop_view(self, drop: DropView, **kw: Any) -> str:
         view = drop.element
@@ -1334,7 +1400,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         # ALTER REFRESH
         if alter.refresh is not None:
-            statements.append(f"ALTER MATERIALIZED VIEW {mv_name} REFRESH {alter.refresh}")
+            statements.append(f"ALTER MATERIALIZED VIEW {mv_name} REFRESH {self._refresh_scheme(alter.refresh)}")
 
         # ALTER PROPERTIES
         if alter.properties is not None:
@@ -1364,12 +1430,16 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         definition = table.info.get(TableObjectInfoKey.DEFINITION)
         if not definition:
             raise ValueError(f"Materialized view '{table.name}' requires a definition.")
+        self._refuse_synchronous_mv(table)
 
-        # Handle or_replace and if_not_exists flags
-        or_replace_clause = "OR REPLACE " if getattr(create, 'or_replace', False) else ""
+        if getattr(create, "or_replace", False):
+            raise exc.CompileError(
+                f"StarRocks has no CREATE OR REPLACE MATERIALIZED VIEW (materialized view {table.name!r}); "
+                "drop it and create it again"
+            )
         if_not_exists_clause = "IF NOT EXISTS " if getattr(create, 'if_not_exists', False) else ""
 
-        text = f"CREATE {or_replace_clause}MATERIALIZED VIEW {if_not_exists_clause}{mv_name}"
+        text = f"CREATE MATERIALIZED VIEW {if_not_exists_clause}{mv_name}"
 
         # Add column definitions if present (only name and comment are supported, same as View)
         if table.columns:

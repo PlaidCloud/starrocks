@@ -18,8 +18,9 @@ The dialect puts the column list, each view clause and ``AS`` on lines of their 
 line breaks, so each expected string literal below is one line of the generated DDL.
 """
 
-from sqlalchemy import Column, MetaData, Table, select, testing
-from sqlalchemy.testing import eq_, fixtures
+from sqlalchemy import Column, MetaData, Table, exc, select, testing
+from sqlalchemy.schema import CreateTable, DropTable
+from sqlalchemy.testing import eq_, expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
 from starrocks.datatype import INTEGER, VARCHAR
@@ -161,13 +162,63 @@ class DropViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(DropView(view, if_exists=True), "DROP VIEW IF EXISTS my_view")
 
 
+class ViewCommentCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    """A view comment is rendered as an escaped string literal, as table and column comments are."""
+
+    __dialect__ = StarRocksDialect()
+    __requires__ = ("sqlalchemy_2",)
+
+    @testing.combinations(
+        ("single_quote", "it's a view", "COMMENT 'it''s a view'"),
+        ("backslash", r"C:\temp", r"COMMENT 'C:\\temp'"),
+        argnames="comment, rendered",
+        id_="iaa",
+    )
+    def test_view_comment_escaping(self, comment, rendered):
+        view = View("my_view", MetaData(), definition="SELECT 1 AS one", comment=comment)
+        self.assert_compile(CreateView(view), "CREATE VIEW my_view" f"{rendered}" "AS" "SELECT 1 AS one")
+
+
+class ViewSecurityCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    """StarRocks views have ``SECURITY NONE`` or ``SECURITY INVOKER``; anything else raises before the server."""
+
+    __dialect__ = StarRocksDialect()
+    __requires__ = ("sqlalchemy_2",)
+
+    @testing.combinations(("NONE", "NONE"), ("invoker", "INVOKER"), argnames="security, keyword")
+    def test_security(self, security, keyword):
+        view = View("my_view", MetaData(), definition="SELECT 1 AS one", starrocks_security=security)
+        self.assert_compile(CreateView(view), "CREATE VIEW my_view" f"SECURITY {keyword}" "AS" "SELECT 1 AS one")
+
+    def test_definer_raises(self):
+        view = View("my_view", MetaData(), definition="SELECT 1 AS one", starrocks_security="DEFINER")
+        with expect_raises_message(exc.CompileError, "StarRocks views have SECURITY NONE or INVOKER, not 'DEFINER'"):
+            CreateView(view).compile(dialect=self.__dialect__)
+
+
+class ViewInMetaDataCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    """``MetaData.create_all()`` and ``drop_all()`` emit ``CreateTable`` and ``DropTable`` for a View."""
+
+    __dialect__ = StarRocksDialect()
+    __requires__ = ("sqlalchemy_2",)
+
+    def test_create_table_of_view(self):
+        view = View("my_view", MetaData(), definition="SELECT * FROM my_table", comment="c")
+        self.assert_compile(CreateTable(view), "CREATE VIEW my_view" "COMMENT 'c'" "AS" "SELECT * FROM my_table")
+
+    @testing.combinations((False, "DROP VIEW my_view"), (True, "DROP VIEW IF EXISTS my_view"), argnames="if_exists, expected")
+    def test_drop_table_of_view(self, if_exists, expected):
+        view = View("my_view", MetaData(), definition="SELECT * FROM my_table")
+        self.assert_compile(DropTable(view, if_exists=if_exists), expected)
+
+
 class AlterViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = StarRocksDialect()
     __requires__ = ("sqlalchemy_2",)
 
     def test_alter_view_ignores_comment_and_security(self):
         """StarRocks cannot change a view's COMMENT or SECURITY with ALTER VIEW, so only the definition is rendered."""
-        view = View("my_view", MetaData(), definition="SELECT 2", comment="New Comment", starrocks_security="DEFINER")
+        view = View("my_view", MetaData(), definition="SELECT 2", comment="New Comment", starrocks_security="INVOKER")
         self.assert_compile(AlterView(view), "ALTER VIEW my_view" "AS" "SELECT 2")
 
     def test_alter_view_with_schema(self):

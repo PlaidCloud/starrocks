@@ -125,22 +125,20 @@ class ColumnAggType:
 
 
 class ViewSecurityType:
-    """Supported StarRocks view security types.
+    """StarRocks view security types, as ``View(..., starrocks_security=ViewSecurityType.INVOKER)``.
 
-    Use these constants in View.info["security"].
+    StarRocks has ``SECURITY NONE`` and ``SECURITY INVOKER`` only; there is no ``DEFINER``.
     """
 
     EMPTY = ""
     NONE = "NONE"
     INVOKER = "INVOKER"
-    DEFINER = "DEFINER"
 
     # Allowed set for validation
     ALLOWED_ITEMS = {
         EMPTY,
         NONE,
         INVOKER,
-        DEFINER,
     }
 
 

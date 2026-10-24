@@ -18,8 +18,9 @@ The dialect puts each materialized view clause and ``AS`` on lines of their own;
 breaks, so each expected string literal below is one line of the generated DDL.
 """
 
-from sqlalchemy import Column, MetaData, Table, select, testing
-from sqlalchemy.testing import fixtures
+from sqlalchemy import Column, MetaData, Table, exc, select, testing
+from sqlalchemy.schema import DropTable
+from sqlalchemy.testing import expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
 from starrocks.datatype import INTEGER, VARCHAR
@@ -32,19 +33,37 @@ class CreateMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = StarRocksDialect()
     __requires__ = ("sqlalchemy_2",)
 
+    def test_create_or_replace_raises(self):
+        """No StarRocks release has CREATE OR REPLACE MATERIALIZED VIEW."""
+        mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_refresh="MANUAL")
+        with expect_raises_message(exc.CompileError, "StarRocks has no CREATE OR REPLACE MATERIALIZED VIEW"):
+            CreateMaterializedView(mv, or_replace=True).compile(dialect=self.__dialect__)
+
     def test_create_mv(self):
-        mv = MaterializedView("my_mv", MetaData(), definition="SELECT * FROM my_table")
-        self.assert_compile(CreateMaterializedView(mv), "CREATE MATERIALIZED VIEW my_mv" "AS" "SELECT * FROM my_table")
+        mv = MaterializedView("my_mv", MetaData(), definition="SELECT * FROM my_table", starrocks_refresh="MANUAL")
+        self.assert_compile(
+            CreateMaterializedView(mv), "CREATE MATERIALIZED VIEW my_mv" "REFRESH MANUAL" "AS" "SELECT * FROM my_table"
+        )
+
+    def test_synchronous_mv_raises(self):
+        """With neither a refresh scheme nor a distribution, StarRocks would build a synchronous materialized view."""
+        mv = MaterializedView("my_mv", MetaData(), definition="SELECT * FROM my_table", comment="no refresh")
+        with expect_raises_message(exc.CompileError, "Materialized view 'my_mv' needs starrocks_refresh"):
+            CreateMaterializedView(mv).compile(dialect=self.__dialect__)
 
     @testing.combinations(
-        ("or_replace", {}, {"or_replace": True}, "CREATE OR REPLACE MATERIALIZED VIEW mv"),
-        ("if_not_exists", {}, {"if_not_exists": True}, "CREATE MATERIALIZED VIEW IF NOT EXISTS mv"),
-        ("schema", {"schema": "test_db"}, {}, "CREATE MATERIALIZED VIEW test_db.mv"),
+        (
+            "if_not_exists",
+            {"starrocks_refresh": "MANUAL"},
+            {"if_not_exists": True},
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS mv" "REFRESH MANUAL",
+        ),
+        ("schema", {"schema": "test_db", "starrocks_refresh": "MANUAL"}, {}, "CREATE MATERIALIZED VIEW test_db.mv" "REFRESH MANUAL"),
         (
             "comment",
-            {"comment": "This is a test comment"},
+            {"comment": "This is a test comment", "starrocks_refresh": "MANUAL"},
             {},
-            "CREATE MATERIALIZED VIEW mv" "COMMENT 'This is a test comment'",
+            "CREATE MATERIALIZED VIEW mv" "COMMENT 'This is a test comment'" "REFRESH MANUAL",
         ),
         ("refresh_async", {"starrocks_refresh": "ASYNC"}, {}, "CREATE MATERIALIZED VIEW mv" "REFRESH ASYNC"),
         ("refresh_manual", {"starrocks_refresh": "MANUAL"}, {}, "CREATE MATERIALIZED VIEW mv" "REFRESH MANUAL"),
@@ -55,28 +74,45 @@ class CreateMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "CREATE MATERIALIZED VIEW mv" "REFRESH ASYNC START('2025-01-01 00:00:00') EVERY(INTERVAL 1 DAY)",
         ),
         (
-            "distribution",
+            "refresh_schedule",
+            {"starrocks_refresh": "SCHEDULE EVERY(INTERVAL 1 HOUR)"},
+            {},
+            "CREATE MATERIALIZED VIEW mv" "REFRESH ASYNC EVERY(INTERVAL 1 HOUR)",
+        ),
+        (
+            "refresh_deferred_schedule",
+            {"starrocks_refresh": "deferred schedule START('2025-01-01 00:00:00') EVERY(INTERVAL 1 DAY)"},
+            {},
+            "CREATE MATERIALIZED VIEW mv" "REFRESH deferred ASYNC START('2025-01-01 00:00:00') EVERY(INTERVAL 1 DAY)",
+        ),
+        (
+            "distribution_without_refresh",
             {"starrocks_distributed_by": "HASH(id) BUCKETS 16"},
             {},
             "CREATE MATERIALIZED VIEW mv" "DISTRIBUTED BY HASH(id) BUCKETS 16",
         ),
         (
             "partition",
-            {"starrocks_partition_by": "date_trunc('day', event_date)"},
+            {"starrocks_partition_by": "date_trunc('day', event_date)", "starrocks_refresh": "MANUAL"},
             {},
-            "CREATE MATERIALIZED VIEW mv" "PARTITION BY date_trunc('day', event_date)",
+            "CREATE MATERIALIZED VIEW mv" "PARTITION BY date_trunc('day', event_date)" "REFRESH MANUAL",
         ),
         (
             "order_by",
-            {"starrocks_order_by": "user_id, event_date"},
+            {"starrocks_order_by": "user_id, event_date", "starrocks_refresh": "MANUAL"},
             {},
-            "CREATE MATERIALIZED VIEW mv" "ORDER BY (user_id, event_date)",
+            "CREATE MATERIALIZED VIEW mv" "ORDER BY (user_id, event_date)" "REFRESH MANUAL",
         ),
         (
             "properties",
-            {"starrocks_properties": {"replication_num": "1", "storage_medium": "SSD"}},
+            {"starrocks_properties": {"replication_num": "1", "storage_medium": "SSD"}, "starrocks_refresh": "MANUAL"},
             {},
-            "CREATE MATERIALIZED VIEW mv" "PROPERTIES(" '    "replication_num"="1",' '    "storage_medium"="SSD"' ")",
+            "CREATE MATERIALIZED VIEW mv"
+            "REFRESH MANUAL"
+            "PROPERTIES("
+            '    "replication_num"="1",'
+            '    "storage_medium"="SSD"'
+            ")",
         ),
         argnames="mv_kwargs, create_kwargs, expected_header",
         id_="iaaa",
@@ -148,6 +184,14 @@ class DropMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", schema="test_db")
         self.assert_compile(DropMaterializedView(mv), "DROP MATERIALIZED VIEW test_db.my_mv")
 
+    @testing.combinations(
+        (False, "DROP MATERIALIZED VIEW my_mv"), (True, "DROP MATERIALIZED VIEW IF EXISTS my_mv"), argnames="if_exists, expected"
+    )
+    def test_drop_table_of_mv(self, if_exists, expected):
+        """``MetaData.drop_all()`` drops a MaterializedView through ``DropTable``."""
+        mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1")
+        self.assert_compile(DropTable(mv, if_exists=if_exists), expected)
+
 
 class AlterMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     """``AlterMaterializedView`` takes a name, not a ``MaterializedView``, so this also runs on SQLAlchemy 1.4."""
@@ -157,6 +201,13 @@ class AlterMaterializedViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_alter_mv_refresh(self):
         self.assert_compile(
             AlterMaterializedView("my_mv", refresh="ASYNC EVERY(INTERVAL 2 HOUR)"),
+            "ALTER MATERIALIZED VIEW my_mv REFRESH ASYNC EVERY(INTERVAL 2 HOUR)",
+        )
+
+    def test_alter_mv_refresh_schedule_is_async(self):
+        """Before 4.1.1 StarRocks knows only ASYNC for the same refresh."""
+        self.assert_compile(
+            AlterMaterializedView("my_mv", refresh="SCHEDULE EVERY(INTERVAL 2 HOUR)"),
             "ALTER MATERIALIZED VIEW my_mv REFRESH ASYNC EVERY(INTERVAL 2 HOUR)",
         )
 
