@@ -114,6 +114,10 @@ class AlterTablePropertiesCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             f'ALTER TABLE test_table SET ("comment" = {rendered_value})',
         )
 
+    def test_property_without_a_value_is_refused(self):
+        with expect_raises_message(exc.CompileError, "Property 'colocate_with' has no value"):
+            AlterTableProperties("test_table", {"colocate_with": None}).compile(dialect=StarRocksDialect())
+
     @testing.combinations(
         ("file_path", r'"C:\\temp\\data\\file.txt"'),
         ("regex_pattern", r'"\\d+\\.\\d+"'),

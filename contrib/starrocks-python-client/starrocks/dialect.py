@@ -597,6 +597,13 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         """
         return '"%s"' % str(value).replace("\\", "\\\\").replace('"', '\\"')
 
+    @classmethod
+    def quoted_property_pair(cls, key: Any, value: Any, separator: str = " = ") -> str:
+        """Quote a ``"key" = "value"`` PROPERTIES pair, refusing a missing value rather than writing "None"."""
+        if value is None:
+            raise exc.CompileError(f"Property {key!r} has no value; StarRocks properties are strings")
+        return f"{cls.quoted_property(key)}{separator}{cls.quoted_property(value)}"
+
     def visit_create_index(self, create: sa_schema.CreateIndex, **kw: Any) -> str:  # type: ignore[override]
         """Compile ``CREATE INDEX name ON table (columns) [USING <type> [(properties)]] [COMMENT '...']``.
 
@@ -638,7 +645,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
                 "properties only after an index type"
             )
         return "(%s)" % ", ".join(
-            f"{self.quoted_property(key)} = {self.quoted_property(value)}" for key, value in properties.items()
+            self.quoted_property_pair(key, value) for key, value in properties.items()
         )
 
     def visit_add_constraint(self, create: sa_schema.AddConstraint, **kw: Any) -> str:
@@ -965,7 +972,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         #     props_dict.setdefault("replication_num", str(self.dialect.test_replication_num))
         if props_dict:
             props = ",\n".join(
-                f"{self.indent}{self.quoted_property(k)}={self.quoted_property(v)}" for k, v in props_dict.items()
+                f"{self.indent}{self.quoted_property_pair(k, v, separator='=')}" for k, v in props_dict.items()
             )
             table_opts.append(f"PROPERTIES(\n{props}\n)")
 
@@ -1454,7 +1461,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         # ALTER PROPERTIES
         if alter.properties is not None:
             props_str = ", ".join(
-                f"{self.quoted_property(k)} = {self.quoted_property(v)}" for k, v in alter.properties.items()
+                self.quoted_property_pair(k, v) for k, v in alter.properties.items()
             )
             statements.append(f"ALTER MATERIALIZED VIEW {mv_name} SET ({props_str})")
 
@@ -1628,7 +1635,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         multi_set_statement = "; ".join(
             f"ALTER TABLE {table_name} SET ("
-            + ", ".join(f"{self.quoted_property(k)} = {self.quoted_property(v)}" for k, v in group.items())
+            + ", ".join(self.quoted_property_pair(k, v) for k, v in group.items())
             + ")"
             for group in group_properties_for_set(alter.properties)
         )

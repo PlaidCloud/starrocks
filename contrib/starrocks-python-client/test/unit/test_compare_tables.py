@@ -1400,7 +1400,7 @@ class PropertiesChangesTest(fixtures.TestBase):
         assert len(result) == 0
 
     @testing.combinations(
-        ("colocate_with", None, "not_exists"),
+        ("partition_live_number", None, "3"),
         argnames="prop_key, default_value, non_default_value",
     )
     def test_properties_non_default_none_to_none(self, prop_key, default_value, non_default_value, caplog):
@@ -1729,6 +1729,33 @@ class UnmanagedDefaultPropertiesTest(fixtures.TestBase):
         assert to_set == {}
         assert LOG_NO_DEFAULT_VALUE in caplog.text
         assert LOG_NO_ALERT_AUTO_GENERATED in caplog.text
+
+
+class PropertyDowngradeTest(fixtures.TestBase):
+    """The downgrade of a property the metadata sets and the database does not have."""
+
+    @staticmethod
+    def _run(meta_props, default_cls=ReflectionTableDefaults):
+        from starrocks.alembic.compare import _compare_table_properties_impl
+
+        return _compare_table_properties_impl(
+            "test_db", "test_table",
+            {TableInfoKey.PROPERTIES: {}}, {TableInfoKey.PROPERTIES: meta_props},
+            SystemRunMode.SHARED_NOTHING, default_cls=default_cls,
+        )
+
+    @testing.combinations(("colocate_with", "g1"), ("bloom_filter_columns", "v"), argnames="key,value")
+    def test_a_property_absent_until_set_is_cleared(self, key, value):
+        to_set, to_reverse = self._run({key: value})
+        assert to_set == {key: value}
+        assert to_reverse == {key: ""}
+
+    def test_a_property_without_a_default_is_left_out_of_the_downgrade(self, caplog):
+        caplog.set_level("WARNING")
+        to_set, to_reverse = self._run({"session.query_timeout": "1000"}, ReflectionMVDefaults)
+        assert to_set == {"session.query_timeout": "1000"}
+        assert to_reverse == {}
+        assert "the downgrade cannot restore it" in caplog.text
 
 
 class PropertiesNotReportedByDatabaseTest(fixtures.TestBase):

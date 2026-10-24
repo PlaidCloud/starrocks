@@ -2195,9 +2195,15 @@ def _compare_table_properties_impl(
                 f"please modify it by removing the 'default.' prefix."
             )
 
-        # Determine the value for the downgrade (reverse) operation.
         target_val_downgrade = conn_str if conn_str is not None else default_str
-        properties_for_reverse[prop_key] = target_val_downgrade
+        if target_val_downgrade is None:
+            logger.warning(
+                f"{object_label} '{full_name}': Property '{key}' is not set in the database and has no default "
+                f"defined in {default_cls.__name__}, so the downgrade cannot restore it and leaves it as the upgrade "
+                f"sets it."
+            )
+        else:
+            properties_for_reverse[prop_key] = target_val_downgrade
 
     return properties_to_set, properties_for_reverse
 

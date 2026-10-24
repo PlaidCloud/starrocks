@@ -124,9 +124,13 @@ def alter_materialized_view(operations: Operations, op: AlterMaterializedViewOp)
     """
     Execute ALTER MATERIALIZED VIEW statement.
 
-    Only supports altering mutable attributes: refresh, properties.
+    Only supports altering mutable attributes: refresh, properties. The downgrade of a property change whose
+    previous values could not be determined has neither, and does nothing.
     """
     logger.debug("implementation alter_materialized_view: %s", op.view_name)
+    if op.refresh is None and not op.properties:
+        logger.warning("Nothing to alter on materialized view %r: no refresh and no properties.", op.view_name)
+        return
     operations.execute(AlterMaterializedView(
         mv_name=op.view_name,
         schema=op.schema,

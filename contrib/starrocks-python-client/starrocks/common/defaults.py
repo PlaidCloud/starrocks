@@ -75,8 +75,10 @@ class ReflectionTableDefaults(ReflectionDefaults):
         'flat_json.null.factor': '0.3',
         'flat_json.sparsity.factor': '0.3',
         'flat_json.column.max': '100',
-        # 'bloom_filter_columns': None,
-        # 'colocate_with': None,
+
+        # Absent until set; SET to the empty string clears them again.
+        'bloom_filter_columns': '',
+        'colocate_with': '',
     }
     _DEFAULT_PROPERTIES_SHARED_NOTHING = {**{
         'replication_num': '3',
