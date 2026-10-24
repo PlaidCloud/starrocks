@@ -14,8 +14,8 @@
 # limitations under the License.
 import logging
 import re
-import time
 from textwrap import dedent
+import time
 from typing import TYPE_CHECKING, Any, Collection, Dict, Final, List, Optional, Tuple, Union
 
 from alembic.ddl.base import RenameTable, alter_table, format_column_name, format_server_default, format_table_name
@@ -33,10 +33,8 @@ from sqlalchemy import (
     log,
     schema as sa_schema,
     text,
-    types as sqltypes,
     util,
 )
-from sqlalchemy.engine import Connection
 from sqlalchemy.dialects.mysql.base import (
     MySQLCompiler,
     MySQLDDLCompiler,
@@ -46,12 +44,13 @@ from sqlalchemy.dialects.mysql.base import (
     colspecs as base_colspecs,
 )
 from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
-from sqlalchemy.engine import reflection
+from sqlalchemy.engine import Connection, reflection
 from sqlalchemy.engine.interfaces import ExecutionContext
+
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
 from sqlalchemy.engine.row import Row
-from sqlalchemy.sql import sqltypes, bindparam
-from sqlalchemy.sql.expression import Delete, Insert, Select, Update, TableClause
+from sqlalchemy.sql import bindparam, sqltypes
+from sqlalchemy.sql.expression import Delete, Insert, Select, TableClause, Update
 
 from starrocks.common import utils
 from starrocks.common.consts import TableConfigKey
