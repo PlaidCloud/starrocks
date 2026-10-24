@@ -276,7 +276,10 @@ class SysdateExecutionTest(fixtures.TestBase):
         assert isinstance(connection.scalar(sa.select(sa.func.sysdate())), datetime.datetime)
 
     def test_sysdate_with_a_precision_returns_microseconds(self, connection):
-        assert isinstance(connection.scalar(sa.select(sa.func.sysdate(6))), datetime.datetime)
+        """``now()`` has no fraction, so reads that all lack microseconds mean the precision was dropped."""
+        readings = [connection.scalar(sa.select(sa.func.sysdate(6))) for _ in range(3)]
+        assert all(isinstance(reading, datetime.datetime) for reading in readings)
+        assert any(reading.microsecond for reading in readings), readings
 
 
 class IntegerCastExecutionTest(fixtures.TestBase):
