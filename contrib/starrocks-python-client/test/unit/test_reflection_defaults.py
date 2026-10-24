@@ -12,11 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+
+from sqlalchemy import testing
 from sqlalchemy.testing import fixtures
 
 from starrocks.common.defaults import ReflectionViewDefaults
 from starrocks.common.types import ViewSecurityType
 from starrocks.engine.interfaces import ReflectedViewState
+from starrocks.reflection import StarRocksTableDefinitionParser
 
 
 class ReflectionViewDefaultsTest(fixtures.TestBase):
@@ -51,3 +55,27 @@ class ReflectionViewDefaultsTest(fixtures.TestBase):
         )
         assert info.comment is None or info.comment == ""
         assert info.security == ViewSecurityType.NONE or info.security is None
+
+
+class ColumnDefaultValueRendererTest(fixtures.TestBase):
+    """How a COLUMN_DEFAULT from information_schema.columns becomes a reflected server default."""
+
+    @staticmethod
+    def _rendered(column_type: str, default: str | None) -> str | None:
+        column = SimpleNamespace(COLUMN_TYPE=column_type, COLUMN_DEFAULT=default)
+        return StarRocksTableDefinitionParser._ColumnDefaultValueRenderer().build(column)
+
+    @testing.combinations(
+        ("hll", "hll", "\x00", None),
+        ("bitmap", "bitmap", "\x00", None),
+        ("percentile", "percentile", "\x00", None),
+        ("varchar_keeps_nul", "varchar(10)", "\x00", "'\\x00'"),
+        ("no_default", "int", None, None),
+        ("null_default", "int", "NULL", None),
+        ("function", "varchar(36)", "uuid()", "(uuid())"),
+        ("datetime_now", "datetime", "CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP"),
+        argnames="column_type, default, expected",
+        id_="iaaa",
+    )
+    def test_rendered_default(self, column_type, default, expected):
+        assert self._rendered(column_type, default) == expected

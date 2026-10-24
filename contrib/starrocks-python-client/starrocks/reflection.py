@@ -300,7 +300,11 @@ class StarRocksTableDefinitionParser(object):
         1. DATETIME CURRENT_TIMESTAMP defaults are emitted verbatim.
         2. Function-looking defaults become `(func_expr)`.
         3. Remaining literals are double quoted.
+        4. The NUL placeholder StarRocks reports for HLL, BITMAP and PERCENTILE columns is no default.
         """
+        _SKETCH_COLUMN_TYPES = ("HLL", "BITMAP", "PERCENTILE")
+        _SKETCH_PLACEHOLDER_DEFAULT = "\x00"
+
         def build(self, column: _DecodingRow) -> Optional[str]:
             raw_default = getattr(column, "COLUMN_DEFAULT", None)
             if raw_default is None:
@@ -310,6 +314,9 @@ class StarRocksTableDefinitionParser(object):
             if default is None or default.upper() == "NULL":
                 return None
 
+            if self._is_sketch_placeholder(column, default):
+                return None
+
             if self._is_datetime_column(column) and default.upper().startswith("CURRENT_TIMESTAMP"):
                 return default
 
@@ -317,6 +324,11 @@ class StarRocksTableDefinitionParser(object):
                 return self._wrap_function_default(default)
 
             return f"{default!r}"
+
+        @classmethod
+        def _is_sketch_placeholder(cls, column: _DecodingRow, default: str) -> bool:
+            column_type = (getattr(column, "COLUMN_TYPE", "") or "").upper()
+            return column_type in cls._SKETCH_COLUMN_TYPES and default == cls._SKETCH_PLACEHOLDER_DEFAULT
 
         @staticmethod
         def _is_datetime_column(column: _DecodingRow) -> bool:
