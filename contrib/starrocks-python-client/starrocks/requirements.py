@@ -223,7 +223,8 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
 
     @property
     def legacy_unconditional_json_extract(self):
-        return exclusions.closed()
+        """``json_query`` returns valid JSON in all cases, as the legacy ``JSON_EXTRACT`` does."""
+        return exclusions.open()
 
     @property
     def update_from(self):
@@ -234,6 +235,11 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
     def delete_from(self):
         """Target must support DELETE FROM..FROM or DELETE..USING syntax"""
         return exclusions.open()
+
+    @property
+    def json_string_cast_keeps_json_quoting(self):
+        """``CAST(<JSON string> AS VARCHAR)`` yields the JSON text, quotes included, as MySQL's does."""
+        return exclusions.closed()  # StarRocks yields the unquoted string
 
     @property
     def empty_inserts(self):

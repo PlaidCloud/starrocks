@@ -348,6 +348,37 @@ class StarRocksSQLCompiler(MySQLCompiler):
             raise exc.CompileError(f"starrocks_label must be a non-empty string, not {label!r}")
         return self.preparer.quote(label)
 
+    def _render_json_extract_from_binary(self, binary: Any, operator: Any, **kw: Any) -> str:
+        """Render a JSON index or path access with ``json_query`` or the ``get_json_*`` function for its type.
+
+        StarRocks has no ``JSON_EXTRACT``. ``json_query`` returns JSON, with a JSON null kept as JSON null, and
+        the ``get_json_*`` functions return the SQL type of the accessor (``as_integer()`` and the like), with a
+        missing key, a JSON null or a value of another type all becoming SQL NULL.
+        """
+        function = self._json_access_function(binary.type)
+        document = self.process(binary.left, **kw)
+        path = self.process(binary.right, **kw)
+        access = f"{function}({document}, {path})"
+        if function == "get_json_double" and binary.type._type_affinity is sqltypes.Numeric:
+            precision, scale = binary.type.precision, binary.type.scale
+            if precision is not None and scale is not None:
+                return f"CAST({access} AS DECIMAL({precision}, {scale}))"
+        return access
+
+    def _json_access_function(self, access_type: sqltypes.TypeEngine) -> str:
+        affinity = access_type._type_affinity
+        if affinity is sqltypes.JSON:
+            return "json_query"
+        if affinity is sqltypes.Integer:
+            return "get_json_int"
+        if affinity is sqltypes.Boolean:
+            return "get_json_bool"
+        if affinity is sqltypes.String:
+            return "get_json_string"
+        if issubclass(affinity, sqltypes.Numeric):
+            return "get_json_double"
+        return "json_query"
+
     def update_tables_clause(
         self,
         update_stmt: Update,

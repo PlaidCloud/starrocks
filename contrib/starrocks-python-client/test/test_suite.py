@@ -45,6 +45,7 @@ from sqlalchemy.testing.suite import (
     CompositeKeyReflectionTest,
     CTETest as _CTETest,
     FetchLimitOffsetTest as _FetchLimitOffsetTest,
+    JSONLegacyStringCastIndexTest,
     JSONTest as _JSONTest,
     LongNameBlowoutTest,
     NumericTest as _NumericTest,
@@ -576,8 +577,6 @@ class CTETest(_CTETest):
         pass
 
 class JSONTest(_JSONTest):
-    """On SQLAlchemy 1.4 the typed-access tests are gated on ``legacy_unconditional_json_extract``, as 2.0 does."""
-
     # Override define_tables to specify autoincrement=True explicitly for test on Starrocks
     @classmethod
     def define_tables(cls, metadata):
@@ -621,14 +620,6 @@ class JSONTest(_JSONTest):
     def test_single_element_round_trip(self, element):
         pass
 
-    if not IS_SQLALCHEMY_2:
-        test_index_typed_access = testing.requires.legacy_unconditional_json_extract(_JSONTest.test_index_typed_access)
-        test_index_typed_comparison = testing.requires.legacy_unconditional_json_extract(
-            _JSONTest.test_index_typed_comparison
-        )
-        test_path_typed_comparison = testing.requires.legacy_unconditional_json_extract(
-            _JSONTest.test_path_typed_comparison
-        )
 
 FOR_UPDATE = testing.skip("starrocks", "StarRocks does not support SELECT ... FOR UPDATE")
 
@@ -710,6 +701,7 @@ class ServerSideCursorsTest(_ServerSideCursorsTest):
     def test_roundtrip_fetchall(self, metadata):
         pass
 
+JSONLegacyStringCastIndexTest.__requires__ = ('json_type', 'json_string_cast_keeps_json_quoting')
 LongNameBlowoutTest.__requires__ = ("index_reflection",)  # This will do to make it skip for now, no multiple column index
 CompositeKeyReflectionTest.__requires__ = ('primary_key_constraint_reflection',) # This will make it also skip the fixture which is not creating succesfully
 if not IS_SQLALCHEMY_2:
