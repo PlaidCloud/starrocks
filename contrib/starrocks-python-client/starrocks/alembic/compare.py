@@ -22,7 +22,16 @@ import warnings
 from alembic.autogenerate import comparators
 from alembic.autogenerate.api import AutogenContext
 from alembic.ddl import DefaultImpl
-from alembic.operations.ops import AlterColumnOp, AlterTableOp, UpgradeOps
+from alembic.operations.ops import (
+    AlterColumnOp,
+    AlterTableOp,
+    DropColumnOp,
+    DropTableOp,
+    MigrateOperation,
+    ModifyTableOps,
+    RenameTableOp,
+    UpgradeOps,
+)
 from alembic.util import to_list
 from sqlalchemy import Column
 from sqlalchemy.engine import Dialect
@@ -66,7 +75,7 @@ from starrocks.common.utils import (
 from starrocks.datatype import ARRAY, BOOLEAN, MAP, STRING, STRUCT, TINYINT, VARCHAR
 from starrocks.engine.interfaces import ReflectedDistributionInfo, ReflectedPartitionInfo, ReflectedTableKeyInfo
 from starrocks.reflection import StarRocksTableDefinitionParser
-from starrocks.sql.schema import MaterializedView, View
+from starrocks.sql.schema import MaterializedView, View, tables_read_by_query
 
 
 logger = logging.getLogger(__name__)
@@ -602,7 +611,9 @@ def compare_view(
     )
 
     if definition_changed or comment_changed:
-        _carry_view_content_for_replace(alter_view_op, conn_view, metadata_view)
+        _carry_view_content_for_replace(
+            alter_view_op, conn_view, metadata_view, conn_view_attributes.get(TableInfoKey.SECURITY)
+        )
 
     # If any attribute has changed, append the operation
     if definition_changed or comment_changed or security_changed:
@@ -619,13 +630,17 @@ def compare_view(
 
         logger.debug(f"Detected changed view attributes ({', '.join(changed_attrs)}) on {view_fqn!r}")
 
-def _carry_view_content_for_replace(alter_view_op: AlterViewOp, conn_view: View, metadata_view: View) -> None:
+def _carry_view_content_for_replace(
+    alter_view_op: AlterViewOp, conn_view: View, metadata_view: View, conn_security: Optional[str]
+) -> None:
     """Put on the op what the migration needs to recreate the view and to undo that.
 
     ALTER VIEW ... AS drops the view's comment and nothing alters a comment alone, so a change to the
     definition, the columns or the comment is applied as CREATE OR REPLACE VIEW with the full content. The
     comment goes on the op whenever either side has one, and the database's definition and columns go on it
-    so that a comment-only change, and the downgrade, still have a definition to recreate the view with.
+    so that a comment-only change, and the downgrade, still have a definition to recreate the view with. A
+    security other than the default goes on it too, so a view the migration drops and creates again, as
+    :func:`order_view_and_mv_ops` may, keeps it.
     """
     from starrocks.sql.schema import extract_view_columns
 
@@ -635,6 +650,9 @@ def _carry_view_content_for_replace(alter_view_op: AlterViewOp, conn_view: View,
     if alter_view_op.existing_definition is None:
         alter_view_op.existing_definition = conn_view.info.get(TableObjectInfoKey.DEFINITION)
         alter_view_op.existing_columns = extract_view_columns(conn_view)
+    conn_security = TableAttributeNormalizer._simple_normalize(conn_security)
+    if alter_view_op.existing_security is None and conn_security not in (None, ReflectionViewDefaults.security()):
+        alter_view_op.existing_security = conn_security
 
 
 def _configured_temp_view_schema(autogen_context) -> Optional[str]:
@@ -1518,6 +1536,170 @@ def check_table_kind_for_view_mv(
             f"<<<<\n"
         )
         raise ValueError(error_msg)
+
+
+# ==============================================================================
+# Order of view and materialized view operations
+# ==============================================================================
+_ObjectKey = Tuple[Optional[str], str]
+_VIEW_AND_MV_OPS: Tuple[type, ...] = (CreateViewOp, DropViewOp, AlterViewOp, AlterMaterializedViewOp)
+
+
+@comparators_dispatch_for_starrocks("schema", run_last=True)
+def order_view_and_mv_ops(
+    autogen_context: AutogenContext,
+    upgrade_ops: UpgradeOps,
+    schemas: Union[Set[None], Set[Optional[str]]],
+) -> None:
+    """Place view and materialized view operations around the table operations, so both directions of a revision run.
+
+    Alembic writes the downgrade as the upgrade reversed. So the upgrade drops views and materialized views first,
+    each before what it reads, then runs the table operations, then creates and alters views and materialized
+    views, each after what it reads; the downgrade then creates the dropped ones after the tables they read are
+    back, and drops the created ones before those tables go. An ALTER VIEW whose old definition reads a table the
+    revision drops, renames, or drops or renames a column of could not be undone before that table is restored, so
+    it becomes a drop before the table operations and a create after them. Names break ties, so the order is the
+    same on every run. This comparator is registered after the view and materialized view ones, so it runs last.
+    """
+    view_ops = [op for op in upgrade_ops.ops if isinstance(op, _VIEW_AND_MV_OPS)]
+    if not view_ops:
+        return
+    default_schema = autogen_context.dialect.default_schema_name
+    table_ops = [op for op in upgrade_ops.ops if not isinstance(op, _VIEW_AND_MV_OPS)]
+    tables_losing_names = _tables_losing_names(table_ops, default_schema)
+    drops: List[MigrateOperation] = []
+    creates: List[MigrateOperation] = []
+    for op in view_ops:
+        if isinstance(op, DropViewOp):
+            drops.append(op)
+        elif isinstance(op, AlterViewOp) and _definition_reads_any(
+            op.existing_definition, op.schema, tables_losing_names, default_schema
+        ):
+            drops.append(_drop_half_of_view_alter(op))
+            creates.append(_create_half_of_view_alter(op))
+        else:
+            creates.append(op)
+    upgrade_ops.ops[:] = (
+        _in_dependency_order(drops, default_schema, readers_first=True)
+        + table_ops
+        + _in_dependency_order(creates, default_schema, readers_first=False)
+    )
+
+
+def _object_key(schema: Optional[str], name: str, default_schema: Optional[str]) -> _ObjectKey:
+    """Return the lower-cased ``(schema, name)`` of an object, with None for the default schema."""
+    normalized_schema = schema.lower() if schema else None
+    if default_schema and normalized_schema == default_schema.lower():
+        normalized_schema = None
+    return normalized_schema, name.lower()
+
+
+def _tables_losing_names(table_ops: List[MigrateOperation], default_schema: Optional[str]) -> Set[_ObjectKey]:
+    """Return the tables the operations drop or rename, or drop or rename a column of."""
+    keys: Set[_ObjectKey] = set()
+    for op in table_ops:
+        if isinstance(op, (DropTableOp, RenameTableOp)):
+            keys.add(_object_key(op.schema, op.table_name, default_schema))
+        elif isinstance(op, ModifyTableOps) and any(
+            isinstance(column_op, DropColumnOp)
+            or (isinstance(column_op, AlterColumnOp) and column_op.modify_name is not None)
+            for column_op in op.ops
+        ):
+            keys.add(_object_key(op.schema, op.table_name, default_schema))
+    return keys
+
+
+def _keys_read_by(definition: Optional[str], schema: Optional[str], default_schema: Optional[str]) -> Set[_ObjectKey]:
+    """Return every object key a definition's table references could name.
+
+    An unqualified name may be in the view's own schema or in the default one.
+    """
+    if not definition:
+        return set()
+    keys: Set[_ObjectKey] = set()
+    for reference_schema, name in tables_read_by_query(str(definition)):
+        if reference_schema is not None:
+            keys.add(_object_key(reference_schema, name, default_schema))
+        else:
+            keys.add(_object_key(schema, name, default_schema))
+            keys.add((None, name))
+    return keys
+
+
+def _definition_reads_any(
+    definition: Optional[str], schema: Optional[str], keys: Set[_ObjectKey], default_schema: Optional[str]
+) -> bool:
+    return not _keys_read_by(definition, schema, default_schema).isdisjoint(keys)
+
+
+def _definition_of(op: MigrateOperation) -> Optional[str]:
+    """Return the definition whose reads order the operation: the new one, or the database's for a drop."""
+    if isinstance(op, CreateViewOp):
+        return op.definition
+    if isinstance(op, AlterViewOp):
+        return op.definition or op.existing_definition
+    if isinstance(op, DropViewOp):
+        return op.existing_definition
+    return None
+
+
+def _in_dependency_order(
+    ops: List[MigrateOperation], default_schema: Optional[str], readers_first: bool
+) -> List[MigrateOperation]:
+    """Return the view and materialized view operations so each comes after what it reads, or before it.
+
+    Among operations whose order is free, the one named first by ``(schema, name)`` comes first. A cycle, which
+    StarRocks would refuse anyway, keeps the remaining operations in name order.
+    """
+    pending = sorted(ops, key=lambda op: (op.schema or "", op.view_name))
+    keys = [_object_key(op.schema, op.view_name, default_schema) for op in pending]
+    must_follow = {
+        index: {
+            other for other, key in enumerate(keys)
+            if other != index and key in _keys_read_by(_definition_of(op), op.schema, default_schema)
+        }
+        for index, op in enumerate(pending)
+    }
+    if readers_first:
+        readers = {index: {other for other in must_follow if index in must_follow[other]} for index in must_follow}
+        must_follow = readers
+    ordered: List[int] = []
+    while len(ordered) < len(pending):
+        ready = [index for index in range(len(pending)) if index not in ordered and must_follow[index] <= set(ordered)]
+        if not ready:
+            remaining = [index for index in range(len(pending)) if index not in ordered]
+            logger.warning(
+                "The views and materialized views %s read each other in a cycle; they are kept in name order.",
+                [pending[index].view_name for index in remaining],
+            )
+            ordered.extend(remaining)
+            break
+        ordered.append(ready[0])
+    return [pending[index] for index in ordered]
+
+
+def _drop_half_of_view_alter(op: AlterViewOp) -> DropViewOp:
+    """Return the drop of the view as the database has it, so the downgrade creates it again after its tables."""
+    return DropViewOp(
+        op.view_name,
+        schema=op.schema,
+        existing_definition=op.existing_definition,
+        existing_columns=op.existing_columns,
+        existing_comment=op.existing_comment,
+        starrocks_security=op.existing_security,
+    )
+
+
+def _create_half_of_view_alter(op: AlterViewOp) -> CreateViewOp:
+    """Return the create of the view as the model has it, with what the alter leaves unchanged from the database."""
+    return CreateViewOp(
+        op.view_name,
+        op.definition or op.existing_definition,
+        schema=op.schema,
+        columns=op.columns if op.definition else op.existing_columns,
+        comment=op.comment,
+        starrocks_security=op.security if op.security is not None else op.existing_security,
+    )
 
 
 # ==============================================================================

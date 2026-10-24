@@ -17,12 +17,12 @@ import re
 
 from sqlalchemy import Column, MetaData, Table, inspect, text
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.testing.assertions import is_true
+from sqlalchemy.testing.assertions import eq_, is_true
 
 from starrocks.alembic.compare import TableAttributeNormalizer
 from starrocks.common.params import TableKind, TableObjectInfoKey
 from starrocks.datatype import INTEGER, STRING, VARCHAR
-from starrocks.sql.schema import View
+from starrocks.sql.schema import MaterializedView, View
 from test.system.lifecycle import (
     EMPTY_DOWNGRADE_STR,
     EMPTY_UPGRADE_STR,
@@ -771,3 +771,87 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         with sr_engine.connect() as conn:
             conn.execute(text("DROP TABLE IF EXISTS test_users"))
             conn.commit()
+
+
+class ViewOrderLifecycleTest(_AlembicLifecycleBase):
+    """Revisions whose views and materialized views read what the same revision creates, changes or removes."""
+
+    @staticmethod
+    def _base_table(metadata, *columns):
+        return Table(
+            "t1", metadata, Column("id", INTEGER, primary_key=True), *columns, starrocks_properties={"replication_num": "1"}
+        )
+
+    @staticmethod
+    def _assert_in_order(content, *calls):
+        missing = [call for call in calls if call not in content]
+        assert not missing, (missing, content)
+        positions = [content.index(call) for call in calls]
+        assert positions == sorted(positions), content
+
+    def test_removing_a_table_and_what_reads_it_downgrades(self, alembic_env, sr_engine):
+        Base = declarative_base()
+        self._base_table(Base.metadata, Column("name", VARCHAR(20)))
+        View("v1", Base.metadata, definition="SELECT id, name FROM t1")
+        MaterializedView(
+            "mv1", Base.metadata, definition="SELECT id FROM t1", starrocks_refresh="MANUAL",
+            starrocks_properties={"replication_num": "1"},
+        )
+        alembic_env.harness.generate_autogen_revision(metadata=Base.metadata, message="create")
+        alembic_env.harness.upgrade("head")
+        alembic_env.harness.generate_autogen_revision(metadata=declarative_base().metadata, message="remove")
+        upgrade_content = ScriptContentParser.extract_upgrade_content(
+            ScriptContentParser.check_script_content(alembic_env, 1, "remove")
+        )
+        self._assert_in_order(upgrade_content, "op.drop_materialized_view('mv1'", "op.drop_view('v1'", "op.drop_table('t1'")
+        alembic_env.harness.upgrade("head")
+        alembic_env.harness.downgrade("-1")
+        inspector = inspect(sr_engine)
+        is_true("v1" in inspector.get_view_names())
+        is_true("mv1" in inspector.get_materialized_view_names())
+
+    def test_dropping_a_column_a_view_stops_reading_downgrades(self, alembic_env, sr_engine):
+        Base = declarative_base()
+        self._base_table(Base.metadata, Column("name", VARCHAR(20)))
+        View("v1", Base.metadata, definition="SELECT id, name FROM t1")
+        alembic_env.harness.generate_autogen_revision(metadata=Base.metadata, message="create")
+        alembic_env.harness.upgrade("head")
+        Narrowed = declarative_base()
+        self._base_table(Narrowed.metadata)
+        View("v1", Narrowed.metadata, definition="SELECT id FROM t1")
+        alembic_env.harness.generate_autogen_revision(metadata=Narrowed.metadata, message="narrow")
+        upgrade_content = ScriptContentParser.extract_upgrade_content(
+            ScriptContentParser.check_script_content(alembic_env, 1, "narrow")
+        )
+        self._assert_in_order(upgrade_content, "op.drop_view('v1'", "op.drop_column('t1', 'name'", "op.create_view('v1'")
+        alembic_env.harness.upgrade("head")
+        alembic_env.harness.downgrade("-1")
+        inspector = inspect(sr_engine)
+        is_true("name" in [column["name"] for column in inspector.get_columns("t1")])
+        is_true("name" in inspector.get_view_definition("v1"))
+
+    def test_views_over_views_and_mvs_follow_what_they_read(self, alembic_env, sr_engine):
+        Base = declarative_base()
+        self._base_table(Base.metadata)
+        MaterializedView(
+            "z_mv", Base.metadata, definition="SELECT id FROM t1", starrocks_refresh="MANUAL",
+            starrocks_properties={"replication_num": "1"},
+        )
+        View("m_view", Base.metadata, definition="SELECT id FROM z_mv")
+        View("a_view", Base.metadata, definition="SELECT id FROM m_view")
+        alembic_env.harness.generate_autogen_revision(metadata=Base.metadata, message="create")
+        upgrade_content = ScriptContentParser.extract_upgrade_content(
+            ScriptContentParser.check_script_content(alembic_env, 1, "create")
+        )
+        self._assert_in_order(
+            upgrade_content,
+            "op.create_table('t1'",
+            "'z_mv',\n        'SELECT id FROM t1'",
+            "op.create_view('m_view'",
+            "op.create_view('a_view'",
+        )
+        alembic_env.harness.upgrade("head")
+        alembic_env.harness.downgrade("base")
+        alembic_env.harness.upgrade("head")
+        inspector = inspect(sr_engine)
+        eq_(sorted(inspector.get_view_names()), ["a_view", "m_view"])
