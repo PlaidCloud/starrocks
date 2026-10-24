@@ -338,6 +338,11 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
             }
 
     @property
+    def nvarchar_types(self) -> exclusions.compound:
+        """NCHAR and NVARCHAR, which compile to StarRocks' CHAR and VARCHAR, both UTF-8."""
+        return exclusions.open()
+
+    @property
     def table_ddl_if_exists(self) -> exclusions.compound:
         """``CREATE TABLE IF NOT EXISTS`` and ``DROP TABLE IF EXISTS``."""
         return exclusions.open()

@@ -293,6 +293,10 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
             longest_value_bytes = max(longest_value_bytes, type_.length)
         return self.visit_VARCHAR(sqltypes.String(longest_value_bytes), **kw)
 
+    def visit_NCHAR(self, type_: sqltypes.NCHAR, **kw: Any) -> str:
+        """StarRocks has no NATIONAL CHAR; its CHAR is UTF-8 already, as NVARCHAR's VARCHAR is."""
+        return self.visit_CHAR(type_, **kw)
+
     def visit_TEXT(self, type_, **kw):
         """StarRocks stores TEXT as varchar(65533), which is what STRING means."""
         return "STRING"
