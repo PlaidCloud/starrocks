@@ -166,6 +166,7 @@ class ReflectedRefreshInfo:
 class MySQLKeyType(Enum):
     PRIMARY = "PRIMARY"
     UNIQUE = "UNIQUE"
+    DUPLICATE = "DUPLICATE"
     FULLTEXT = "FULLTEXT"
     SPATIAL = "SPATIAL"
 

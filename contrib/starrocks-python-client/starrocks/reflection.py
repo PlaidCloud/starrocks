@@ -191,6 +191,8 @@ class StarRocksTableDefinitionParser(object):
     _BUCKETS_REPLACE_PATTERN = re.compile(r'\s+BUCKETS\s+\d+', re.IGNORECASE)
     _PARTITION_BY_PATTERN = re.compile(r"PARTITION BY\s*(.+?)(?=\s*(?:DISTRIBUTED BY|ORDER BY|REFRESH|PROPERTIES|AS\b|\Z))", re.IGNORECASE | re.DOTALL)
 
+    _ROW_PER_KEY_TABLE_KEYS = (TableInfoKey.PRIMARY_KEY, TableInfoKey.UNIQUE_KEY, TableInfoKey.AGGREGATE_KEY)
+
     _VIEW_SECURITY_PATTERN = re.compile(r'\s+SECURITY\s+(INVOKER|DEFINER|NONE)\b', re.IGNORECASE)
 
     # Patterns to parse CREATE MATERIALIZED VIEW statement
@@ -355,22 +357,17 @@ class StarRocksTableDefinitionParser(object):
 
     def _get_mysql_key_type(self, table_config: Dict[str, Any]) -> str:
         """
-        Get key type from information_schema.tables_config table.
-        And return the MySQL's key type, as MySQLKeyType
-        But, directly return the MySQLKeyType.PRIMARY, for check only
+        Map the table model in information_schema.tables_config to the MySQL key type
+        that the inherited ``get_pk_constraint`` and ``get_indexes`` understand.
+
+        PRIMARY KEY, UNIQUE KEY and AGGREGATE KEY tables hold one row per key, so their
+        key columns are reported as the primary key. A DUPLICATE KEY table (or one whose
+        model is unknown) is only sorted by its key columns, so it has no primary key.
         """
-        # table_model_to_key_type_map: Dict[str, MySQLKeyType] = {
-        #     TableModel.DUP_KEYS: MySQLKeyType.UNIQUE,
-        #     TableModel.DUP_KEYS2: MySQLKeyType.UNIQUE,
-        #     TableModel.AGG_KEYS: MySQLKeyType.UNIQUE,
-        #     TableModel.AGG_KEYS2: MySQLKeyType.UNIQUE,
-        #     TableModel.PRI_KEYS: MySQLKeyType.PRIMARY,
-        #     TableModel.PRI_KEYS2: MySQLKeyType.PRIMARY,
-        #     TableModel.UNQ_KEYS: MySQLKeyType.UNIQUE,
-        #     TableModel.UNQ_KEYS2: MySQLKeyType.UNIQUE,
-        # }
-        # return str(table_model_to_key_type_map.get(table_config.get(TableConfigKey.TABLE_MODEL), "").value)
-        return str(MySQLKeyType.PRIMARY.value)
+        table_model = table_config.get(TableConfigKey.TABLE_MODEL)
+        if TableInfoKey.MODEL_TO_KEY_MAP.get(table_model) in self._ROW_PER_KEY_TABLE_KEYS:
+            return str(MySQLKeyType.PRIMARY.value)
+        return str(MySQLKeyType.DUPLICATE.value)
 
     def _sort_columns(self, columns: List[_DecodingRow]) -> List[_DecodingRow]:
         """

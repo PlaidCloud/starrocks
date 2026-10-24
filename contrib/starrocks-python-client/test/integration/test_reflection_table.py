@@ -102,3 +102,37 @@ class PropertyValueRoundTripTest(fixtures.TestBase):
         altered = value + "_2"
         connection.execute(AlterTableProperties("prop_round_trip", {"colocate_with": altered}))
         assert self._reflected_colocate_with(connection, "prop_round_trip") == altered
+
+
+class ReflectedPrimaryKeyTest(fixtures.TestBase):
+    """Only tables with one row per key report their key columns as the primary key."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @testing.combinations(
+        ("primary_key", "starrocks_primary_key", ["id", "tenant"]),
+        ("unique_key", "starrocks_unique_key", ["id", "tenant"]),
+        ("aggregate_key", "starrocks_aggregate_key", ["id", "tenant"]),
+        ("duplicate_key", "starrocks_duplicate_key", []),
+        argnames="key_option, expected_pk_columns",
+        id_="iaa",
+    )
+    def test_primary_key_reported_by_table_model(self, connection, metadata, key_option, expected_pk_columns):
+        value_kwargs = {"starrocks_agg_type": "SUM"} if key_option == "starrocks_aggregate_key" else {}
+        Table(
+            "reflected_pk_model",
+            metadata,
+            Column("id", Integer),
+            Column("tenant", Integer),
+            Column("val", Integer, **value_kwargs),
+            starrocks_distributed_by="HASH(id) BUCKETS 1",
+            starrocks_properties={"replication_num": "1"},
+            **{key_option: "id, tenant"},
+        )
+        metadata.create_all(connection)
+
+        inspector = inspect(connection)
+        assert inspector.get_pk_constraint("reflected_pk_model")["constrained_columns"] == expected_pk_columns
+        assert inspector.get_table_options("reflected_pk_model")[f"{key_option}"] == "id, tenant"
+        assert inspector.get_indexes("reflected_pk_model") == []
