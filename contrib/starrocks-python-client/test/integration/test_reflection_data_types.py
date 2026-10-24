@@ -57,6 +57,7 @@ from starrocks.datatype import (
     VARCHAR,
 )
 from test.unit.test_compare_column_type import run_compare
+from test.util import DECIMAL256_NEEDS_4_0, STRUCT_FIELD_NAMES_UNQUOTED
 
 
 logger = logging.getLogger(__name__)
@@ -253,6 +254,7 @@ class DataTypeReflectionTest(fixtures.TestBase):
         assert isinstance(reflected_table.c.fsp_col.type, DATETIME)
         assert isinstance(reflected_table.c.timestamp_col.type, DATETIME)
 
+    @STRUCT_FIELD_NAMES_UNQUOTED
     def test_struct_field_names_needing_quotes_are_created(self, connection):
         """STRUCT field names that are not plain identifiers must be backquoted in the CREATE TABLE."""
         table_name = "test_reflect_struct_quoted_fields"
@@ -291,6 +293,7 @@ class DataTypeReflectionTest(fixtures.TestBase):
         assert values == [1.123456789012345, 1e300]
         assert all(isinstance(value, float) for value in values)
 
+    @DECIMAL256_NEEDS_4_0
     def test_wide_decimal_inside_array_reflects_as_decimal(self, connection):
         """The server prints ``array<DECIMAL256(76,10)>`` for a nested wide decimal; it must not reflect as NullType."""
         table_name = "test_reflect_nested_decimal256"

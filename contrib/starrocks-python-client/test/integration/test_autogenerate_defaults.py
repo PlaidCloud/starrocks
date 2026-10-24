@@ -22,6 +22,7 @@ from sqlalchemy.testing import fixtures
 import starrocks.alembic  # noqa: F401
 from starrocks.common.utils import unquote_sql_string_literal
 from starrocks.datatype import BITMAP, DATE, HLL, INTEGER, JSON, PERCENTILE, VARCHAR
+from test.util import FLAT_JSON_PROPERTIES_NEED_4_0
 
 
 class _DefaultsTestBase(fixtures.TestBase):
@@ -146,7 +147,7 @@ class ServerAddedPropertiesTest(_DefaultsTestBase):
             },
             "dynamic_partition.time_zone",
         ),
-        ("flat_json", {"flat_json.enable": "true"}, "flat_json.null.factor"),
+        ("flat_json", {"flat_json.enable": "true"}, "flat_json.null.factor", FLAT_JSON_PROPERTIES_NEED_4_0),
         argnames="properties, added_key",
         id_="iaa",
     )

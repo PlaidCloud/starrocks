@@ -21,6 +21,7 @@ from sqlalchemy.testing import fixtures
 
 import starrocks.alembic  # noqa: F401
 from starrocks.datatype import DATETIME, INTEGER, VARCHAR
+from test.util import TIME_SLICE_CEIL_PARTITION_NEEDS_4_1
 
 
 class OmittedAttributesTest(fixtures.TestBase):
@@ -140,7 +141,11 @@ class TimeSlicePartitionTest(fixtures.TestBase):
     @testing.combinations(
         ("time_slice(dt, INTERVAL 7 DAY)", "time_slice(dt, INTERVAL 7 DAY)"),
         ("time_slice(dt, INTERVAL 7 DAY, floor)", "time_slice(dt, INTERVAL 7 DAY)"),
-        ("time_slice(dt, INTERVAL 1 MONTH, ceil)", "time_slice(dt, INTERVAL 1 MONTH, ceil)"),
+        (
+            "time_slice(dt, INTERVAL 1 MONTH, ceil)",
+            "time_slice(dt, INTERVAL 1 MONTH, ceil)",
+            TIME_SLICE_CEIL_PARTITION_NEEDS_4_1,
+        ),
         argnames="partition_by, model_partition_by",
     )
     def test_no_diff_after_create(self, connection, caplog, partition_by, model_partition_by):
