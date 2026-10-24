@@ -151,6 +151,27 @@ class InsertOverwriteAndLabelTest(fixtures.TablesTest):
         ).all()
         eq_(loads, [(label,)])
 
+    @testing.combinations(
+        ("overwrite", {"starrocks_overwrite": True}),
+        ("label", {"starrocks_label": "sqla_label_never_used"}),
+        id_="ia",
+        argnames="options",
+    )
+    def test_executemany_is_refused(self, connection, options):
+        target = self.tables.overwrite_target
+        connection.execute(insert(target).values(id=1).with_dialect_options(starrocks_overwrite=True))
+        with expect_raises_message(exc.InvalidRequestError, "need the rows in one statement"):
+            connection.execute(insert(target).with_dialect_options(**options), [{"id": 7}, {"id": 8}])
+        eq_(connection.execute(select(target.c.id)).all(), [(1,)])
+
+    def test_overwrite_with_several_rows_in_one_statement(self, connection):
+        target = self.tables.overwrite_target
+        connection.execute(insert(target).values(id=1))
+        connection.execute(
+            insert(target).values([{"id": 7}, {"id": 8}]).with_dialect_options(starrocks_overwrite=True)
+        )
+        eq_(sorted(connection.execute(select(target.c.id)).all()), [(7,), (8,)])
+
     def test_reused_label_is_rejected_by_server(self, connection):
         target = self.tables.overwrite_target
         label = f"sqla_label_{uuid.uuid4().hex}"

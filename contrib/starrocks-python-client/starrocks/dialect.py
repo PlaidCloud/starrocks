@@ -1785,8 +1785,25 @@ class StarRocksDialect(MySQLDialect_pymysql):
     def _prepare_connection_for(
         self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext]
     ) -> None:
+        self._refuse_split_overwrite_or_label(context)
         self._match_transaction_to(cursor, statement, context)
         self._wait_for_schema_change_blocking(cursor, statement, context)
+
+    def _refuse_split_overwrite_or_label(self, context: Optional[ExecutionContext]) -> None:
+        """Refuse an ``INSERT OVERWRITE`` or ``INSERT ... WITH LABEL`` run with many parameter sets.
+
+        The driver sends an executemany as one statement per row or per batch of rows. Each overwrite would replace
+        the rows the statement before it wrote, and each statement after the first would reuse a label whose load
+        has already committed.
+        """
+        if context is None or not (context.executemany and context.isinsert):
+            return
+        options = context.compiled.statement.dialect_options[self.name]
+        if options["overwrite"] or options["label"] is not None:
+            raise exc.InvalidRequestError(
+                "starrocks_overwrite and starrocks_label need the rows in one statement, but executemany sends "
+                "several; pass the rows to insert().values([...]) instead"
+            )
 
     _ISOLATION_LEVELS: Final[Tuple[str, ...]] = ("AUTOCOMMIT", "READ COMMITTED")
     _TRANSACTIONS_SINCE: Final[Tuple[int, ...]] = (3, 5)
