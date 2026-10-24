@@ -62,7 +62,7 @@ from starrocks.common.params import (
     TableKind,
     TableObjectInfoKey,
 )
-from starrocks.common.types import ColumnAggType, SystemRunMode, TableEngine, TableType
+from starrocks.common.types import ColumnAggType, SystemRunMode, TableEngine, TableType, ViewSecurityType
 from starrocks.common.utils import TableAttributeNormalizer
 from starrocks.sql.schema import View
 
@@ -1133,11 +1133,21 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         if table.comment:
             text += "\nCOMMENT " + self.sql_compiler.render_literal_value(table.comment, sqltypes.String())
         if security:
-            text += f"\nSECURITY {security}"
+            text += "\nSECURITY " + self._view_security_keyword(table, security)
         text += f"\nAS\n{definition}"
 
         logger.debug("Compiled SQL for CreateView: \n%s", text)
         return text
+
+    @staticmethod
+    def _view_security_keyword(view: Table, security: str) -> str:
+        """Return the view's SECURITY keyword, refusing anything but the NONE and INVOKER that StarRocks has."""
+        keyword = str(security).upper()
+        if keyword not in ViewSecurityType.ALLOWED_ITEMS - {ViewSecurityType.EMPTY}:
+            raise exc.CompileError(
+                f"StarRocks views have SECURITY NONE or INVOKER, not {security!r} (view {view.name!r})"
+            )
+        return keyword
 
     def visit_create_view(self, create: CreateView, **kw: Any) -> str:
         """
