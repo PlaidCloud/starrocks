@@ -14,11 +14,14 @@
 
 """How the dialect compiles Alembic's MySQL column-alter elements: MODIFY COLUMN, CHANGE COLUMN and ALTER DEFAULT."""
 
+from alembic import op
 from alembic.ddl.mysql import MySQLAlterDefault, MySQLChangeColumn, MySQLModifyColumn
-from sqlalchemy import text
-from sqlalchemy.testing import fixtures
+from alembic.testing.fixtures import op_fixture
+from sqlalchemy import exc, testing, text
+from sqlalchemy.testing import expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
+import starrocks.alembic  # noqa: F401
 from starrocks.datatype import INTEGER, STRING
 from starrocks.dialect import StarRocksDialect
 
@@ -117,18 +120,42 @@ class AlterColumnCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "ALTER TABLE t MODIFY COLUMN old INTEGER NOT NULL DEFAULT '0' COMMENT 'changed', RENAME COLUMN old TO new",
         )
 
-    def test_alter_default_literal(self):
-        """StarRocks rejects this: MODIFY COLUMN needs the column type, which ALTER DEFAULT does not carry.
+    @testing.combinations(
+        ("literal", "abc"),
+        ("expression", text("CURRENT_TIMESTAMP")),
+        argnames="default",
+        id_="ia",
+    )
+    def test_alter_default_is_refused(self, default):
+        """StarRocks cannot change a default, and the MySQL statement lacks the column type it asks for."""
+        with expect_raises_message(exc.CompileError, "cannot change a column's default value"):
+            MySQLAlterDefault("t", "c", default=default, schema=None).compile(dialect=self.__dialect__)
 
-        With the type it still fails, because StarRocks cannot change a column's default value at all.
-        """
-        self.assert_compile(
-            MySQLAlterDefault("t", "c", default="abc", schema=None),
-            "ALTER TABLE t MODIFY COLUMN c DEFAULT 'abc'",
-        )
 
-    def test_alter_default_expression(self):
-        self.assert_compile(
-            MySQLAlterDefault("t", "c", default=text("CURRENT_TIMESTAMP"), schema=None),
-            "ALTER TABLE t MODIFY COLUMN c DEFAULT CURRENT_TIMESTAMP",
-        )
+class AlterColumnDefaultOperationTest(fixtures.TestBase):
+    """``op.alter_column(server_default=...)`` refuses a change of default and passes on an unchanged one."""
+
+    def test_new_default_alone_is_refused(self):
+        op_fixture("starrocks")
+        with expect_raises_message(exc.CompileError, "cannot change a column's default value"):
+            op.alter_column("t", "c", server_default="x", existing_type=INTEGER())
+
+    def test_new_default_with_a_type_change_is_refused(self):
+        op_fixture("starrocks")
+        with expect_raises_message(exc.CompileError, "'c' of table 't'"):
+            op.alter_column("t", "c", type_=INTEGER(), server_default="x", existing_server_default="y")
+
+    def test_dropped_default_is_refused(self):
+        op_fixture("starrocks")
+        with expect_raises_message(exc.CompileError, "cannot change a column's default value"):
+            op.alter_column("t", "c", server_default=None, existing_server_default="y", existing_type=INTEGER())
+
+    def test_unchanged_default_stays_in_the_modify(self):
+        context = op_fixture("starrocks")
+        op.alter_column("t", "c", type_=INTEGER(), server_default="y", existing_server_default="y", nullable=True)
+        context.assert_("ALTER TABLE t MODIFY COLUMN c INTEGER NULL DEFAULT 'y'")
+
+    def test_no_default_argument_is_not_refused(self):
+        context = op_fixture("starrocks")
+        op.alter_column("t", "c", type_=INTEGER(), existing_server_default="y", nullable=True)
+        context.assert_("ALTER TABLE t MODIFY COLUMN c INTEGER NULL DEFAULT 'y'")

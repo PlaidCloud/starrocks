@@ -20,7 +20,7 @@ from sqlalchemy import Column, MetaData, Table, testing
 from sqlalchemy.testing import fixtures
 
 import starrocks.alembic  # noqa: F401
-from starrocks.datatype import DATETIME, INTEGER
+from starrocks.datatype import DATETIME, INTEGER, VARCHAR
 
 
 class OmittedAttributesTest(fixtures.TestBase):
@@ -90,6 +90,44 @@ class UnalterableChangesTest(fixtures.TestBase):
         finally:
             connection.exec_driver_sql("DROP TABLE unalterable_part")
             connection.exec_driver_sql("DROP TABLE unalterable_plain")
+
+
+class ColumnDefaultChangeTest(fixtures.TestBase):
+    """A changed column default is warned about and skipped, since StarRocks cannot change a default."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @testing.requires.sqlalchemy_2
+    def test_default_change_is_skipped_and_other_changes_are_generated(self, connection, caplog):
+        connection.exec_driver_sql(
+            "CREATE TABLE default_change (id INT, s VARCHAR(10) DEFAULT 'a') DUPLICATE KEY(id) "
+            "DISTRIBUTED BY HASH(id) BUCKETS 1"
+        )
+        try:
+            metadata = MetaData()
+            Table(
+                "default_change",
+                metadata,
+                Column("id", INTEGER),
+                Column("s", VARCHAR(10), server_default="b"),
+                Column("added", INTEGER),
+                starrocks_duplicate_key="id",
+                starrocks_distributed_by="HASH(id) BUCKETS 1",
+            )
+            context = MigrationContext.configure(
+                connection,
+                opts={
+                    "compare_server_default": True,
+                    "include_name": lambda name, type_, parents: type_ != "table" or name == "default_change",
+                },
+            )
+            diffs = compare_metadata(context, metadata)
+
+            assert [(diff[0], diff[3].name) for diff in diffs] == [("add_column", "added")]
+            assert "Detected DEFAULT change on column 'default_change.s'" in caplog.text
+        finally:
+            connection.exec_driver_sql("DROP TABLE default_change")
 
 
 class TimeSlicePartitionTest(fixtures.TestBase):

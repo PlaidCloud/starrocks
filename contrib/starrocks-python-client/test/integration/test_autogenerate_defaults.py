@@ -117,7 +117,8 @@ class ServerDefaultComparisonTest(_DefaultsTestBase):
         assert self._diff_ops(connection, metadata, "default_literal") == []
 
     @testing.requires.sqlalchemy_2
-    def test_changed_literal_default_is_still_a_difference(self, connection, metadata):
+    def test_changed_literal_default_is_still_a_difference(self, connection, metadata, caplog):
+        """StarRocks cannot change a default, so the detected change is reported instead of generated."""
         self._table(metadata, "default_changed", label="before")
         metadata.create_all(connection)
         model = MetaData()
@@ -125,7 +126,8 @@ class ServerDefaultComparisonTest(_DefaultsTestBase):
 
         ops = self._diff_ops(connection, model, "default_changed")
 
-        assert [op[0] for op in ops[0]] == ["modify_default"]
+        assert ops == []
+        assert "Detected DEFAULT change on column 'default_changed.label'" in caplog.text
 
 
 class ServerAddedPropertiesTest(_DefaultsTestBase):

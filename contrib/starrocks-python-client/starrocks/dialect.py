@@ -2699,12 +2699,18 @@ def _starrocks_rename_table(element: RenameTable, compiler: StarRocksDDLCompiler
 @compiles(MySQLAlterDefault, DialectName)
 def _starrocks_alter_default(element: MySQLAlterDefault, compiler: StarRocksDDLCompiler, **kw: Any) -> str:  # type: ignore[name-defined]
     """
-    StarRocks only supports MODIFY DEFAULT, no DROP DEFAULT now.
+    StarRocks cannot change a column's default value, so refuse instead of rendering a statement it rejects.
+
+    The statement Alembic's MySQL dialect builds, ``MODIFY COLUMN c DEFAULT ...``, has no column type, and
+    StarRocks rejects it with "Column's type is null" even before it reaches the real limitation.
     """
-    return "%s MODIFY COLUMN %s %s" % (
-        alter_table(compiler, element.table_name, element.schema),
-        format_column_name(compiler, element.column_name),
-        (
-            "DEFAULT %s" % format_server_default(compiler, element.default)
-        ),
+    raise column_default_change_error(element.table_name, element.column_name)
+
+
+def column_default_change_error(table_name: str, column_name: str) -> exc.CompileError:
+    """Return the CompileError for a change of a column's default value, which StarRocks cannot make."""
+    return exc.CompileError(
+        f"StarRocks cannot change a column's default value ('Can not change default value'), so the default "
+        f"of column {column_name!r} of table {table_name!r} cannot be altered. Recreate the table or the "
+        f"column with the new default instead."
     )

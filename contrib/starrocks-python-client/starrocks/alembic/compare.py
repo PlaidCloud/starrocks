@@ -233,7 +233,15 @@ def compare_complex_type(impl: DefaultImpl, inspector_type: sqltypes.TypeEngine,
     return True
 
 
-def comparators_dispatch_for_starrocks(dispatch_type: str):
+try:
+    from alembic.util import DispatchPriority
+
+    _LAST_PRIORITY: Dict[str, Any] = {"priority": DispatchPriority.LAST}
+except ImportError:
+    _LAST_PRIORITY = {}
+
+
+def comparators_dispatch_for_starrocks(dispatch_type: str, run_last: bool = False):
     """
     StarRocks-specific dispatch decorator.
 
@@ -241,6 +249,9 @@ def comparators_dispatch_for_starrocks(dispatch_type: str):
 
     Args:
         dispatch_type: Alembic dispatch type ("table", "column", "view", etc.)
+        run_last: Run after Alembic's own comparators of the type, which Alembic 1.18 and later runs
+            in batches by priority, with its server default comparison in the last one. Earlier
+            versions run them in the order registered, so this changes nothing there.
 
     Usage:
         @starrocks_dispatch_for("table")
@@ -268,7 +279,7 @@ def comparators_dispatch_for_starrocks(dispatch_type: str):
             return func(*args, **kwargs)
 
         # Register to Alembic dispatch system
-        return comparators.dispatch_for(dispatch_type)(wrapper)
+        return comparators.dispatch_for(dispatch_type, **(_LAST_PRIORITY if run_last else {}))(wrapper)
 
     return decorator
 
@@ -2445,3 +2456,80 @@ def _metadata_default_sql(dialect: Dialect, metadata_column: Column[Any], render
     if isinstance(default.arg, TextClause):
         return default.arg.text
     return str(default.arg.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
+
+
+def server_default_text(server_default: Any) -> Optional[str]:
+    """Return the text of a server default, as a string, a ``text()`` or a ``DefaultClause``, or ``None`` for none."""
+    if server_default is None or server_default is False:
+        return None
+    argument = getattr(server_default, "arg", server_default)
+    return str(getattr(argument, "text", argument))
+
+
+def _warn_and_skip_default_change(
+    alter_column_op: AlterColumnOp,
+    schema: Optional[str],
+    tname: Union[quoted_name, str],
+    existing_default: Any,
+) -> None:
+    """Warn about a change of a column's default value and leave it out of the ALTER COLUMN op.
+
+    StarRocks cannot change a default ("Can not change default value"), so an op that carries the new default
+    could not be applied.
+    """
+    table_fqn = utils.gen_simple_qualified_name(tname, schema)
+    logger.warning(
+        f"Detected DEFAULT change on column '{table_fqn}.{alter_column_op.column_name}', "
+        f"from {server_default_text(existing_default)!r} (in database) to "
+        f"{server_default_text(alter_column_op.modify_server_default)!r} (in metadata). StarRocks does not support "
+        f"changing a column's default value. No operation is generated for it; recreate the column or the table "
+        f"with the new default."
+    )
+    alter_column_op.modify_server_default = False
+
+
+@comparators_dispatch_for_starrocks("column")
+def skip_starrocks_column_default_change(
+    autogen_context: AutogenContext,
+    alter_column_op: AlterColumnOp,
+    schema: Optional[str],
+    tname: Union[quoted_name, str],
+    cname: Union[quoted_name, str],
+    conn_col: Column[Any],
+    metadata_col: Column[Any],
+) -> None:
+    """Skip a default change where Alembic runs its default comparison before this comparator.
+
+    That is every Alembic before 1.18, which runs its own comparators first; later ones run theirs after, and
+    `skip_starrocks_default_changes` clears the change there.
+    """
+    if alter_column_op is not None and alter_column_op.modify_server_default is not False:
+        _warn_and_skip_default_change(alter_column_op, schema, tname, conn_col.server_default)
+
+
+def skip_starrocks_default_changes(autogen_context: AutogenContext, upgrade_ops: UpgradeOps) -> None:
+    """Skip every default change in the net changes, after Alembic 1.18's own comparators have produced them.
+
+    Alembic 1.18 and later compare server defaults after the dialect comparators of the same priority have run,
+    so the column comparator above sees no change yet. An ALTER COLUMN op left with no change, and a table
+    left with no op, are removed.
+    """
+    for table_ops in list(upgrade_ops.ops):
+        column_ops = getattr(table_ops, "ops", None)
+        if column_ops is None:
+            continue
+        skipped_any = False
+        for column_op in list(column_ops):
+            if isinstance(column_op, AlterColumnOp) and column_op.modify_server_default is not False:
+                _warn_and_skip_default_change(
+                    column_op, table_ops.schema, table_ops.table_name, column_op.existing_server_default
+                )
+                skipped_any = True
+                if not column_op.has_changes():
+                    column_ops.remove(column_op)
+        if skipped_any and not column_ops:
+            upgrade_ops.ops.remove(table_ops)
+
+
+if _LAST_PRIORITY:
+    comparators_dispatch_for_starrocks("autogenerate", run_last=True)(skip_starrocks_default_changes)

@@ -27,7 +27,7 @@ from sqlalchemy.sql.elements import TextClause
 from starrocks import datatype
 from starrocks.alembic import compare
 from starrocks.datatype import BIGINT, VARCHAR
-from starrocks.dialect import StarRocksDialect
+from starrocks.dialect import StarRocksDialect, column_default_change_error
 from starrocks.sql.ddl import AlterTableColumns, AlterTableDistribution, AlterTableOrder, AlterTableProperties
 
 
@@ -283,6 +283,38 @@ class StarRocksImpl(MySQLImpl):
                 table_name, raw_state,
             )
             time.sleep(poll_interval)
+
+    @staticmethod
+    def _unquoted_default(server_default: Any) -> Optional[str]:
+        """Return the text of a server default without the quotes around a string, or ``None`` for none."""
+        text_of_default = compare.server_default_text(server_default)
+        return None if text_of_default is None else text_of_default.strip("'\"")
+
+    def alter_column(
+        self,
+        table_name: str,
+        column_name: str,
+        *,
+        server_default: Any = False,
+        existing_server_default: Any = None,
+        **kw: Any,
+    ) -> None:
+        """Alter a column, refusing a change of its default value, which StarRocks cannot make.
+
+        A ``server_default`` that equals ``existing_server_default`` is no change, so it is passed on to the
+        MODIFY COLUMN that keeps the default; any other one raises CompileError.
+        """
+        if server_default is not False and self._unquoted_default(server_default) != self._unquoted_default(
+            existing_server_default
+        ):
+            raise column_default_change_error(table_name, column_name)
+        super().alter_column(
+            table_name,
+            column_name,
+            server_default=server_default,
+            existing_server_default=existing_server_default,
+            **kw,
+        )
 
     def correct_for_autogen_constraints(
         self,
