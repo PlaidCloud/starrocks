@@ -427,6 +427,35 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             text += " USING " + self._index_type_keyword(index, index_type)
         return text
 
+    def visit_add_constraint(self, create: sa_schema.AddConstraint, **kw: Any) -> str:
+        """Refuse ``ADD CONSTRAINT``, which StarRocks does not have, rather than send it to the server."""
+        raise exc.CompileError(self._unholdable_constraint_message(create.element, "add"))
+
+    def visit_drop_constraint(self, drop: sa_schema.DropConstraint, **kw: Any) -> str:
+        """Refuse ``DROP CONSTRAINT``: a StarRocks table has no constraint to drop."""
+        raise exc.CompileError(self._unholdable_constraint_message(drop.element, "drop"))
+
+    @staticmethod
+    def _unholdable_constraint_message(constraint: sa_schema.Constraint, action: str) -> str:
+        """Explain why StarRocks cannot add or drop a constraint, and what it offers instead."""
+        name = f" {constraint.name!r}" if constraint.name else ""
+        if isinstance(constraint, sa_schema.PrimaryKeyConstraint):
+            return (
+                f"StarRocks cannot {action} primary key{name}: a table's key is fixed when the table is created, "
+                "with starrocks_primary_key or another starrocks_*_key"
+            )
+        if isinstance(constraint, sa_schema.UniqueConstraint):
+            return (
+                f"StarRocks cannot {action} unique constraint{name}: use a PRIMARY KEY or UNIQUE KEY table, "
+                "or the unique_constraints table property"
+            )
+        if isinstance(constraint, sa_schema.ForeignKeyConstraint):
+            return (
+                f"StarRocks cannot {action} foreign key{name}: the foreign_key_constraints table property "
+                "records foreign keys for the optimizer"
+            )
+        return f"StarRocks cannot {action} constraint{name}: its tables hold no constraints besides their key"
+
     def _indexed_column_name(self, index: sa_schema.Index, expression: Any) -> str:
         """Return the quoted name of an indexed column, refusing expressions, which StarRocks cannot index."""
         if not isinstance(expression, sa_schema.Column):

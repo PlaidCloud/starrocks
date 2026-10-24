@@ -323,3 +323,42 @@ class AlterTableOperationTest(fixtures.TestBase):
         context = op_fixture("starrocks")
         op.rename_table("users", "customers", schema=schema)
         context.assert_(expected)
+
+
+class ConstraintOperationTest(fixtures.TestBase):
+    """StarRocks tables hold no constraints besides their key, so constraint operations raise before reaching it."""
+
+    @testing.combinations(
+        ("primary_key", lambda: op.create_primary_key("pk_users", "users", ["id"]), "cannot add primary key 'pk_users'"),
+        (
+            "unique",
+            lambda: op.create_unique_constraint("uq_users_email", "users", ["email"]),
+            "cannot add unique constraint 'uq_users_email'",
+        ),
+        (
+            "foreign_key",
+            lambda: op.create_foreign_key("fk_orders_user", "orders", "users", ["user_id"], ["id"]),
+            "cannot add foreign key 'fk_orders_user'",
+        ),
+        (
+            "check",
+            lambda: op.create_check_constraint("ck_users_age", "users", "age > 0"),
+            "cannot add constraint 'ck_users_age'",
+        ),
+        (
+            "drop_foreign_key",
+            lambda: op.drop_constraint("fk_orders_user", "orders", type_="foreignkey"),
+            "cannot drop foreign key 'fk_orders_user'",
+        ),
+        (
+            "drop_unique",
+            lambda: op.drop_constraint("uq_users_email", "users", type_="unique"),
+            "cannot drop unique constraint 'uq_users_email'",
+        ),
+        argnames="operation, message",
+        id_="iaa",
+    )
+    def test_constraint_operation_raises(self, operation, message):
+        op_fixture("starrocks")
+        with expect_raises_message(exc.CompileError, f"StarRocks {message}"):
+            operation()
