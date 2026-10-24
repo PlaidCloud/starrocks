@@ -14,7 +14,7 @@
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from sqlalchemy import Column, Table, event
 from sqlalchemy.schema import MetaData
@@ -73,28 +73,60 @@ def extract_view_columns(table: Table) -> Union[List[Dict[str, Any]], None]:
     ]
 
 
-_SQL_STRING_LITERAL = re.compile(r"'(?:[^'\\]|\\.|'')*'")
-_SQL_TOKEN = re.compile(r"`((?:[^`]|``)+)`|([A-Za-z_][A-Za-z0-9_$]*)|([(),.])")
-_TABLE_REFERENCE_KEYWORDS = frozenset({"FROM", "JOIN"})
-_FROM_LIST_END_KEYWORDS = frozenset(
-    {"WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "EXCEPT", "INTERSECT", "ON", "USING", "WINDOW", "QUALIFY"}
+TableReference = Tuple[Optional[str], str]
+
+_SQL_TOKEN = re.compile(
+    r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.)*\"|/\*.*?\*/|(?:--|#)[^\n]*|\[[^\]]*\]"
+    r"|`((?:[^`]|``)+)`|([A-Za-z_][A-Za-z0-9_$]*)|([(),.])",
+    re.DOTALL,
 )
+_TABLE_REFERENCE_KEYWORDS = frozenset({"FROM", "JOIN"})
+_JOIN_CONDITION_KEYWORDS = frozenset({"ON", "USING"})
+_FROM_LIST_END_KEYWORDS = frozenset(
+    {"WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "EXCEPT", "INTERSECT", "WINDOW", "QUALIFY"}
+)
+_QueryToken = Tuple[Optional[str], Optional[str], Optional[str]]
 
 
-def _table_names_in_from_clauses(sql: str) -> Set[str]:
-    """Return the lower-cased names a query reads as tables: those after FROM or JOIN, or a comma of a FROM list.
+def tables_read_by_query(sql: str) -> Set[TableReference]:
+    """Return the ``(schema, name)`` of each table a query reads, lower-cased, with None for an unqualified name.
 
-    A qualified ``db.table`` counts by its table name. Columns, column aliases and functions are not table
-    references, so a name that is also a column alias, as in ``kind AS views``, does not count.
+    A table reference is a name after FROM or JOIN, or after a comma of a FROM list, in subqueries too; a comma
+    after a join's ON or USING condition continues the list. ``catalog.db.table`` gives ``db`` as the schema.
+    Columns, column aliases, table functions, names a WITH clause defines, comments, string literals and join
+    hints such as ``[shuffle]`` are not table references.
     """
-    tokens = [match.groups() for match in _SQL_TOKEN.finditer(_SQL_STRING_LITERAL.sub("''", sql))]
-    names: Set[str] = set()
+    tokens = _query_tokens(sql)
+    common_table_expressions = _common_table_expression_names(tokens)
+    return {
+        (schema, name)
+        for schema, name in _from_clause_references(tokens)
+        if schema is not None or name not in common_table_expressions
+    }
+
+
+def _query_tokens(sql: str) -> List[_QueryToken]:
+    """Split a query into (backquoted name, word, punctuation) tokens, leaving out literals, comments and hints."""
+    return [match.groups() for match in _SQL_TOKEN.finditer(sql) if any(match.groups())]
+
+
+def _token_name(token: _QueryToken) -> Optional[str]:
+    """Return a name token's name, with a backquoted name's doubled backquotes undone, or None for punctuation."""
+    quoted, word, _ = token
+    if quoted is not None:
+        return quoted.replace("``", "`")
+    return word
+
+
+def _from_clause_references(tokens: List[_QueryToken]) -> Set[TableReference]:
+    """Return the ``(schema, name)`` of every name in table position, CTE names included."""
+    references: Set[TableReference] = set()
     from_list_depths: List[int] = []
     depth = 0
     expect_table = False
     index = 0
     while index < len(tokens):
-        quoted, word, punctuation = tokens[index]
+        _, word, punctuation = tokens[index]
         index += 1
         keyword = word.upper() if word else None
         if punctuation == "(":
@@ -112,18 +144,52 @@ def _table_names_in_from_clauses(sql: str) -> Set[str]:
             expect_table = True
             if not from_list_depths or from_list_depths[-1] != depth:
                 from_list_depths.append(depth)
+        elif keyword in _JOIN_CONDITION_KEYWORDS:
+            expect_table = False
         elif keyword in _FROM_LIST_END_KEYWORDS:
             if from_list_depths and from_list_depths[-1] == depth:
                 from_list_depths.pop()
             expect_table = False
+        elif keyword == "LATERAL" and expect_table:
+            continue
         elif expect_table:
-            name = quoted.replace("``", "`") if quoted else word
+            parts = [_token_name(tokens[index - 1])]
             while index + 1 < len(tokens) and tokens[index][2] == "." and not tokens[index + 1][2]:
-                next_quoted, next_word, _ = tokens[index + 1]
-                name = next_quoted.replace("``", "`") if next_quoted else next_word
+                parts.append(_token_name(tokens[index + 1]))
                 index += 2
-            names.add(name.lower())
+            is_table_function = index < len(tokens) and tokens[index][2] == "("
+            if not is_table_function:
+                references.add((parts[-2].lower() if len(parts) > 1 else None, parts[-1].lower()))
             expect_table = False
+    return references
+
+
+def _common_table_expression_names(tokens: List[_QueryToken]) -> Set[str]:
+    """Return the lower-cased names the query's WITH clauses define, in subqueries too."""
+    names: Set[str] = set()
+    for start, (_, word, _) in enumerate(tokens):
+        if word is None or word.upper() != "WITH":
+            continue
+        expect_name = True
+        depth = 0
+        for token in tokens[start + 1:]:
+            _, word, punctuation = token
+            if expect_name:
+                if word is not None and word.upper() == "RECURSIVE":
+                    continue
+                name = _token_name(token)
+                if name is None:
+                    break
+                names.add(name.lower())
+                expect_name = False
+            elif punctuation == "(":
+                depth += 1
+            elif punctuation == ")":
+                depth -= 1
+            elif depth == 0 and punctuation == ",":
+                expect_name = True
+            elif depth == 0 and word is not None and word.upper() != "AS":
+                break
     return names
 
 
@@ -356,8 +422,9 @@ class View(Table):
         """The tables to create before this view: those added with ``add_is_dependent_on()`` and those it reads.
 
         ``MetaData.create_all()`` orders unrelated tables by name, so without these a view whose name sorts before
-        its base table would be created first, and fail. A Selectable definition names the tables it reads; for a
-        string definition, every other table in the MetaData whose name appears in it as an identifier counts.
+        its base table would be created first, and fail. A Selectable definition names the tables it reads; a
+        string definition reads the tables :func:`tables_read_by_query` finds in it, matched as
+        :meth:`_reads_table` describes.
         """
         return self._explicit_dependencies | self._tables_read_by_definition()
 
@@ -375,8 +442,33 @@ class View(Table):
             return {table for table in find_tables(self.selectable) if isinstance(table, Table) and table is not self}
         if not isinstance(self.definition, str):
             return set()
-        names = _table_names_in_from_clauses(self.definition)
-        return {table for table in self.metadata.tables.values() if table is not self and table.name.lower() in names}
+        references = tables_read_by_query(self.definition)
+        tables = [table for table in self.metadata.tables.values() if table is not self]
+        return {table for table in tables if self._reads_table(table, references, tables)}
+
+    def _reads_table(self, table: Table, references: Set[TableReference], tables: List[Table]) -> bool:
+        """Return whether the definition's references name ``table``.
+
+        An unqualified name is a table of this view's schema or of the default one. A qualified ``db.name`` is the
+        table in schema ``db``, or the default schema's table of that name when the MetaData has no ``db.name``,
+        since the default schema may be ``db``.
+        """
+        name = table.name.lower()
+        schema = table.schema.lower() if table.schema else None
+        own_schema = self.schema.lower() if self.schema else None
+        for reference_schema, reference_name in references:
+            if reference_name != name:
+                continue
+            if reference_schema is None and schema in (None, own_schema):
+                return True
+            if reference_schema is not None and schema == reference_schema:
+                return True
+            if reference_schema is not None and schema is None and not any(
+                other.name.lower() == name and other.schema and other.schema.lower() == reference_schema
+                for other in tables
+            ):
+                return True
+        return False
 
     @property
     def definition(self) -> str:

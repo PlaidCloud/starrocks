@@ -470,6 +470,11 @@ class ViewCreationOrderTest(fixtures.TestBase):
         ("subquery", "SELECT * FROM (SELECT id FROM z_orders) t", ["z_orders"]),
         ("in_subquery", "SELECT 1 FROM a_customers WHERE id IN (SELECT id FROM z_orders)", ["a_customers", "z_orders"]),
         ("alias_only", "SELECT id AS z_orders FROM a_customers", ["a_customers"]),
+        ("comma_after_on", "SELECT 1 FROM a_customers c JOIN m_x x ON c.id = x.id, z_orders", ["a_customers", "z_orders"]),
+        ("join_hint", "SELECT 1 FROM a_customers c INNER JOIN [shuffle] z_orders o ON c.id = o.id", ["a_customers", "z_orders"]),
+        ("commented_name", "SELECT 1 FROM a_customers /* , z_orders */ -- , z_orders", ["a_customers"]),
+        ("cte_name", "WITH z_orders AS (SELECT id FROM a_customers) SELECT id FROM z_orders", ["a_customers"]),
+        ("table_function", "SELECT 1 FROM a_customers, z_orders(1) AS u(x)", ["a_customers"]),
         id_="iaa",
         argnames="definition,read",
     )
@@ -487,6 +492,29 @@ class ViewCreationOrderTest(fixtures.TestBase):
         View("clicks", metadata, definition="SELECT id, id AS views FROM z_orders")
         View("views", metadata, definition="SELECT id, id AS clicks FROM z_orders")
         assert self._order(metadata)[0] == "z_orders"
+
+    def test_views_named_alike_in_two_schemas_read_the_qualified_table(self):
+        """Two views named orders, in reporting and archive, both read staging.orders, not each other."""
+        metadata = MetaData()
+        Table("orders", metadata, Column("id", Integer), schema="staging")
+        View("orders", metadata, definition="SELECT id FROM staging.orders", schema="reporting")
+        View("orders", metadata, definition="SELECT id FROM staging.orders", schema="archive")
+        assert [table.fullname for table in metadata.sorted_tables][0] == "staging.orders"
+
+    def test_an_unqualified_name_reads_the_views_own_schema_or_the_default(self):
+        metadata = MetaData()
+        own = Table("orders", metadata, Column("id", Integer), schema="reporting")
+        default = Table("orders", metadata, Column("id", Integer))
+        Table("orders", metadata, Column("id", Integer), schema="archive")
+        view = View("v", metadata, definition="SELECT id FROM orders", schema="reporting")
+        assert view._tables_read_by_definition() == {own, default}
+
+    def test_a_cte_named_like_another_view_makes_no_cycle(self):
+        metadata = MetaData()
+        self._base(metadata)
+        View("v_a", metadata, definition="WITH v_b AS (SELECT id FROM z_orders) SELECT id FROM v_b")
+        View("v_b", metadata, definition="SELECT id FROM v_a")
+        assert self._order(metadata) == ["z_orders", "v_a", "v_b"]
 
     def test_name_inside_a_string_literal_is_not_a_dependency(self):
         metadata = MetaData()
