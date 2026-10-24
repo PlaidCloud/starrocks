@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
+
 import sqlalchemy as sa
 from sqlalchemy import TIMESTAMP, Column, Enum, LargeBinary, MetaData, Table, Text, UnicodeText, testing
 from sqlalchemy.dialects import mysql
@@ -183,3 +185,22 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         column = Column("col", type_, **column_kwargs)
         Table("t", MetaData(), column)
         self.assert_compile(CreateColumn(column), expected)
+
+
+class SysdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    """``func.sysdate()`` compiles to a function StarRocks has."""
+
+    __dialect__ = StarRocksDialect()
+
+    def test_sysdate_compiles_to_now(self):
+        self.assert_compile(sa.func.sysdate(), "now()")
+
+
+class SysdateExecutionTest(fixtures.TestBase):
+    """``func.sysdate()`` runs on the server and returns a datetime."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    def test_sysdate_returns_a_datetime(self, connection):
+        assert isinstance(connection.scalar(sa.select(sa.func.sysdate())), datetime.datetime)

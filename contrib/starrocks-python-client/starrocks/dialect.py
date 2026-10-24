@@ -304,6 +304,10 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
 
 
 class StarRocksSQLCompiler(MySQLCompiler):
+    def visit_sysdate_func(self, fn: Any, **kw: Any) -> str:
+        """StarRocks has no SYSDATE(); NOW() is its current-timestamp function."""
+        return "now()"
+
     def visit_delete(self, delete_stmt: Delete, **kw: Any) -> str:
         result: str = super().visit_delete(delete_stmt, **kw)
         compile_state: Any = delete_stmt._compile_state_factory(
