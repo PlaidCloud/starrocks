@@ -1106,10 +1106,12 @@ def _combine_column_alters(
     table's operations include an ``AlterTableOrderOp``, the adds are combined before the first one and the
     drops after the last.
 
-    Index operations stay separate and keep their position. Removing an indexed
-    column yields a ``DropIndexOp`` before the column drop; the dialect waits
-    for the index job before the combined ``ALTER TABLE``, which also drops any
-    index of a removed column the ``DropIndexOp`` did not.
+    Index operations stay separate. A ``DropIndexOp`` that comes after the first
+    column change moves to just before the combined op, so the index is dropped
+    while its column still exists: StarRocks drops a column's indexes with it,
+    and an offline (``--sql``) script, which the impl can't check for a missing
+    index, would otherwise fail at the ``DROP INDEX``. The dialect waits for the
+    index job before the combined ``ALTER TABLE``.
     """
     adds: List[Column] = []
     drops: List[Column] = []
@@ -1127,6 +1129,9 @@ def _combine_column_alters(
             if combined_pos == -1:
                 combined_pos = len(new_ops)
                 new_ops.append(None)
+        elif isinstance(inner, ops.DropIndexOp) and combined_pos != -1:
+            new_ops.insert(combined_pos, inner)
+            combined_pos += 1
         else:
             new_ops.append(inner)
 
