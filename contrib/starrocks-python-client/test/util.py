@@ -63,8 +63,8 @@ STRUCT_FIELD_NAMES_UNQUOTED = testing.skip_if(
     "starrocks<4.1.1",
     "Before 4.1.1 StarRocks prints STRUCT field names unquoted, so a name with a space cannot be read back",
 )
-TIME_SLICE_CEIL_PARTITION_NEEDS_4_1 = testing.skip_if(
-    "starrocks<4.1", "StarRocks 3.3 refuses time_slice(..., ceil) in PARTITION BY; 4.1 accepts it"
+TIME_SLICE_CEIL_PARTITION_NEEDS_3_4_1 = testing.skip_if(
+    "starrocks<3.4.1", "StarRocks before 3.4.1 refuses time_slice(..., ceil) in PARTITION BY"
 )
 VIEW_TEXT_REWRITTEN_BEFORE_4_0_6 = testing.skip_if(
     "starrocks<4.0.6",

@@ -21,7 +21,7 @@ from sqlalchemy.testing import fixtures
 
 import starrocks.alembic  # noqa: F401
 from starrocks.datatype import DATETIME, INTEGER, VARCHAR
-from test.util import TIME_SLICE_CEIL_PARTITION_NEEDS_4_1
+from test.util import TIME_SLICE_CEIL_PARTITION_NEEDS_3_4_1
 
 
 class OmittedAttributesTest(fixtures.TestBase):
@@ -144,7 +144,7 @@ class TimeSlicePartitionTest(fixtures.TestBase):
         (
             "time_slice(dt, INTERVAL 1 MONTH, ceil)",
             "time_slice(dt, INTERVAL 1 MONTH, ceil)",
-            TIME_SLICE_CEIL_PARTITION_NEEDS_4_1,
+            TIME_SLICE_CEIL_PARTITION_NEEDS_3_4_1,
         ),
         argnames="partition_by, model_partition_by",
     )
