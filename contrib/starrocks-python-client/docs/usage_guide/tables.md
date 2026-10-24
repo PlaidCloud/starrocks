@@ -69,7 +69,7 @@ Defines the table's type (key) and the columns that constitute the key. You must
 
 - **`starrocks_duplicate_key`**
 
-  - **Description**: Defines a Duplicate Key type table. This is the default type if no key is specified. It's suitable for storing raw, unchanged data.
+  - **Description**: Defines a Duplicate Key type table. This is the type StarRocks gives a table that names no key and has no primary key columns. It's suitable for storing raw, unchanged data.
   - **Type**: `str` (comma-separated column names)
   - **Example**: `starrocks_duplicate_key="request_id, timestamp"`
 
@@ -84,7 +84,9 @@ Defines the table's type (key) and the columns that constitute the key. You must
   - **Type**: `str` (comma-separated column names)
   - **Example**: `starrocks_unique_key="device_id"`
 
-> Although you **CAN'T only** specify the Primary Key type in Columns, such as `Column('id', Integer, primary_key=True)`, or by using `PrimaryKeyConstraint`, You still need to specify it as the SQLAlchemy's stardard primary key declaration, either via Columns or `PrimaryKeyConstraint`, to prevent errors.
+> A table that names no `starrocks_*_key` but has primary key columns, from `Column('id', Integer, primary_key=True)` or a `PrimaryKeyConstraint`, is created as a Primary Key table on those columns. StarRocks needs the key columns first, in key order, so the dialect raises a `CompileError` when they are not.
+>
+> Reflection reports a primary key for Primary, Unique and Aggregate Key tables, which hold one row per key, and none for Duplicate Key tables. When you name one of those three key types, also mark its columns `primary_key=True`, so that the model matches the reflected table and the ORM can map it.
 
 ##### 3. `COMMENT`
 
@@ -143,6 +145,27 @@ A dictionary of additional table attributes.
   ```
 
 > **Note on Future Partition Properties**: Certain properties, such as `replication_num` and `storage_medium`, can be modified to apply only to newly created partitions. When `alembic revision --autogenerate` detects changes to these specific properties, it will generate an `ALTER TABLE` statement that prefixes them with `default.` prefix (e.g., `SET ("default.replication_num" = "...")`). This ensures that the changes do not affect existing data.
+
+### Secondary Indexes
+
+Declare StarRocks' BITMAP, NGRAMBF, GIN and VECTOR indexes with SQLAlchemy's `Index`. `starrocks_using` names the type, `starrocks_properties` its properties and `starrocks_comment` the comment:
+
+```python
+from sqlalchemy import Index
+
+Index("ix_city", events.c.city, starrocks_using="BITMAP")
+Index(
+    "ix_name",
+    events.c.name,
+    starrocks_using="NGRAMBF",
+    starrocks_properties={"gram_num": "4", "bloom_filter_fpp": "0.05"},
+    starrocks_comment="n-grams of the name",
+)
+```
+
+Each compiles to `CREATE INDEX ix_name ON events (name) USING NGRAMBF ("gram_num" = "4", "bloom_filter_fpp" = "0.05") COMMENT '...'`. StarRocks builds the index in an asynchronous schema-change job, and the dialect waits for it before the next change to the same table, so `create_all` can create several indexes on one table. GIN indexes need the FE configuration `enable_experimental_gin`.
+
+Indexes are reflected with their type, comment and properties, including the ones StarRocks filled in, so autogenerate creates and drops them like any other index. Dropping a column drops its index as well, and a `drop_index` for an index that went with its column does nothing.
 
 ### Column Attributes
 

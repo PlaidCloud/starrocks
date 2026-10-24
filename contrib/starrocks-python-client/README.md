@@ -16,6 +16,24 @@ pip install starrocks
 
 Python >= 3.10, <= 3.14
 
+#### Supported StarRocks Versions
+
+StarRocks 3.3.3 or later; the dialect is tested on 3.3, 3.4, 3.5, 4.0 and 4.1. A few features need a later version, and on an older server the dialect refuses them with a `CompileError`:
+
+| Feature | Needs |
+|---|---|
+| View `starrocks_security` | 3.4.1 |
+| RANGE distribution (`starrocks_distributed_by="RANGE"`) | 4.1, with the FE configuration `enable_range_distribution` on |
+| `VARIANT` columns | 4.1 |
+
+Older versions also differ in ways the dialect handles for you:
+
+- Before 4.0.6, StarRocks stores a view's SQL in its own canonical form; autogenerate canonicalizes the model's SQL the same way before comparing.
+- `@@run_mode` exists from 4.0.7. Older servers report the run mode only through `ADMIN SHOW FRONTEND CONFIG`, which needs the OPERATE privilege; without it the dialect assumes shared-nothing.
+- Some table properties are newer than 3.3: `compaction_strategy` (4.0), `enable_statistic_collect_on_first_load` (3.5.10 and 4.0.2), and `bucket_size` defaults to 4 GiB before 4.0 and 1 GiB from 4.0. Declare only the properties your servers know.
+
+The `starrocks+asyncmy` driver needs SQLAlchemy 2.0.
+
 #### Using a Virtual Environment (Recommended)
 
 It is highly recommended to install `starrocks` in a virtual environment to avoid conflicts with system-wide packages.
