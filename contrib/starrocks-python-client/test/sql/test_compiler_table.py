@@ -500,6 +500,36 @@ class CreateIndexCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         table = self._table()
         self.assert_compile(CreateIndex(Index("ix_city", table.c.city, **kwargs)), expected)
 
+    @testing.combinations(
+        (
+            "properties",
+            {"starrocks_using": "NGRAMBF", "starrocks_properties": {"gram_num": "4", "bloom_filter_fpp": "0.05"}},
+            'CREATE INDEX ix_city ON events (city) USING NGRAMBF ("gram_num" = "4", "bloom_filter_fpp" = "0.05")',
+        ),
+        (
+            "comment",
+            {"starrocks_using": "BITMAP", "starrocks_comment": "city's index"},
+            "CREATE INDEX ix_city ON events (city) USING BITMAP COMMENT 'city''s index'",
+        ),
+        (
+            "comment_without_type",
+            {"starrocks_comment": "plain"},
+            "CREATE INDEX ix_city ON events (city) COMMENT 'plain'",
+        ),
+        argnames="kwargs, expected",
+        id_="iaa",
+    )
+    def test_properties_and_comment(self, kwargs, expected):
+        table = self._table()
+        self.assert_compile(CreateIndex(Index("ix_city", table.c.city, **kwargs)), expected)
+
+    def test_properties_without_type_raise(self):
+        table = self._table()
+        with expect_raises_message(exc.CompileError, "has starrocks_properties but no starrocks_using"):
+            CreateIndex(Index("ix_city", table.c.city, starrocks_properties={"gram_num": "4"})).compile(
+                dialect=self.__dialect__
+            )
+
     def test_several_columns(self):
         table = self._table()
         self.assert_compile(

@@ -571,7 +571,10 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         return '"%s"' % str(value).replace("\\", "\\\\").replace('"', '\\"')
 
     def visit_create_index(self, create: sa_schema.CreateIndex, **kw: Any) -> str:  # type: ignore[override]
-        """Compile ``CREATE INDEX name ON table (columns) [USING <type>]`` in StarRocks' grammar.
+        """Compile ``CREATE INDEX name ON table (columns) [USING <type> [(properties)]] [COMMENT '...']``.
+
+        ``starrocks_using`` names the type, ``starrocks_properties`` its properties (for example NGRAMBF's
+        ``gram_num``) and ``starrocks_comment`` the comment.
 
         StarRocks indexes are BITMAP, GIN, NGRAMBF or VECTOR indexes on plain columns. It has no unique or
         expression indexes and no ``IF NOT EXISTS``, so those raise here rather than at the server, and the
@@ -591,10 +594,25 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             self.preparer.format_table(index.table),
             columns,
         )
-        index_type = index.dialect_options[DialectName]["using"]
-        if index_type is not None:
-            text += " USING " + self._index_type_keyword(index, index_type)
+        options = index.dialect_options[DialectName]
+        if options["using"] is not None:
+            text += " USING " + self._index_type_keyword(index, options["using"])
+        if options["properties"]:
+            text += " " + self._index_property_list(index, options["using"], options["properties"])
+        if options["comment"] is not None:
+            text += " COMMENT " + self.sql_compiler.render_literal_value(options["comment"], sqltypes.String())
         return text
+
+    def _index_property_list(self, index: sa_schema.Index, index_type: Optional[str], properties: Dict[str, Any]) -> str:
+        """Render ``("key" = "value", ...)``, which StarRocks accepts only after an index type such as NGRAMBF."""
+        if index_type is None:
+            raise exc.CompileError(
+                f"Index {index.name!r} has starrocks_properties but no starrocks_using; StarRocks takes index "
+                "properties only after an index type"
+            )
+        return "(%s)" % ", ".join(
+            f"{self.quoted_property(key)} = {self.quoted_property(value)}" for key, value in properties.items()
+        )
 
     def visit_add_constraint(self, create: sa_schema.AddConstraint, **kw: Any) -> str:
         """Refuse ``ADD CONSTRAINT``, which StarRocks does not have, rather than send it to the server."""
@@ -1607,6 +1625,8 @@ class StarRocksDialect(MySQLDialect_pymysql):
             sa_schema.Index,
             {
                 "using": None,
+                "properties": None,
+                "comment": None,
                 "length": None,
                 "prefix": None,
                 "with_parser": None,

@@ -146,6 +146,31 @@ class SecondaryIndexCreateTest(fixtures.TestBase):
 
         assert self._indexes_once_built(connection, "idx_create_t") == [("ix_city", "city", "BITMAP")]
 
+    def test_create_ngrambf_index_with_properties_and_comment(self, connection, metadata):
+        table = Table(
+            "idx_ngram_t",
+            metadata,
+            Column("id", INTEGER),
+            Column("name", String(50)),
+            starrocks_duplicate_key="id",
+            starrocks_distributed_by="HASH(id) BUCKETS 1",
+        )
+        Index(
+            "ix_name",
+            table.c.name,
+            starrocks_using="NGRAMBF",
+            starrocks_properties={"gram_num": "3", "bloom_filter_fpp": "0.01"},
+            starrocks_comment="name's n-grams",
+        )
+        metadata.create_all(connection)
+
+        self._indexes_once_built(connection, "idx_ngram_t")
+        row = connection.exec_driver_sql("SHOW INDEX FROM idx_ngram_t").mappings().one()
+        assert row["Index_type"].startswith("NGRAMBF(")
+        assert '"gram_num" = "3"' in row["Index_type"]
+        assert '"bloom_filter_fpp" = "0.01"' in row["Index_type"]
+        assert row["Comment"] == "name's n-grams"
+
     @staticmethod
     def _indexes_once_built(connection, table_name, timeout=60.0):
         """Return the table's indexes as (name, column, type), waiting for the asynchronous index build."""
