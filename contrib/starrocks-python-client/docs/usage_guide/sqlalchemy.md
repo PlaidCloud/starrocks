@@ -58,7 +58,7 @@ The dialect adds rules of its own:
 - **A DELETE on a table without a primary key raises an `InvalidRequestError`.** StarRocks applies such a DELETE at once, outside the transaction, and ROLLBACK doesn't undo it ([StarRocks issue 81471](https://github.com/StarRocks/starrocks/issues/81471)). Run those deletes on an `AUTOCOMMIT` connection.
 - **A `delete()` without a WHERE clause raises an `InvalidRequestError`.** It compiles to `TRUNCATE TABLE`, which StarRocks runs outside any transaction.
 - **Text holding several statements raises an `InvalidRequestError`**, such as `SELECT 1; INSERT ...` passed to `exec_driver_sql()` or `op.execute()`. The dialect could open the transaction only for the first statement, and the driver drops the errors of the others. Execute each statement on its own. Under `AUTOCOMMIT` such text runs as before.
-- **`INSERT INTO FILES` opens no transaction**, because it writes files rather than a table.
+- **`INSERT INTO FILES` opens no transaction**, because it writes files rather than a table. StarRocks can't run it inside one, so after the transaction's first INSERT, UPDATE or DELETE it raises an `InvalidRequestError`.
 
 `BEGIN WORK`, `COMMIT` and `ROLLBACK` sent as text are tracked too, so DDL commits a transaction opened by hand on an `AUTOCOMMIT` connection first. The connection's `commit()` and `rollback()` always reach StarRocks, and the pool rolls back a connection when it is returned, which ends a transaction opened through a raw DBAPI cursor.
 

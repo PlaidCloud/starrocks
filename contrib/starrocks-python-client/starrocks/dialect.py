@@ -1932,7 +1932,6 @@ class StarRocksDialect(MySQLDialect_pymysql):
     _TRANSACTION_END: Final[re.Pattern[str]] = re.compile(
         r"(?:COMMIT|ROLLBACK)\b(?!\s+(?:WORK\s+)?TO\b)", re.IGNORECASE
     )
-    _INSERT_INTO_FILES: Final[re.Pattern[str]] = re.compile(r"INSERT\s+INTO\s+FILES\s*\(", re.IGNORECASE)
     _GAP: Final[str] = r"(?:\s|/\*.*?\*/|(?:--|#)[^\n]*(?:\n|$))"
     _IDENTIFIER: Final[str] = r"(`(?:[^`]|``)+`|\w+)"
     _QUALIFIED_NAME: Final[str] = (
@@ -1940,6 +1939,9 @@ class StarRocksDialect(MySQLDialect_pymysql):
     )
     _DELETE_TARGET: Final[re.Pattern[str]] = re.compile(
         rf"DELETE\b{_GAP}*FROM\b{_GAP}*{_QUALIFIED_NAME}", re.IGNORECASE | re.DOTALL
+    )
+    _INSERT_INTO_FILES: Final[re.Pattern[str]] = re.compile(
+        rf"INSERT\b{_GAP}*INTO\b{_GAP}*FILES{_GAP}*\(", re.IGNORECASE | re.DOTALL
     )
     _KEYED_MODELS_WITHOUT_PRIMARY_KEY: Final[frozenset[str]] = frozenset({
         TableModel.DUP_KEYS, TableModel.DUP_KEYS2, TableModel.AGG_KEYS, TableModel.AGG_KEYS2,
@@ -2132,7 +2134,8 @@ class StarRocksDialect(MySQLDialect_pymysql):
         """Open a transaction for a DML statement on a ``READ COMMITTED`` connection, unless one is open already.
 
         A ``delete()`` without a WHERE clause compiles to TRUNCATE TABLE, which StarRocks runs outside any
-        transaction, so it is refused. ``INSERT INTO FILES`` writes files, not a table, and opens no transaction.
+        transaction, so it is refused. ``INSERT INTO FILES`` writes files, not a table, and opens no transaction;
+        StarRocks can't run one inside a transaction, so with a transaction open it is refused.
         """
         transaction_open = bool(info.get(self._TRANSACTION_OPEN))
         if not transaction_open and self._driver_autocommits(context.root_connection.connection):
@@ -2142,14 +2145,24 @@ class StarRocksDialect(MySQLDialect_pymysql):
                 "A delete() without a WHERE clause compiles to TRUNCATE TABLE, which StarRocks runs outside the "
                 "transaction; give it a WHERE clause, or run it on an AUTOCOMMIT connection"
             )
+        writes_files = self._writes_files(statement)
+        if writes_files and transaction_open:
+            raise exc.InvalidRequestError(
+                "StarRocks can't run INSERT INTO FILES inside a transaction; run it before the transaction's first "
+                "INSERT, UPDATE or DELETE, or on an AUTOCOMMIT connection"
+            )
         self._refuse_delete_escaping_transaction(cursor, statement, context)
-        if transaction_open:
-            return
-        if self._INSERT_INTO_FILES.match(statement, self._LEADING_COMMENTS.match(statement).end()):
+        if transaction_open or writes_files:
             return
         self._require_transactions("A transaction (isolation_level 'READ COMMITTED')")
         cursor.execute("BEGIN WORK")
         info[self._TRANSACTION_OPEN] = True
+
+    @classmethod
+    def _writes_files(cls, statement: str) -> bool:
+        """Return whether the statement is an ``INSERT INTO FILES(...)``, past any comment or optimizer hint."""
+        keyword = cls._statement_keyword_token(statement)
+        return keyword is not None and cls._INSERT_INTO_FILES.match(statement, keyword.start()) is not None
 
     def _refuse_delete_escaping_transaction(
         self, cursor: "DBAPICursor", statement: str, context: ExecutionContext

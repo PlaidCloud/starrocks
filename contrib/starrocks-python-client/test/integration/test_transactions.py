@@ -14,6 +14,8 @@
 
 """Transactions: connections autocommit by default, and ``READ COMMITTED`` runs DML in StarRocks transactions."""
 
+import uuid
+
 from sqlalchemy import MetaData, Table, delete, exc, insert, literal, select, testing, update
 from sqlalchemy.testing import config, engines, fixtures
 from sqlalchemy.testing.assertions import eq_, expect_raises, expect_raises_message
@@ -275,6 +277,27 @@ class TransactionTest(fixtures.TablesTest):
         with config.db.begin() as conn:
             conn.exec_driver_sql("INSERT INTO txn_keyed VALUES (1, 1); INSERT INTO txn_keyed VALUES (2, 2)")
         eq_(self._ids("txn_keyed"), [1, 2])
+
+    @staticmethod
+    def _insert_into_files(hint=""):
+        path = f"file:///tmp/sqla_txn_{uuid.uuid4().hex[:12]}/"
+        return f"INSERT {hint}INTO FILES('path' = '{path}', 'format' = 'csv', 'single' = 'true') SELECT 1 AS a"
+
+    @TRANSACTIONS_NEED_3_5
+    @testing.combinations(("plain", ""), ("hinted", "/*+ SET_VAR(query_timeout=100) */ "), argnames="hint", id_="ia")
+    def test_insert_into_files_opens_no_transaction(self, hint):
+        with self._read_committed_engine().connect() as conn:
+            with conn.begin():
+                conn.exec_driver_sql(self._insert_into_files(hint))
+                assert not conn.connection.info.get("starrocks_transaction_open")
+
+    @TRANSACTIONS_NEED_3_5
+    def test_insert_into_files_inside_a_transaction_is_refused(self):
+        with expect_raises_message(exc.InvalidRequestError, "can't run INSERT INTO FILES inside a transaction"):
+            with self._read_committed_engine().begin() as conn:
+                conn.execute(insert(self.tables.txn_keyed), {"id": 1, "v": 1})
+                conn.exec_driver_sql(self._insert_into_files())
+        eq_(self._ids("txn_keyed"), [])
 
     @TRANSACTIONS_NEED_3_5
     def test_a_text_commit_ends_the_transaction_and_the_next_dml_opens_another(self):
