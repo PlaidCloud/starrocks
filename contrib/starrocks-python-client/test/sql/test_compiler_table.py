@@ -29,6 +29,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    PrimaryKeyConstraint,
     String,
     Table,
     exc,
@@ -635,6 +636,18 @@ class InferredPrimaryKeyCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_key_columns_not_first_raise(self):
         tbl = Table("pk_late", MetaData(), Column("v", String(10)), Column("id", Integer, primary_key=True))
         with expect_raises_message(exc.CompileError, "needs a PRIMARY KEY table's key columns to come first"):
+            CreateTable(tbl).compile(dialect=self.__dialect__)
+
+    def test_key_declared_in_another_order_than_the_columns_raises(self):
+        tbl = Table(
+            "pk_order",
+            MetaData(),
+            Column("a", Integer),
+            Column("b", Integer),
+            Column("v", String(10)),
+            PrimaryKeyConstraint("b", "a"),
+        )
+        with expect_raises_message(exc.CompileError, r"declares its primary key as \(b, a\)"):
             CreateTable(tbl).compile(dialect=self.__dialect__)
 
     def test_named_key_model_wins(self):

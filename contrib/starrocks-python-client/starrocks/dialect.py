@@ -861,13 +861,26 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
     @staticmethod
     def _validate_inferred_primary_key(table: sa_schema.Table) -> None:
-        """Refuse a primary key that cannot become the table's PRIMARY KEY: StarRocks needs those columns first."""
+        """Refuse a primary key that cannot become the table's PRIMARY KEY.
+
+        StarRocks needs a PRIMARY KEY table's key columns first, and keeps them in table order, so a
+        ``PrimaryKeyConstraint`` that lists them in another order cannot be kept either.
+        """
         key_columns = utils.inferred_primary_key_columns(table)
-        if key_columns and [column.name for column in table.columns][: len(key_columns)] != key_columns:
+        if not key_columns:
+            return
+        if [column.name for column in table.columns][: len(key_columns)] != key_columns:
             raise exc.CompileError(
                 f"Table {table.name!r} is created as a PRIMARY KEY table on {', '.join(key_columns)}, and StarRocks "
                 "needs a PRIMARY KEY table's key columns to come first; move them to the start of the table, or "
                 "name another key model such as starrocks_duplicate_key"
+            )
+        declared_order = [column.name for column in table.primary_key.columns]
+        if declared_order != key_columns:
+            raise exc.CompileError(
+                f"Table {table.name!r} declares its primary key as ({', '.join(declared_order)}), and StarRocks keeps "
+                f"a PRIMARY KEY table's key in table column order, ({', '.join(key_columns)}); declare the columns "
+                "in key order"
             )
 
     def _validate_aggregate_key_order(self, table: sa_schema.Table, key_column_names: List[str]) -> None:

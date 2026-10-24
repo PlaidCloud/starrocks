@@ -663,15 +663,36 @@ class AutocommitIsolationTest(_AutocommitIsolationTest):
 
 
 FOR_UPDATE = testing.skip("starrocks", "StarRocks does not support SELECT ... FOR UPDATE")
-KEY_COLUMNS_IN_TABLE_ORDER = testing.skip(
-    "starrocks", "StarRocks keeps a table's key columns in the table's column order, not the constraint's"
-)
-
-
 class CompositeKeyReflectionTest(_CompositeKeyReflectionTest):
-    """The composite key is reflected, but in column order: StarRocks has no separate key column order."""
+    """Upstream's tables, with tb1's columns in its key's order.
 
-    test_pk_column_order = KEY_COLUMNS_IN_TABLE_ORDER(_CompositeKeyReflectionTest.test_pk_column_order)
+    StarRocks keeps a PRIMARY KEY table's key in table column order, so the dialect refuses upstream's tb1, whose
+    key (name, id, attr) lists its columns in another order.
+    """
+
+    @classmethod
+    def define_tables(cls, metadata):
+        tb1 = Table(
+            "tb1",
+            metadata,
+            Column("name", String(20)),
+            Column("id", Integer),
+            Column("attr", Integer),
+            schema.PrimaryKeyConstraint("name", "id", "attr", name="pk_tb1"),
+            test_needs_fk=True,
+        )
+        Table(
+            "tb2",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("pid", Integer),
+            Column("pattr", Integer),
+            Column("pname", String(20)),
+            schema.ForeignKeyConstraint(
+                ["pname", "pid", "pattr"], [tb1.c.name, tb1.c.id, tb1.c.attr], name="fk_tb1_name_id_attr"
+            ),
+            test_needs_fk=True,
+        )
 
 
 class ServerSideCursorsTest(_ServerSideCursorsTest):
