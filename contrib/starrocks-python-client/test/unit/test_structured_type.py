@@ -557,6 +557,62 @@ class ElementResultProcessingTest(fixtures.TestBase):
         assert value == [Decimal("0.5")] and isinstance(value[0], Decimal)
 
 
+def _select_sql(type_obj, version):
+    dialect = StarRocksDialect()
+    dialect.server_version_info = version
+    table = Table("t", MetaData(), Column("v", type_obj))
+    return str(sa.select(table.c.v).compile(dialect=dialect)).replace("\n", "")
+
+
+class BinaryElementsSelectedAsHexTest(fixtures.TestBase):
+    """A server that writes nested VARBINARY as its bytes is asked for hex, inside a STRUCT that marks it."""
+
+    @testing.combinations(
+        (
+            "array",
+            datatype.ARRAY(datatype.VARBINARY()),
+            "SELECT named_struct('hex', array_map(h1 -> hex(h1), t.v)) AS v FROM t",
+        ),
+        (
+            "nested_array",
+            datatype.ARRAY(datatype.ARRAY(datatype.VARBINARY())),
+            "SELECT named_struct('hex', array_map(h1 -> array_map(h2 -> hex(h2), h1), t.v)) AS v FROM t",
+        ),
+        (
+            "generic_array",
+            sa.ARRAY(sa.LargeBinary()),
+            "SELECT named_struct('hex', array_map(h1 -> hex(h1), t.v)) AS v FROM t",
+        ),
+        ("pickle", datatype.ARRAY(PickleType()), "SELECT named_struct('hex', array_map(h1 -> hex(h1), t.v)) AS v FROM t"),
+        ("decorator", datatype.ARRAY(_Bytes()), "SELECT named_struct('hex', array_map(h1 -> hex(h1), t.v)) AS v FROM t"),
+        ("strings", datatype.ARRAY(datatype.VARCHAR(5)), "SELECT t.v FROM t"),
+        ("array_of_struct", datatype.ARRAY(datatype.STRUCT(b=datatype.VARBINARY())), "SELECT t.v FROM t"),
+        ("map", datatype.MAP(datatype.VARCHAR(5), datatype.VARBINARY()), "SELECT t.v FROM t"),
+        id_="iaa",
+        argnames="type_obj,expected",
+    )
+    def test_select_on_a_server_that_writes_raw_bytes(self, type_obj, expected):
+        assert _select_sql(type_obj, (3, 5, 21)) == expected
+
+    @testing.combinations(("unknown", None), ("hex_4_1", (4, 1, 6)), ("hex_4_0", (4, 0, 10)), id_="ia", argnames="version")
+    def test_select_on_a_server_that_writes_hex(self, version):
+        assert _select_sql(datatype.ARRAY(datatype.VARBINARY()), version) == "SELECT t.v AS v FROM t"
+
+    @testing.combinations(
+        ("array", datatype.ARRAY(datatype.VARBINARY()), '{"hex":["616263","FFFE",null]}', [b"abc", b"\xff\xfe", None]),
+        ("nested", datatype.ARRAY(datatype.ARRAY(datatype.VARBINARY())), '{"hex":[["80"],null]}', [[b"\x80"], None]),
+        ("null", datatype.ARRAY(datatype.VARBINARY()), '{"hex":null}', None),
+        ("raw_without_the_expression", datatype.ARRAY(datatype.VARBINARY()), '["616263"]', [b"616263"]),
+        id_="iaaa",
+        argnames="type_obj,text,expected",
+    )
+    def test_read_on_a_server_that_writes_raw_bytes(self, type_obj, text, expected):
+        assert _read(type_obj, text, version=(3, 5, 21)) == expected
+
+    def test_a_struct_with_a_field_named_hex_is_read_as_itself(self):
+        assert _read(datatype.STRUCT(hex=datatype.VARCHAR(5)), '{"hex":"abc"}', version=(3, 5, 21)) == {"hex": "abc"}
+
+
 class _Float(float):
     """A float subclass whose repr is not a float literal, as numpy's float64 is under numpy 2."""
 

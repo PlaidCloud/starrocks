@@ -20,7 +20,7 @@ import json
 import math
 import numbers
 import re
-from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple, Type, Union
+from typing import Any, Callable, Dict, Final, List, Mapping, Optional, Set, Tuple, Type, Union
 
 from sqlalchemy import func, literal_column, util
 import sqlalchemy.dialects.mysql.json as mysql_json
@@ -269,15 +269,24 @@ class StructuredType(UserDefinedType):
         """
         raise NotImplementedError("get_sub_item_types is not implemented for this pure Structuredtype")
 
-    def result_processor(self, dialect: Dialect, coltype: object):
-        def process(value):
+    def result_processor(self, dialect: Dialect, coltype: object) -> Callable[[Any], Any]:
+        """Read the server's text rendering of the value, converting each element by its declared type.
+
+        A value that :class:`BinaryElementsAsHex` selected arrives inside its one-field STRUCT, and its binary
+        elements are then hex, whatever the server version.
+        """
+        read_binary = _nested_binary_reader(dialect)
+
+        def process(value: Any) -> Any:
             if value is None:
                 return None
             if isinstance(value, (str, bytes, bytearray)):
                 value = parse_complex_value(value)
             elif isinstance(value, dict):
                 value = list(value.items())
-            return _convert_structured(self, value, dialect)
+            if _is_selected_with_hex_binary(self, value):
+                return _convert_structured(self, value[0][1], dialect, _read_hex_binary)
+            return _convert_structured(self, value, dialect, read_binary)
 
         return process
 
@@ -355,6 +364,10 @@ class ARRAY(StructuredType):
         if hasattr(self.item_type, 'get_sub_item_types'):
             types.update(self.item_type.get_sub_item_types())
         return types
+
+    def column_expression(self, colexpr: ColumnElement) -> ColumnElement:
+        """Select an ARRAY of binary elements, nested ARRAYs included, through :class:`BinaryElementsAsHex`."""
+        return BinaryElementsAsHex(colexpr) if _holds_binary_through_arrays(self) else colexpr
 
 
 class MAP(StructuredType):
@@ -998,14 +1011,84 @@ def _nested_binary_reader(dialect: Dialect) -> Callable[[Any], bytes]:
     """Read a VARBINARY element of a collection as the bytes it holds.
 
     A server that writes the bytes themselves sends them inside the collection's text, which the driver has
-    decoded as UTF-8, so they are encoded back; bytes that are not UTF-8 make the driver fail before this.
+    decoded as UTF-8, so they are encoded back; bytes that are not UTF-8 make the driver fail before this,
+    unless :class:`BinaryElementsAsHex` selected them as hex.
     """
     if _nests_binary_as_hex(getattr(dialect, "server_version_info", None)):
-        return lambda value: value if isinstance(value, bytes) else bytes.fromhex(value)
-    return lambda value: value if isinstance(value, bytes) else value.encode("utf-8")
+        return _read_hex_binary
+    return _read_raw_binary
 
 
-def _element_converter(type_: Any, dialect: Dialect) -> Callable[[Any], Any]:
+def _read_hex_binary(value: Union[str, bytes]) -> bytes:
+    return value if isinstance(value, bytes) else bytes.fromhex(value)
+
+
+def _read_raw_binary(value: Union[str, bytes]) -> bytes:
+    return value if isinstance(value, bytes) else value.encode("utf-8")
+
+
+_HEX_BINARY_FIELD: Final[str] = "hex"
+
+
+def _holds_binary_through_arrays(type_: "ARRAY") -> bool:
+    """Whether the elements of ``type_``, looking through nested ARRAYs, are binary."""
+    item_type = type_.item_type
+    while isinstance(item_type, ARRAY):
+        item_type = item_type.item_type
+    return not isinstance(item_type, StructuredType) and issubclass(item_type._type_affinity, sqltypes._Binary)
+
+
+def _is_selected_with_hex_binary(type_: StructuredType, parsed: Any) -> bool:
+    """Whether a parsed ARRAY value is the one-field STRUCT that :class:`BinaryElementsAsHex` selects it in.
+
+    The server writes an ARRAY in brackets, which never parses to pairs, so the shape alone tells them apart.
+    """
+    return (
+        isinstance(type_, ARRAY)
+        and isinstance(parsed, list)
+        and len(parsed) == 1
+        and isinstance(parsed[0], tuple)
+        and parsed[0][0] == _HEX_BINARY_FIELD
+    )
+
+
+class BinaryElementsAsHex(ColumnElement):
+    """A selected ARRAY of binary elements, hex-encoded by a server that would send their bytes as they are.
+
+    StarRocks 3.5 and earlier write a VARBINARY inside a collection as its bytes, and the driver fails on
+    bytes that are not UTF-8 and leaves the connection broken. On those servers the elements are hex-encoded,
+    ``named_struct('hex', array_map(h1 -> hex(h1), col))``, in a one-field STRUCT whose shape tells the
+    ARRAY's reader that they are hex; a ``text()`` query of the same column is still read as raw bytes. Other
+    servers write hex already, and the column is selected as it is.
+    """
+
+    inherit_cache = True
+    _traverse_internals = [("element", InternalTraversal.dp_clauseelement)]
+
+    def __init__(self, element: ColumnElement) -> None:
+        self.element = element
+        self.type = element.type
+
+
+@compiles(BinaryElementsAsHex)
+def compile_binary_elements_as_hex(element: BinaryElementsAsHex, compiler: Any, **kw: Any) -> str:
+    column_sql = compiler.process(element.element, **kw)
+    if _nests_binary_as_hex(getattr(compiler.dialect, "server_version_info", None)):
+        return column_sql
+    array_type = _structured_leaf_impl(element.type, compiler.dialect)
+    return f"named_struct('{_HEX_BINARY_FIELD}', {_hex_encoded_elements_sql(array_type, column_sql)})"
+
+
+def _hex_encoded_elements_sql(type_: "ARRAY", array_sql: str, depth: int = 1) -> str:
+    variable = f"h{depth}"
+    if isinstance(type_.item_type, ARRAY):
+        item_sql = _hex_encoded_elements_sql(type_.item_type, variable, depth + 1)
+    else:
+        item_sql = f"hex({variable})"
+    return f"array_map({variable} -> {item_sql}, {array_sql})"
+
+
+def _element_converter(type_: Any, dialect: Dialect, read_binary: Callable[[Any], bytes]) -> Callable[[Any], Any]:
     """Build the reader of one element of a collection, ``None`` included, as a plain column of its type reads.
 
     The parsed value is first made what the driver returns for such a column, by the type underneath any
@@ -1014,15 +1097,15 @@ def _element_converter(type_: Any, dialect: Dialect) -> Callable[[Any], Any]:
     """
     type_ = StructuredType._check_subtype(type_)
     if isinstance(type_, StructuredType):
-        return lambda value: _convert_structured(type_, value, dialect)
-    as_driver_value = _nullable(_driver_value_reader(_structured_leaf_impl(type_, dialect), dialect))
+        return lambda value: _convert_structured(type_, value, dialect, read_binary)
+    as_driver_value = _nullable(_driver_value_reader(_structured_leaf_impl(type_, dialect), read_binary))
     process = type_.dialect_impl(dialect).result_processor(dialect, None)
     if process is None:
         return as_driver_value
     return lambda value: process(as_driver_value(value))
 
 
-def _driver_value_reader(impl: sqltypes.TypeEngine, dialect: Dialect) -> Callable[[Any], Any]:
+def _driver_value_reader(impl: sqltypes.TypeEngine, read_binary: Callable[[Any], bytes]) -> Callable[[Any], Any]:
     """Build the function that turns a parsed element into what the driver returns for a column of ``impl``."""
     if isinstance(impl, sqltypes.Boolean):
         return lambda value: value if isinstance(value, bool) else bool(value)
@@ -1033,7 +1116,7 @@ def _driver_value_reader(impl: sqltypes.TypeEngine, dialect: Dialect) -> Callabl
     if isinstance(impl, sqltypes.Numeric):
         return lambda value: Decimal(str(value))
     if isinstance(impl, sqltypes._Binary):
-        return _nested_binary_reader(dialect)
+        return read_binary
     if isinstance(impl, sqltypes.String):
         return str
     return _unprocessed
@@ -1043,22 +1126,24 @@ def _nullable(convert: Callable[[Any], Any]) -> Callable[[Any], Any]:
     return lambda value: None if value is None else convert(value)
 
 
-def _convert_structured(type_: StructuredType, value: Any, dialect: Dialect) -> Any:
+def _convert_structured(
+    type_: StructuredType, value: Any, dialect: Dialect, read_binary: Callable[[Any], bytes]
+) -> Any:
     if value is None:
         return None
     if isinstance(type_, ARRAY):
         if not isinstance(value, list):
             raise ValueError("expected an ARRAY value, got %r" % (value,))
-        item = _element_converter(type_.item_type, dialect)
+        item = _element_converter(type_.item_type, dialect, read_binary)
         return [item(element) for element in value]
     if not isinstance(value, list) or any(not isinstance(pair, tuple) for pair in value):
         raise ValueError("expected a %s value, got %r" % (type_.__visit_name__, value))
     if isinstance(type_, MAP):
-        key = _element_converter(type_.key_type, dialect)
-        val = _element_converter(type_.value_type, dialect)
+        key = _element_converter(type_.key_type, dialect, read_binary)
+        val = _element_converter(type_.value_type, dialect, read_binary)
         return {key(k): val(v) for k, v in value}
     fields = {
-        name.lower(): _element_converter(field_type, dialect)
+        name.lower(): _element_converter(field_type, dialect, read_binary)
         for name, field_type in type_.field_tuples
     }
     return {
