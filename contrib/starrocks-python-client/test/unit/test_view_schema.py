@@ -464,6 +464,30 @@ class ViewCreationOrderTest(fixtures.TestBase):
         View("a_order_view", metadata, definition=select(orders.c.id))
         assert self._order(metadata) == ["z_orders", "a_order_view"]
 
+    @testing.combinations(
+        ("join", "SELECT o.id FROM a_customers c JOIN z_orders o ON o.id = c.id", ["a_customers", "z_orders"]),
+        ("comma_list", "SELECT 1 FROM a_customers c, z_orders", ["a_customers", "z_orders"]),
+        ("subquery", "SELECT * FROM (SELECT id FROM z_orders) t", ["z_orders"]),
+        ("in_subquery", "SELECT 1 FROM a_customers WHERE id IN (SELECT id FROM z_orders)", ["a_customers", "z_orders"]),
+        ("alias_only", "SELECT id AS z_orders FROM a_customers", ["a_customers"]),
+        id_="iaa",
+        argnames="definition,read",
+    )
+    def test_only_table_references_count(self, definition, read):
+        metadata = MetaData()
+        Table("a_customers", metadata, Column("id", Integer))
+        self._base(metadata)
+        view = View("m_view", metadata, definition=definition)
+        assert sorted(table.name for table in view._tables_read_by_definition()) == read
+
+    def test_column_aliases_naming_each_other_make_no_cycle(self):
+        """Two views whose column aliases are each other's names read only the base table."""
+        metadata = MetaData()
+        self._base(metadata)
+        View("clicks", metadata, definition="SELECT id, id AS views FROM z_orders")
+        View("views", metadata, definition="SELECT id, id AS clicks FROM z_orders")
+        assert self._order(metadata)[0] == "z_orders"
+
     def test_name_inside_a_string_literal_is_not_a_dependency(self):
         metadata = MetaData()
         self._base(metadata)

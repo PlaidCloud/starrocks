@@ -74,7 +74,57 @@ def extract_view_columns(table: Table) -> Union[List[Dict[str, Any]], None]:
 
 
 _SQL_STRING_LITERAL = re.compile(r"'(?:[^'\\]|\\.|'')*'")
-_SQL_IDENTIFIER = re.compile(r"`([^`]+)`|([A-Za-z_][A-Za-z0-9_$]*)")
+_SQL_TOKEN = re.compile(r"`((?:[^`]|``)+)`|([A-Za-z_][A-Za-z0-9_$]*)|([(),.])")
+_TABLE_REFERENCE_KEYWORDS = frozenset({"FROM", "JOIN"})
+_FROM_LIST_END_KEYWORDS = frozenset(
+    {"WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "EXCEPT", "INTERSECT", "ON", "USING", "WINDOW", "QUALIFY"}
+)
+
+
+def _table_names_in_from_clauses(sql: str) -> Set[str]:
+    """Return the lower-cased names a query reads as tables: those after FROM or JOIN, or a comma of a FROM list.
+
+    A qualified ``db.table`` counts by its table name. Columns, column aliases and functions are not table
+    references, so a name that is also a column alias, as in ``kind AS views``, does not count.
+    """
+    tokens = [match.groups() for match in _SQL_TOKEN.finditer(_SQL_STRING_LITERAL.sub("''", sql))]
+    names: Set[str] = set()
+    from_list_depths: List[int] = []
+    depth = 0
+    expect_table = False
+    index = 0
+    while index < len(tokens):
+        quoted, word, punctuation = tokens[index]
+        index += 1
+        keyword = word.upper() if word else None
+        if punctuation == "(":
+            depth += 1
+            expect_table = False
+        elif punctuation == ")":
+            depth -= 1
+            while from_list_depths and from_list_depths[-1] > depth:
+                from_list_depths.pop()
+        elif punctuation == ",":
+            expect_table = bool(from_list_depths) and from_list_depths[-1] == depth
+        elif punctuation == ".":
+            continue
+        elif keyword in _TABLE_REFERENCE_KEYWORDS:
+            expect_table = True
+            if not from_list_depths or from_list_depths[-1] != depth:
+                from_list_depths.append(depth)
+        elif keyword in _FROM_LIST_END_KEYWORDS:
+            if from_list_depths and from_list_depths[-1] == depth:
+                from_list_depths.pop()
+            expect_table = False
+        elif expect_table:
+            name = quoted.replace("``", "`") if quoted else word
+            while index + 1 < len(tokens) and tokens[index][2] == "." and not tokens[index + 1][2]:
+                next_quoted, next_word, _ = tokens[index + 1]
+                name = next_quoted.replace("``", "`") if next_quoted else next_word
+                index += 2
+            names.add(name.lower())
+            expect_table = False
+    return names
 
 
 class View(Table):
@@ -325,13 +375,8 @@ class View(Table):
             return {table for table in find_tables(self.selectable) if isinstance(table, Table) and table is not self}
         if not isinstance(self.definition, str):
             return set()
-        without_literals = _SQL_STRING_LITERAL.sub("''", self.definition)
-        identifiers = {(quoted or bare).lower() for quoted, bare in _SQL_IDENTIFIER.findall(without_literals)}
-        return {
-            table
-            for table in self.metadata.tables.values()
-            if table is not self and table.name.lower() in identifiers
-        }
+        names = _table_names_in_from_clauses(self.definition)
+        return {table for table in self.metadata.tables.values() if table is not self and table.name.lower() in names}
 
     @property
     def definition(self) -> str:
