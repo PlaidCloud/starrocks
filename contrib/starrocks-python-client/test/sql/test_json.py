@@ -16,7 +16,19 @@
 
 import decimal
 
-from sqlalchemy import Column, Integer, MetaData, Table, select, testing
+from sqlalchemy import (
+    JSON as GenericJSON,
+    Column,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    cast,
+    insert,
+    null,
+    select,
+    testing,
+)
 from sqlalchemy.testing import eq_, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
@@ -61,6 +73,37 @@ class JsonAccessCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             select(DOCUMENTS.c.id).where(DATA["k"].as_integer() == 5),
             "SELECT documents.id FROM documents WHERE get_json_int(documents.data, %s) = %s",
+        )
+
+
+class JsonBindCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    __dialect__ = StarRocksDialect()
+
+    def test_insert_wraps_bind_to_keep_scalar_type(self):
+        self.assert_compile(
+            insert(DOCUMENTS).values(id=1, data={"a": 1}),
+            "INSERT INTO documents (id, data) VALUES (%s, json_query(parse_json(concat('[', %s, ']')), '$[0]'))",
+        )
+
+    def test_generic_json_type_is_adapted(self):
+        generic = Table("g", MetaData(), Column("data", GenericJSON))
+        self.assert_compile(
+            insert(generic).values(data=1),
+            "INSERT INTO g (data) VALUES (json_query(parse_json(concat('[', %s, ']')), '$[0]'))",
+        )
+
+    def test_cast_json_to_string_renders_json_text(self):
+        self.assert_compile(
+            select(cast(DATA["k"], String)),
+            "SELECT json_string(json_query(documents.data, %s)) AS anon_1 FROM documents",
+        )
+
+    def test_cast_json_column_to_string(self):
+        self.assert_compile(select(cast(DATA, String(20))), "SELECT json_string(documents.data) AS data FROM documents")
+
+    def test_cast_of_other_types_is_unchanged(self):
+        self.assert_compile(
+            select(cast(DOCUMENTS.c.id, String(20))), "SELECT CAST(documents.id AS CHAR(20)) AS id FROM documents"
         )
 
 
@@ -151,3 +194,92 @@ class JsonAccessTest(fixtures.TablesTest):
         table = self.tables.json_access
         rows = connection.execute(select(table.c.id).where(table.c.data["number"].as_integer() == 5)).all()
         eq_(rows, [(1,)])
+
+
+class JsonScalarRoundTripTest(fixtures.TablesTest):
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "json_scalars",
+            metadata,
+            Column("id", Integer, primary_key=True, autoincrement=False),
+            Column("data", JSON),
+            Column("nulldata", JSON(none_as_null=True)),
+            starrocks_primary_key="id",
+            starrocks_distributed_by="HASH(id)",
+        )
+
+    @testing.combinations(
+        (1,),
+        (0,),
+        (-7,),
+        (1.5,),
+        (-0.25,),
+        (True,),
+        (False,),
+        ("s",),
+        ("",),
+        ("1",),
+        ("true",),
+        ("null",),
+        ('it\'s "quoted" \\ back',),
+        ("réve",),
+        ({"a": 1, "b": [1, 2, {"c": None}]},),
+        ([1, "two", 3.5, None, True],),
+        ({},),
+        ([],),
+        argnames="value",
+    )
+    def test_value_round_trips_with_its_type(self, connection, value):
+        table = self.tables.json_scalars
+        connection.execute(table.insert(), {"id": 1, "data": value})
+        result = connection.scalar(select(table.c.data))
+        eq_(result, value)
+        eq_(type(result), type(value))
+
+    def test_executemany_round_trips_each_scalar(self, connection):
+        table = self.tables.json_scalars
+        values = [1, "1", True, 2.5, {"k": "v"}, [1, 2]]
+        connection.execute(table.insert(), [{"id": i, "data": v} for i, v in enumerate(values)])
+        rows = connection.execute(select(table.c.data).order_by(table.c.id)).all()
+        eq_([row[0] for row in rows], values)
+        eq_([type(row[0]) for row in rows], [type(v) for v in values])
+
+    def test_update_round_trips_scalar(self, connection):
+        table = self.tables.json_scalars
+        connection.execute(table.insert(), {"id": 1, "data": "x"})
+        connection.execute(table.update().where(table.c.id == 1).values(data=42))
+        eq_(connection.scalar(select(table.c.data)), 42)
+
+    def _stored_text(self, connection, column):
+        return connection.exec_driver_sql(f"SELECT {column} FROM json_scalars").scalar()
+
+    def test_none_is_stored_as_json_null_by_default(self, connection):
+        table = self.tables.json_scalars
+        connection.execute(table.insert(), {"id": 1, "data": None, "nulldata": None})
+        eq_(self._stored_text(connection, "data"), "null")
+        eq_(self._stored_text(connection, "nulldata"), None)
+
+    def test_json_null_constant_is_stored_as_json_null(self, connection):
+        table = self.tables.json_scalars
+        connection.execute(table.insert(), {"id": 1, "data": JSON.NULL, "nulldata": JSON.NULL})
+        eq_(self._stored_text(connection, "data"), "null")
+        eq_(self._stored_text(connection, "nulldata"), "null")
+
+    def test_null_construct_is_stored_as_sql_null(self, connection):
+        table = self.tables.json_scalars
+        connection.execute(table.insert(), {"id": 1, "data": null(), "nulldata": null()})
+        eq_(self._stored_text(connection, "data"), None)
+        eq_(self._stored_text(connection, "nulldata"), None)
+
+    def test_cast_to_string_gives_json_text(self, connection):
+        table = self.tables.json_scalars
+        connection.execute(
+            table.insert(),
+            [{"id": 1, "data": "text"}, {"id": 2, "data": None}, {"id": 3, "data": 5}, {"id": 4, "data": {"a": [1]}}],
+        )
+        rows = connection.execute(select(table.c.id, cast(table.c.data, String)).order_by(table.c.id)).all()
+        eq_(rows, [(1, '"text"'), (2, "null"), (3, "5"), (4, '{"a": [1]}')])

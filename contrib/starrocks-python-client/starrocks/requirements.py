@@ -237,11 +237,6 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
         return exclusions.open()
 
     @property
-    def json_string_cast_keeps_json_quoting(self):
-        """``CAST(<JSON string> AS VARCHAR)`` yields the JSON text, quotes included, as MySQL's does."""
-        return exclusions.closed()  # StarRocks yields the unquoted string
-
-    @property
     def empty_inserts(self):
         return exclusions.closed()
 

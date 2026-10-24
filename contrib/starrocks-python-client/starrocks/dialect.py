@@ -195,6 +195,7 @@ colspecs = {
     sqltypes.DateTime: DATETIME,
     sqltypes.DECIMAL: DECIMAL,
     sqltypes.Time: TIME,
+    sqltypes.JSON: JSON,
 }
 
 class StarRocksTypeCompiler(MySQLTypeCompiler):
@@ -430,6 +431,21 @@ class StarRocksSQLCompiler(MySQLCompiler):
             #     text += "\n LIMIT -1"
             text += " OFFSET " + self.process(select._offset_clause, **kw)
         return text
+
+    def visit_cast(self, cast: Any, **kw: Any) -> str:
+        """Render a cast of a JSON expression to a string type as ``json_string``, which yields the JSON text.
+
+        ``CAST(<JSON> AS VARCHAR)`` on StarRocks drops the quotes of a JSON string and turns a JSON null into SQL
+        NULL, whereas SQLAlchemy documents the cast as the JSON text (``"value"``, ``null``). ``json_string``
+        returns that text, and SQL NULL for a missing value.
+        """
+        casts_json_to_string = (
+            cast.clause.type._type_affinity is sqltypes.JSON
+            and cast.typeclause.type._type_affinity is sqltypes.String
+        )
+        if casts_json_to_string:
+            return f"json_string({self.process(cast.clause, **kw)})"
+        return super().visit_cast(cast, **kw)
 
     def visit_typeclause(
         self,

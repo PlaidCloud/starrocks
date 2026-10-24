@@ -20,7 +20,7 @@ import json
 import re
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
-from sqlalchemy import cast, func, util
+from sqlalchemy import cast, func, literal_column, util
 import sqlalchemy.dialects.mysql.types as mysql_types
 from sqlalchemy.engine import Dialect
 from sqlalchemy.sql import sqltypes
@@ -453,7 +453,19 @@ class STRUCT(StructuredType):
 
 
 class JSON(sqltypes.JSON):
+    """JSON column type that round-trips scalars as JSON scalars, not JSON strings.
+
+    The server's ``parse_json('1')`` and ``CAST('1' AS JSON)`` yield the JSON *string* ``"1"``, so a bare scalar
+    bound as text would read back as ``'1'``. The bound text is therefore wrapped in a one-element array and
+    the element is taken out again, ``json_query(parse_json(concat('[', :value, ']')), '$[0]')``, which keeps
+    the JSON type of the value. A SQL NULL bind stays SQL NULL, and a JSON null (``'null'``) stays a JSON null.
+    """
+
     __visit_name__ = "JSON"
+
+    def bind_expression(self, bindvalue: Any) -> Any:
+        wrapped = func.concat(literal_column("'['"), bindvalue, literal_column("']'"))
+        return func.json_query(func.parse_json(wrapped), literal_column("'$[0]'"))
 
 
 class VARIANT(sqltypes.TypeEngine):

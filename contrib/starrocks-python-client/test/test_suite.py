@@ -45,7 +45,7 @@ from sqlalchemy.testing.suite import (
     CompositeKeyReflectionTest,
     CTETest as _CTETest,
     FetchLimitOffsetTest as _FetchLimitOffsetTest,
-    JSONLegacyStringCastIndexTest,
+    JSONLegacyStringCastIndexTest as _JSONLegacyStringCastIndexTest,
     JSONTest as _JSONTest,
     LongNameBlowoutTest,
     NumericTest as _NumericTest,
@@ -589,36 +589,18 @@ class JSONTest(_JSONTest):
             Column("nulldata", cls.datatype(none_as_null=True)),
         )
 
-    @testing.skip('starrocks', 'Seems to return "null", not sure why')
-    def test_round_trip_json_null_as_json_null(self, connection):
-        pass
 
-    @testing.combinations(
-        ("parameters",),
-        ("multiparameters",),
-        ("values",),
-        argnames="insert_type",
-    )
-    @testing.skip("starrocks", 'Seems to return "null", not sure why')
-    def test_round_trip_none_as_json_null(self, connection, insert_type):
-        pass
-
-    @testing.combinations(
-        (True,),
-        (False,),
-        (None,),
-        (15,),
-        (0,),
-        (-1,),
-        (-1.0,),
-        (15.052,),
-        ("a string",),
-        ("réve illé",),
-        ("réve🐍 illé",),
-    )
-    @testing.skip("starrocks", 'Seems to return "null", not sure why')
-    def test_single_element_round_trip(self, element):
-        pass
+class JSONLegacyStringCastIndexTest(_JSONLegacyStringCastIndexTest):
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "data_table",
+            metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("name", String(30), nullable=False),
+            Column("data", cls.datatype),
+            Column("nulldata", cls.datatype(none_as_null=True)),
+        )
 
 
 FOR_UPDATE = testing.skip("starrocks", "StarRocks does not support SELECT ... FOR UPDATE")
@@ -701,7 +683,6 @@ class ServerSideCursorsTest(_ServerSideCursorsTest):
     def test_roundtrip_fetchall(self, metadata):
         pass
 
-JSONLegacyStringCastIndexTest.__requires__ = ('json_type', 'json_string_cast_keeps_json_quoting')
 LongNameBlowoutTest.__requires__ = ("index_reflection",)  # This will do to make it skip for now, no multiple column index
 CompositeKeyReflectionTest.__requires__ = ('primary_key_constraint_reflection',) # This will make it also skip the fixture which is not creating succesfully
 if not IS_SQLALCHEMY_2:
