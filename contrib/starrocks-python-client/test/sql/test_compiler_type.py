@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from sqlalchemy import TIMESTAMP, Column, Enum, LargeBinary, MetaData, Table, Text, UnicodeText, testing
 from sqlalchemy.dialects import mysql
 from sqlalchemy.schema import CreateColumn
-from sqlalchemy.testing import expect_warnings, fixtures
+from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
 from starrocks.datatype import (
@@ -130,12 +130,27 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         id_="ra",
     )
     def test_complex_type(self, type_, expected):
-        """ARRAY, MAP and STRUCT do not set ``cache_ok``, so SQLAlchemy cannot cache statements that use them.
+        """Compiling must not warn that the type cannot produce a cache key."""
+        self.assert_compile(type_, expected)
 
-        That is a dialect bug; drop the ``expect_warnings`` once the types declare whether they are cacheable.
-        """
-        with expect_warnings("UserDefinedType .* will not produce a cache key"):
-            self.assert_compile(type_, expected)
+    @testing.combinations(
+        (ARRAY(INTEGER), ARRAY(INTEGER), True),
+        (ARRAY(INTEGER), ARRAY(STRING), False),
+        (MAP(STRING, INTEGER), MAP(STRING, INTEGER), True),
+        (MAP(STRING, INTEGER), MAP(INTEGER, STRING), False),
+        (STRUCT(a=INTEGER), STRUCT(a=INTEGER), True),
+        (STRUCT(a=INTEGER), STRUCT(b=INTEGER), False),
+        (STRUCT(a=INTEGER), STRUCT(a=STRING), False),
+        (STRUCT(a=INTEGER, b=STRING), STRUCT(a=INTEGER), False),
+        (ARRAY(STRUCT(a=INTEGER)), ARRAY(STRUCT(a=STRING)), False),
+        argnames="left, right, same_key",
+        id_="aaa",
+    )
+    def test_complex_types_have_distinguishing_cache_keys(self, left, right, same_key):
+        """Statements are cached by type, so types that render differently must not share a cache key."""
+        left_key = left._static_cache_key
+        right_key = right._static_cache_key
+        assert (left_key == right_key) is same_key
 
     @testing.combinations(
         (sa.Float(), "CAST(t.x AS FLOAT)"),

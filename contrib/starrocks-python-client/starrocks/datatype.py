@@ -20,7 +20,7 @@ import json
 import re
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
-from sqlalchemy import cast, func
+from sqlalchemy import cast, func, util
 import sqlalchemy.dialects.mysql.types as mysql_types
 from sqlalchemy.engine import Dialect
 from sqlalchemy.sql import sqltypes
@@ -297,6 +297,7 @@ class ARRAY(StructuredType):
     """
 
     __visit_name__ = "ARRAY"
+    cache_ok = True
 
     def __init__(self, item_type: sqltypes.TypeEngine, **kwargs):
         self.item_type = self._check_subtype(item_type)
@@ -332,6 +333,7 @@ class MAP(StructuredType):
     """
 
     __visit_name__ = "MAP"
+    cache_ok = True
 
     def __init__(self, key_type: sqltypes.TypeEngine, value_type: sqltypes.TypeEngine, **kwargs: Any):
         self.key_type = self._check_subtype(key_type)
@@ -389,6 +391,7 @@ class STRUCT(StructuredType):
 """
 
     __visit_name__ = "STRUCT"
+    cache_ok = True
 
     def __init__(self, *fields: Tuple[STRING, sqltypes.TypeEngine], **kwfields: sqltypes.TypeEngine):
         self.field_tuples = tuple(
@@ -399,6 +402,14 @@ class STRUCT(StructuredType):
             name.lower(): type_ for (name, type_) in self.field_tuples
         }
         super().__init__()
+
+    @util.memoized_property
+    def _static_cache_key(self) -> Tuple[Any, ...]:
+        """Key on the field names and types; the fields are positional, so the default key would ignore them."""
+        return (
+            self.__class__,
+            tuple((name, type_._static_cache_key) for name, type_ in self.field_tuples),
+        )
 
     @property
     def python_type(self) -> Optional[Type[Any]]:
