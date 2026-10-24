@@ -27,7 +27,7 @@ issues where:
 """
 import logging
 
-from sqlalchemy import Column, MetaData, Table, text
+from sqlalchemy import Column, MetaData, Table, Text, UnicodeText, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.testing import fixtures
 
@@ -56,6 +56,7 @@ from starrocks.datatype import (
     VARBINARY,
     VARCHAR,
 )
+from test.unit.test_compare_column_type import run_compare
 
 
 logger = logging.getLogger(__name__)
@@ -214,6 +215,25 @@ class DataTypeReflectionTest(fixtures.TestBase):
 
         assert reflected_table.c.binary_col.type.length == 10
         assert reflected_table.c.varbinary_col.type.length == 255
+
+    def test_text_columns_compare_equal_to_their_reflection(self, connection):
+        """Text and UnicodeText are stored as varchar(65533), so autogenerate must not see a type change."""
+        table_name = "test_reflect_text_types"
+        table = Table(
+            table_name,
+            MetaData(),
+            Column("id_col", INTEGER()),
+            Column("text_col", Text()),
+            Column("unicode_text_col", UnicodeText()),
+            starrocks_distributed_by='HASH(id_col)',
+            starrocks_properties={"replication_num": "1"},
+        )
+
+        reflected_table = self._create_and_reflect_table(connection, table_name, table)
+
+        for name in ("text_col", "unicode_text_col"):
+            assert reflected_table.c[name].type.length == 65533
+            assert run_compare(reflected_table.c[name].type, table.c[name].type) is False
 
     def test_reflect_datetime_types(self, connection):
         """Test reflection of datetime data types"""

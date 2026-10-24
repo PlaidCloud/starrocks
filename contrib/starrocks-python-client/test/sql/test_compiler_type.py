@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from sqlalchemy import Column, LargeBinary, MetaData, Table, testing
+from sqlalchemy import Column, LargeBinary, MetaData, Table, Text, UnicodeText, testing
 from sqlalchemy.schema import CreateColumn
 from sqlalchemy.testing import expect_warnings, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
@@ -70,6 +70,9 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         (VARCHAR(255), "VARCHAR(255)"),
         (VARCHAR(65533), "STRING"),
         (STRING(), "STRING"),
+        (Text(), "STRING"),
+        (Text(100), "STRING"),
+        (UnicodeText(), "STRING"),
         (BINARY(), "BINARY"),
         (BINARY(10), "BINARY(10)"),
         (VARBINARY(), "VARBINARY"),

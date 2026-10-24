@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from sqlalchemy import Column, LargeBinary, testing
+from sqlalchemy import Column, LargeBinary, Text, UnicodeText, testing
 from sqlalchemy.testing import fixtures
 
 from starrocks.alembic.starrocks import StarRocksImpl
@@ -152,6 +152,12 @@ simple_type_params = [
     ("VARBINARY(10) vs BINARY(20) (length differs)", VARBINARY(10), BINARY(20), True),
     ("VARBINARY(1048576) vs VARBINARY(100) (length differs)", VARBINARY(1048576), VARBINARY(100), True),
     ("VARBINARY(10) vs STRING (different)", VARBINARY(10), STRING(), True),
+
+    # 1.7 Text and UnicodeText compile to STRING, reported as varchar(65533)
+    ("VARCHAR(65533) vs Text (equivalent)", VARCHAR(65533), Text(), False),
+    ("VARCHAR(65533) vs UnicodeText (equivalent)", VARCHAR(65533), UnicodeText(), False),
+    ("VARCHAR(65532) vs Text (different)", VARCHAR(65532), Text(), True),
+    ("INTEGER vs Text (different)", INTEGER(), Text(), True),
 ]
 
 # 2. Complex type vs Simple type

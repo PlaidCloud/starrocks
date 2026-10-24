@@ -219,6 +219,10 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
     def visit_STRING(self, type_, **kw):
         return "STRING"
 
+    def visit_TEXT(self, type_, **kw):
+        """StarRocks stores TEXT as varchar(65533), which is what STRING means."""
+        return "STRING"
+
     def visit_VARCHAR(self, type_, **kw):
         # StarRocks supports unbounded strings via STRING. When no length is
         # provided (e.g. from SQLAlchemy String() without length), render
