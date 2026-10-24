@@ -26,8 +26,9 @@ Each class inserts its rows once, through ``insert_data``, and its tests read th
 """
 from datetime import date, datetime
 from decimal import Decimal
+import enum
 
-from sqlalchemy import Column, Integer, Table, TypeDecorator, select, testing, type_coerce
+from sqlalchemy import Column, Enum, Integer, PickleType, Table, TypeDecorator, select, testing, type_coerce
 from sqlalchemy.testing import eq_, fixtures
 
 from starrocks.datatype import (
@@ -42,6 +43,7 @@ from starrocks.datatype import (
     LARGEINT,
     MAP,
     STRUCT,
+    VARBINARY,
     VARCHAR,
 )
 
@@ -194,6 +196,16 @@ class StructBindExpressionTest(_InsertedRowsTest):
 _BIG = 170141183460469231731687303715884105727
 
 
+class _Color(enum.Enum):
+    RED = 1
+    GREEN = 2
+
+
+class _Bytes(TypeDecorator):
+    impl = VARBINARY()
+    cache_ok = True
+
+
 class ComplexValueRoundTripTest(fixtures.TestBase):
     """Every value bound to an ARRAY, MAP or STRUCT column must come back exactly, whatever its element types.
 
@@ -245,6 +257,13 @@ class ComplexValueRoundTripTest(fixtures.TestBase):
             MAP(VARCHAR(10), STRUCT(a=INTEGER(), m=MAP(INTEGER(), VARCHAR(5)))),
             {"q": {"a": 1, "m": {1: "z"}}},
         ),
+        ("array_of_enum", ARRAY(Enum(_Color)), [_Color.GREEN, None, _Color.RED]),
+        ("struct_of_enum", STRUCT(c=Enum(_Color)), {"c": _Color.RED}),
+        ("map_of_enum", MAP(Enum(_Color), Enum(_Color)), {_Color.GREEN: _Color.RED}),
+        ("array_of_binary_decorator", ARRAY(_Bytes()), [b"abc", None]),
+        ("struct_of_binary_decorator", STRUCT(b=_Bytes()), {"b": b"abc"}),
+        ("array_of_pickle", ARRAY(PickleType(protocol=0)), [{"x": [1, 2]}, None]),
+        ("map_of_pickle", MAP(VARCHAR(5), PickleType(protocol=0)), {"k": ("t", 1)}),
         argnames="type_,value",
         id_="iaa",
     )

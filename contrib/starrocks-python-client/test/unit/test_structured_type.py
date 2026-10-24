@@ -18,10 +18,11 @@ from decimal import Decimal
 import enum
 import json
 import math
+import pickle
 import warnings
 
 import sqlalchemy as sa
-from sqlalchemy import Column, Enum, MetaData, Table, TypeDecorator, insert, testing
+from sqlalchemy import Column, Enum, Float, MetaData, PickleType, Table, TypeDecorator, insert, testing
 from sqlalchemy.testing import AssertsCompiledSQL, fixtures
 
 from starrocks import datatype
@@ -511,6 +512,49 @@ class _NoneToEmpty(TypeDecorator):
 class _Color(enum.Enum):
     RED = 1
     GREEN = 2
+
+
+class _Bytes(TypeDecorator):
+    impl = datatype.VARBINARY()
+    cache_ok = True
+
+
+class _EmptyForNone(TypeDecorator):
+    impl = datatype.VARCHAR(10)
+    cache_ok = True
+
+    def process_result_value(self, value, dialect):
+        return "" if value is None else value
+
+
+def _read(type_obj, text, version=(4, 1, 6)):
+    dialect = StarRocksDialect()
+    dialect.server_version_info = version
+    return type_obj.result_processor(dialect, None)(text)
+
+
+class ElementResultProcessingTest(fixtures.TestBase):
+    """An element is read through its declared type's result processing, as a plain column value is."""
+
+    @testing.combinations(
+        ("enum", datatype.ARRAY(Enum(_Color)), '["GREEN","RED"]', [_Color.GREEN, _Color.RED]),
+        ("enum_in_struct", datatype.STRUCT(c=Enum(_Color)), '{"c":"RED"}', {"c": _Color.RED}),
+        ("enum_in_map", datatype.MAP(Enum(_Color), datatype.INTEGER()), '{"GREEN":1}', {_Color.GREEN: 1}),
+        ("binary_decorator", datatype.ARRAY(_Bytes()), '["616263"]', [b"abc"]),
+        ("pickle", datatype.ARRAY(PickleType()), '["%s"]' % pickle.dumps({"x": 1}).hex(), [{"x": 1}]),
+        ("decorator_reads_none", datatype.ARRAY(_EmptyForNone()), '[null,"x"]', ["", "x"]),
+        id_="iaaa",
+        argnames="type_obj,text,expected",
+    )
+    def test_read(self, type_obj, text, expected):
+        assert _read(type_obj, text) == expected
+
+    def test_binary_decorator_on_a_server_that_nests_raw_bytes(self):
+        assert _read(datatype.ARRAY(_Bytes()), '["abc"]', version=(3, 5, 21)) == [b"abc"]
+
+    def test_float_with_asdecimal_reads_a_decimal(self):
+        value = _read(datatype.ARRAY(Float(asdecimal=True)), "[0.5]")
+        assert value == [Decimal("0.5")] and isinstance(value[0], Decimal)
 
 
 class _Float(float):

@@ -997,10 +997,24 @@ def _nested_binary_reader(dialect: Dialect) -> Callable[[Any], bytes]:
 
 
 def _element_converter(type_: Any, dialect: Dialect) -> Callable[[Any], Any]:
+    """Build the reader of one element of a collection, ``None`` included, as a plain column of its type reads.
+
+    The parsed value is first made what the driver returns for such a column, by the type underneath any
+    TypeDecorator, and then goes through the declared type's own result processing: an Enum's, a
+    TypeDecorator's ``process_result_value``, or PickleType's unpickling.
+    """
     type_ = StructuredType._check_subtype(type_)
     if isinstance(type_, StructuredType):
         return lambda value: _convert_structured(type_, value, dialect)
-    impl = type_.dialect_impl(dialect)
+    as_driver_value = _nullable(_driver_value_reader(_structured_leaf_impl(type_, dialect), dialect))
+    process = type_.dialect_impl(dialect).result_processor(dialect, None)
+    if process is None:
+        return as_driver_value
+    return lambda value: process(as_driver_value(value))
+
+
+def _driver_value_reader(impl: sqltypes.TypeEngine, dialect: Dialect) -> Callable[[Any], Any]:
+    """Build the function that turns a parsed element into what the driver returns for a column of ``impl``."""
     if isinstance(impl, sqltypes.Boolean):
         return lambda value: value if isinstance(value, bool) else bool(value)
     if isinstance(impl, sqltypes.Integer):
@@ -1008,13 +1022,12 @@ def _element_converter(type_: Any, dialect: Dialect) -> Callable[[Any], Any]:
     if isinstance(impl, sqltypes.Float):
         return float
     if isinstance(impl, sqltypes.Numeric):
-        return (lambda value: Decimal(str(value))) if impl.asdecimal else float
+        return lambda value: Decimal(str(value))
     if isinstance(impl, sqltypes._Binary):
         return _nested_binary_reader(dialect)
     if isinstance(impl, sqltypes.String):
         return str
-    processor = impl.result_processor(dialect, None)
-    return processor if processor is not None else (lambda value: value)
+    return _unprocessed
 
 
 def _nullable(convert: Callable[[Any], Any]) -> Callable[[Any], Any]:
@@ -1027,16 +1040,16 @@ def _convert_structured(type_: StructuredType, value: Any, dialect: Dialect) -> 
     if isinstance(type_, ARRAY):
         if not isinstance(value, list):
             raise ValueError("expected an ARRAY value, got %r" % (value,))
-        item = _nullable(_element_converter(type_.item_type, dialect))
+        item = _element_converter(type_.item_type, dialect)
         return [item(element) for element in value]
     if not isinstance(value, list) or any(not isinstance(pair, tuple) for pair in value):
         raise ValueError("expected a %s value, got %r" % (type_.__visit_name__, value))
     if isinstance(type_, MAP):
-        key = _nullable(_element_converter(type_.key_type, dialect))
-        val = _nullable(_element_converter(type_.value_type, dialect))
+        key = _element_converter(type_.key_type, dialect)
+        val = _element_converter(type_.value_type, dialect)
         return {key(k): val(v) for k, v in value}
     fields = {
-        name.lower(): _nullable(_element_converter(field_type, dialect))
+        name.lower(): _element_converter(field_type, dialect)
         for name, field_type in type_.field_tuples
     }
     return {
