@@ -641,8 +641,8 @@ class CompareViewTest(fixtures.TestBase):
             # Note: Currently there's no warning for columns when definition changes
             # assert any("columns" in str(warning.message) for warning in w)
 
-    def test_alter_view_columns_only_raises_error(self):
-        """ALTER COLUMNS: Changed without definition (raises ValueError)."""
+    def test_alter_view_columns_only(self):
+        """ALTER COLUMNS: Changed without definition (generates AlterViewOp with the unchanged definition)."""
         upgrade_ops = ops.UpgradeOps([])
 
         # Database view
@@ -664,16 +664,23 @@ class CompareViewTest(fixtures.TestBase):
             definition='SELECT id, name FROM users'  # Same definition!
         )
 
-        # Should raise NotImplementedError
-        with expect_raises_message(NotImplementedError, "does not support altering view columns independently"):
-            compare_view(
-                self.mock_autogen_context,
-                upgrade_ops,
-                None,
-                'my_view',
-                conn_view,
-                meta_view
-            )
+        compare_view(
+            self.mock_autogen_context,
+            upgrade_ops,
+            None,
+            'my_view',
+            conn_view,
+            meta_view
+        )
+
+        eq_(len(upgrade_ops.ops), 1)
+        op = upgrade_ops.ops[0]
+        assert isinstance(op, AlterViewOp)
+        eq_(op.definition, 'SELECT id, name FROM users')
+        eq_([(col['name'], col.get('comment')) for col in op.columns], [('id', None), ('name', 'New comment')])
+        eq_(op.existing_definition, 'SELECT id, name FROM users')
+        eq_([(col['name'], col.get('comment')) for col in op.existing_columns], [('id', None), ('name', 'Old comment')])
+        eq_(op.security, None)
 
     def test_alter_view_columns_no_change(self):
         """ALTER COLUMNS: No change (identical columns)."""

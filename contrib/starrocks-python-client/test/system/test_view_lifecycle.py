@@ -17,7 +17,6 @@ import re
 
 from sqlalchemy import Column, MetaData, Table, inspect, text
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing.assertions import is_true
 
 from starrocks.alembic.compare import TableAttributeNormalizer
@@ -346,9 +345,8 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         assert "select id from user" in normalized_def
 
     @VIEW_CREATED_BEFORE_ITS_TABLE
-    def test_columns_change_ignored(self, database, alembic_env, sr_engine, caplog):
-        """Tests that column changes are detected but not altered (StarRocks limitation)."""
-        caplog.set_level("WARNING")
+    def test_columns_change(self, database, alembic_env, sr_engine):
+        """Tests that a column-only change generates an ALTER VIEW that redefines the view with the new columns."""
 
         # 1. Initial state with columns
         Base = declarative_base()
@@ -385,12 +383,16 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
             Column('name', VARCHAR(50), comment='Modified name'),  # Changed comment
             definition='SELECT id, name FROM user',  # Definition unchanged
         )
-        with expect_raises_message(NotImplementedError, "StarRocks does not support altering view columns independently"):
-            alembic_env.harness.generate_autogen_revision(metadata=AlteredBase.metadata, message="Modify column comment")
+        alembic_env.harness.generate_autogen_revision(metadata=AlteredBase.metadata, message="Modify column comment")
 
-        # 3. Verify no ALTER is generated (only definition changes trigger ALTER)
-        # script_content = ScriptContentParser.check_script_content(alembic_env, 1, "modify_column_comment")
-        # is_true(re.search(EMPTY_UPGRADE_STR, script_content), "Upgrade script should be empty for column comment changes")
+        # 3. Verify the ALTER carries the unchanged definition and the new column comment, and apply it
+        script_content = ScriptContentParser.check_script_content(alembic_env, 1, "modify_column_comment")
+        upgrade_content = ScriptContentParser.extract_upgrade_content(script_content)
+        assert "op.alter_view" in upgrade_content
+        assert "Modified name" in upgrade_content
+        alembic_env.harness.upgrade("head")
+        with sr_engine.connect() as connection:
+            assert '"Modified name"' in connection.exec_driver_sql("SHOW CREATE VIEW user_view").fetchone()[1]
 
         # 4. Change definition to test that it triggers ALTER (even with column changes)
         AlteredBase2 = declarative_base()

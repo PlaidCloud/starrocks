@@ -172,5 +172,6 @@ So, we extract the SECURITY info from MV definition now.
 
 - StarRocks has no ALTER for a view's comment, and `ALTER VIEW ... AS` drops it. So a change to the definition, the columns or the comment is applied as `CREATE OR REPLACE VIEW` with the full definition, columns and comment, whenever the migration states a comment or an existing one. A migration that states neither, such as a hand-written `op.alter_view('v', 'SELECT ...')`, is a plain `ALTER VIEW ... AS`, which leaves the view without a comment.
 - A security change is a separate `ALTER VIEW ... SET SECURITY` statement. Autogenerate compares security only when the model states `starrocks_security`; a view whose model omits it keeps the security it has.
+- A change to the columns alone, a name or a column comment with the same definition, is generated as `op.alter_view` with the unchanged definition and the new columns, which redefines the view as `ALTER VIEW v (columns) AS <definition>` (or `CREATE OR REPLACE VIEW` when the view has a comment).
 
 Autogenerate will warn or raise for immutable changes instead of producing ALTER statements. Decide explicitly (usually DROP + CREATE) for those cases.

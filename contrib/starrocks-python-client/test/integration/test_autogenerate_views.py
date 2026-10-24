@@ -19,7 +19,7 @@ from alembic.autogenerate import api
 from alembic.operations import Operations
 from alembic.operations.ops import AlterTableOp, ModifyTableOps
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import Column, MetaData, Table, text
+from sqlalchemy import Column, MetaData, Table, testing, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.testing import config, engines, fixtures
 
@@ -621,6 +621,40 @@ class AlterViewTest(_EmptyDatabaseAutogenerateBase):
         for op_item in migration_script.upgrade_ops.ops:
             op.invoke(op_item)
         return api.produce_migrations(create_migration_context(connection, target_metadata), target_metadata)
+
+    @testing.combinations(
+        ("column_comment", "", [{"name": "a", "comment": "new"}, {"name": "b"}]),
+        ("column_names", "", [{"name": "x"}, {"name": "y"}]),
+        ("column_comment_with_view_comment", "COMMENT 'kept'", [{"name": "a", "comment": "new"}, {"name": "b"}]),
+        ("column_names_with_view_comment", "COMMENT 'kept'", [{"name": "x"}, {"name": "y"}]),
+        argnames="view_comment, columns",
+        id_="iaa",
+    )
+    def test_columns_only_change(self, connection, view_comment, columns) -> None:
+        """ALTER: Columns changed with the same definition, generated and applied, with the comment kept."""
+        view_name = "test_alter_columns_only"
+        connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+        connection.execute(text(f"CREATE VIEW {view_name} (a COMMENT 'old', b) {view_comment} AS SELECT 1 AS a, 2 AS b"))
+        try:
+            target_metadata = MetaData()
+            View(
+                view_name,
+                target_metadata,
+                definition="SELECT 1 AS a, 2 AS b",
+                columns=columns,
+                comment="kept" if view_comment else None,
+            )
+            mc = create_migration_context(connection, target_metadata)
+            migration_script = api.produce_migrations(mc, target_metadata)
+            assert len(migration_script.upgrade_ops.ops) == 1
+            alter_op = migration_script.upgrade_ops.ops[0]
+            assert isinstance(alter_op, AlterViewOp)
+            assert normalize_sql(alter_op.definition) == normalize_sql("SELECT 1 AS a, 2 AS b")
+
+            again = self._apply_and_reproduce(connection, mc, target_metadata, migration_script)
+            assert again.upgrade_ops.ops == []
+        finally:
+            connection.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
 
     def test_comment_change(self, connection) -> None:
         """ALTER: Only comment changed, applied by recreating the view, and nothing is left to change."""

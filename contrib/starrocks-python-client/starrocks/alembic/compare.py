@@ -597,7 +597,7 @@ def compare_view(
         # Log which attributes changed
         changed_attrs = []
         if definition_changed:
-            changed_attrs.append("definition")
+            changed_attrs.append("definition or columns")
         if comment_changed:
             changed_attrs.append("comment")
         if security_changed:
@@ -698,8 +698,8 @@ def _compare_view_definition_and_columns(
     """
     Compare view definition and columns, and update AlterViewOp if changed.
 
-    Definition and columns are compared together because in StarRocks,
-    columns can only be changed by changing the definition (SELECT statement).
+    Definition and columns are compared together because StarRocks changes the columns of a view by redefining
+    it, with ALTER VIEW (columns) AS or CREATE OR REPLACE VIEW. A column-only change keeps the definition.
 
     Args:
         alter_view_op: AlterViewOp object to update
@@ -708,7 +708,7 @@ def _compare_view_definition_and_columns(
         metadata_view: View defined in metadata
 
     Returns:
-        True if definition changed, False otherwise
+        True if the definition or the columns changed, False otherwise
     """
     from starrocks.sql.schema import extract_view_columns
 
@@ -772,21 +772,13 @@ def _compare_view_definition_and_columns(
             meta_cols,
         )
 
-    # StarRocks limitation: Columns can only be changed together with definition
-    if columns_changed and not definition_changed:
-        raise NotImplementedError(
-            f"Detected COLUMN change on view {view_fqn!r}, while definition is unchanged. "
-            f"But StarRocks does not support altering view columns independently. "
-            f"You must change the definition (SELECT statement) together with columns, "
-            f"or use DROP + CREATE to apply this change.",
-        )
-
-    # Set definition and columns if definition changed
-    if definition_changed:
+    if definition_changed or columns_changed:
         alter_view_op.definition = meta_definition
         alter_view_op.columns = extract_view_columns(metadata_view)
         alter_view_op.existing_definition = conn_definition
         alter_view_op.existing_columns = extract_view_columns(conn_view)
+
+    if definition_changed:
         logger.info(f"Detected DEFINITION change on view {view_fqn!r}, "
                     f"from '{conn_def_norm}' (in database, normalized) to '{meta_def_norm}' (in metadata, normalized).")
         check_similar_string_and_warn(
@@ -798,7 +790,10 @@ def _compare_view_definition_and_columns(
             object_label="View",
         )
 
-    return definition_changed
+    if columns_changed and not definition_changed:
+        logger.info(f"Detected COLUMN change on view {view_fqn!r}, while its definition is unchanged.")
+
+    return definition_changed or columns_changed
 
 
 def _compare_view_comment(
