@@ -114,6 +114,7 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         (STRUCT(name=STRING, age=INTEGER), "STRUCT<name STRING, age INTEGER>"),
         (STRUCT(("a b", INTEGER), ("Caps", VARCHAR(5))), "STRUCT<`a b` INTEGER, Caps VARCHAR(5)>"),
         (STRUCT(("odd`name", INTEGER), ("1st", STRING)), "STRUCT<`odd``name` INTEGER, `1st` STRING>"),
+        (STRUCT(("p%ct", INTEGER)), "STRUCT<`p%%ct` INTEGER>"),
         (
             STRUCT(id=INTEGER, name=VARCHAR(100), active=BOOLEAN),
             "STRUCT<id INTEGER, name VARCHAR(100), active BOOLEAN>",

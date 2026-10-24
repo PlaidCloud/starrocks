@@ -328,12 +328,18 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
         value_type_sql = self.process(type_.value_type, **kw)
         return f"MAP<{key_type_sql}, {value_type_sql}>"
 
-    def visit_STRUCT(self, type_: STRUCT, **kw):
-        # logger.debug("visit_STRUCT: type_: %r, kw: %s", type_, kw)
+    def visit_STRUCT(self, type_: STRUCT, **kw: Any) -> str:
+        """Render ``STRUCT<name type, ...>``, with ``%`` in a field name doubled as in a column name.
+
+        The driver formats every statement with its parameters, which may be none, so a lone ``%`` would be read
+        as a placeholder.
+        """
+        double_percents = self.dialect.identifier_preparer._double_percents
         fields_sql = []
         for name, field_type in type_.field_tuples:
             type_sql = self.process(field_type, **kw)
-            fields_sql.append(f"{quote_struct_field_name(name)} {type_sql}")
+            name_sql = quote_struct_field_name(name)
+            fields_sql.append(f"{name_sql.replace('%', '%%') if double_percents else name_sql} {type_sql}")
         return f"STRUCT<{', '.join(fields_sql)}>"
 
     def visit_HLL(self, type_, **kw):
