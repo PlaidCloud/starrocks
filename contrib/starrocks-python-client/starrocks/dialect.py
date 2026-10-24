@@ -649,12 +649,20 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         """
         return '"%s"' % str(value).replace("\\", "\\\\").replace('"', '\\"')
 
-    @classmethod
-    def quoted_property_pair(cls, key: Any, value: Any, separator: str = " = ") -> str:
+    def quoted_property_pair(self, key: Any, value: Any, separator: str = " = ") -> str:
         """Quote a ``"key" = "value"`` PROPERTIES pair, refusing a missing value rather than writing "None"."""
         if value is None:
             raise exc.CompileError(f"Property {key!r} has no value; StarRocks properties are strings")
-        return f"{cls.quoted_property(key)}{separator}{cls.quoted_property(value)}"
+        return self.sql_text(f"{self.quoted_property(key)}{separator}{self.quoted_property(value)}")
+
+    def sql_text(self, text: str) -> str:
+        """Return SQL given as text, such as a view definition or a PARTITION BY clause, ready to splice into DDL.
+
+        The driver formats parameters into a statement with ``%``, so a ``%`` of the text, as in
+        ``str2date(s, '%Y-%m-%d')`` or ``date_format(d, '%Y')``, is doubled for a driver that does. Identifiers
+        and comments are escaped by SQLAlchemy already.
+        """
+        return text.replace("%", "%%") if self.preparer._double_percents else text
 
     def visit_create_index(self, create: sa_schema.CreateIndex, **kw: Any) -> str:  # type: ignore[override]
         """Compile ``CREATE INDEX name ON table (columns) [USING <type> [(properties)]] [COMMENT '...']``.
@@ -988,7 +996,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         # Partition
         if partition_by := opts.get(TableInfoKey.PARTITION_BY):
-            table_opts.append(f'PARTITION BY {partition_by}')
+            table_opts.append(f'PARTITION BY {self.sql_text(partition_by)}')
 
         # Distribution
         distributed_by = opts.get(TableInfoKey.DISTRIBUTED_BY)
@@ -1018,18 +1026,18 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             distributed_by = None
 
         if distributed_by:
-            table_opts.append(f'DISTRIBUTED BY {distributed_by}')
+            table_opts.append(f'DISTRIBUTED BY {self.sql_text(distributed_by)}')
 
         # Order By
         if order_by := opts.get(TableInfoKey.ORDER_BY):
             if isinstance(order_by, (list, tuple)):
                 order_by = ", ".join(str(item) for item in order_by)
             order_by = TableAttributeNormalizer.remove_outer_parentheses(order_by)
-            table_opts.append(f'ORDER BY ({order_by})')
+            table_opts.append(f'ORDER BY ({self.sql_text(order_by)})')
 
         # Handle MV-specific REFRESH clause
         if refresh := opts.get(TableInfoKey.REFRESH):
-            table_opts.append(f"REFRESH {self._refresh_scheme(refresh)}")
+            table_opts.append(f"REFRESH {self.sql_text(self._refresh_scheme(refresh))}")
 
         # Properties
         properties = opts.get(TableInfoKey.PROPERTIES)
@@ -1370,7 +1378,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         if view.columns:
             text += self._get_view_column_clauses(view)
 
-        text += f"AS\n{view.definition}"
+        text += f"AS\n{self.sql_text(view.definition)}"
 
         logger.debug("Compiled SQL for AlterView: \n%s", text)
         return text
@@ -1437,7 +1445,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             text += "\nCOMMENT " + self.sql_compiler.render_literal_value(table.comment, sqltypes.String())
         if security:
             text += "\nSECURITY " + self._view_security_keyword(table, security)
-        text += f"\nAS\n{definition}"
+        text += f"\nAS\n{self.sql_text(definition)}"
 
         logger.debug("Compiled SQL for CreateView: \n%s", text)
         return text
@@ -1532,7 +1540,9 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         # ALTER REFRESH
         if alter.refresh is not None:
-            statements.append(f"ALTER MATERIALIZED VIEW {mv_name} REFRESH {self._refresh_scheme(alter.refresh)}")
+            statements.append(
+                f"ALTER MATERIALIZED VIEW {mv_name} REFRESH {self.sql_text(self._refresh_scheme(alter.refresh))}"
+            )
 
         # ALTER PROPERTIES
         if alter.properties is not None:
@@ -1588,7 +1598,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         if clauses:
             text += "\n" + "\n".join(clauses)
 
-        text += f"\nAS\n{definition}"
+        text += f"\nAS\n{self.sql_text(definition)}"
 
         logger.debug("Compiled SQL for CreateMaterializedView: \n%s", text)
         return text
@@ -1631,7 +1641,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         Not supported in StarRocks yet.
         """
         table_name = format_table_name(self, alter.table_name, alter.schema)
-        return f"ALTER TABLE {table_name} PARTITION BY {alter.partition_by}"
+        return f"ALTER TABLE {table_name} PARTITION BY {self.sql_text(alter.partition_by)}"
 
     def visit_alter_table_columns(self, alter: AlterTableColumns, **kw: Any) -> str:
         """Compile a combined ALTER TABLE ADD/DROP COLUMN DDL for StarRocks.
@@ -1670,7 +1680,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             raise exc.CompileError(
                 f"Cannot ALTER table {table_name} to RANGE distribution: StarRocks has no "
                 "DISTRIBUTED BY RANGE syntax. Range distribution can only be set when the table is created.")
-        distribution_clause = f"DISTRIBUTED BY {alter.distribution_method}"
+        distribution_clause = f"DISTRIBUTED BY {self.sql_text(alter.distribution_method)}"
         if alter.buckets is not None:
             distribution_clause += f" BUCKETS {alter.buckets}"
 
@@ -1696,7 +1706,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         logger.info(f"You probably should use ({show_clause}) to check the execution status "
                     f"of altering ORDER before doing another ALTER TABLE statement.")
 
-        return f"ALTER TABLE {table_name} ORDER BY ({order_by})"
+        return f"ALTER TABLE {table_name} ORDER BY ({self.sql_text(order_by)})"
 
     def visit_alter_table_properties(self, alter: AlterTableProperties, **kw: Any) -> str:
         """Compile ALTER TABLE SET (...) DDL for StarRocks.

@@ -319,7 +319,7 @@ class CreateTableCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         tbl = Table("p_tbl", MetaData(), *columns, starrocks_partition_by=partition_by)
         self.assert_compile(
             CreateTable(tbl),
-            f"CREATE TABLE p_tbl ({column_lines})PARTITION BY {partition_by}",
+            f"CREATE TABLE p_tbl ({column_lines})PARTITION BY {partition_by.replace('%', '%%')}",
         )
 
     @testing.combinations(

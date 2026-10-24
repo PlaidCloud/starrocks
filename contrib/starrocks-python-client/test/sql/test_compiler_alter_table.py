@@ -175,7 +175,7 @@ class AlterTableDistributionCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "hash_function_with_string",
             "HASH(date_format(created_at, '%Y-%m'))",
             12,
-            "ALTER TABLE test_table DISTRIBUTED BY HASH(date_format(created_at, '%Y-%m')) BUCKETS 12",
+            "ALTER TABLE test_table DISTRIBUTED BY HASH(date_format(created_at, '%%Y-%%m')) BUCKETS 12",
         ),
         (
             "quoted_columns",
@@ -226,7 +226,7 @@ class AlterTableOrderCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         (
             "function",
             "date_format(created_at, '%Y-%m') DESC",
-            "ALTER TABLE test_table ORDER BY (date_format(created_at, '%Y-%m') DESC)",
+            "ALTER TABLE test_table ORDER BY (date_format(created_at, '%%Y-%%m') DESC)",
         ),
         (
             "function_and_column",
@@ -280,7 +280,8 @@ class AlterTablePartitionAndKeyCompileTest(fixtures.TestBase, AssertsCompiledSQL
     )
     def test_alter_table_partition(self, partition_by):
         self.assert_compile(
-            AlterTablePartition("test_table", partition_by), f"ALTER TABLE test_table PARTITION BY {partition_by}"
+            AlterTablePartition("test_table", partition_by),
+            f"ALTER TABLE test_table PARTITION BY {partition_by.replace('%', '%%')}",
         )
 
     @testing.combinations(
