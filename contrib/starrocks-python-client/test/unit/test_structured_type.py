@@ -17,6 +17,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 import enum
 import json
+import math
 import warnings
 
 from sqlalchemy import Column, Enum, MetaData, Table, TypeDecorator, insert, testing
@@ -209,6 +210,12 @@ class ArrayResultProcessorTest(fixtures.TestBase):
     def test_array_of_datetimes_applies_element_processor(self):
         result = _process(datatype.ARRAY(datatype.DATETIME()), '["2024-01-15 10:30:00"]')
         assert result == [datetime(2024, 1, 15, 10, 30, 0)]
+
+    def test_non_finite_doubles_are_read(self):
+        """StarRocks writes a non-finite DOUBLE inside a collection as a bare inf, -inf or nan."""
+        values = _process(datatype.ARRAY(datatype.DOUBLE()), "[inf,-inf,nan,1.5]")
+        assert values[:2] == [math.inf, -math.inf] and math.isnan(values[2]) and values[3] == 1.5
+        assert _process(datatype.MAP(datatype.VARCHAR(5), datatype.DOUBLE()), '{"k":inf}') == {"k": math.inf}
 
     def test_array_of_decimal_preserves_precision(self):
         result = _process(datatype.ARRAY(datatype.DECIMAL(18, 18)), '[0.123456789012345678]')

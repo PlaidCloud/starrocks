@@ -800,7 +800,15 @@ class VARIANT(sqltypes.TypeEngine):
 _ESCAPES = {'"': '"', "'": "'", "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
 _NUMBER = re.compile(r"-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
 _INTEGER = re.compile(r"-?\d+")
-_BAREWORDS = {"null": None, "true": True, "false": False}
+_BAREWORDS = {
+    "null": None,
+    "true": True,
+    "false": False,
+    "inf": float("inf"),
+    "-inf": float("-inf"),
+    "nan": float("nan"),
+}
+"""The words the server writes for values that are not quoted and not numbers; a non-finite DOUBLE is one."""
 
 
 class _ComplexValueParser:
