@@ -225,6 +225,19 @@ colspecs = {
     sqltypes.JSON.JSONPathType: JSONPathType,
 }
 
+def require_server_version(dialect: "StarRocksDialect", minimum: Tuple[int, ...], feature: str) -> None:
+    """Raise CompileError when the connected StarRocks is older than ``minimum``, the first version with ``feature``.
+
+    Compiling without a connection, as Alembic's offline mode does, knows no server version and checks nothing.
+    """
+    version = dialect.server_version_info
+    if version and tuple(version) < minimum:
+        raise exc.CompileError(
+            f"{feature} needs StarRocks {'.'.join(map(str, minimum))} or later; "
+            f"the server is {'.'.join(map(str, version))}"
+        )
+
+
 @cache
 def _dialect_leaving_percents_single() -> "StarRocksDialect":
     """A StarRocks dialect with the ``named`` paramstyle, as Alembic configures one for offline SQL scripts."""
@@ -359,6 +372,7 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
         return "PERCENTILE"
 
     def visit_VARIANT(self, type_, **kw):
+        require_server_version(self.dialect, (4, 1), "The VARIANT type")
         return "VARIANT"
 
     def visit_BLOB(self, type_, **kw):
@@ -1071,6 +1085,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         if distributed_by and utils.is_range_distribution(distributed_by):
             # Range distribution has no DISTRIBUTED BY syntax: StarRocks applies it when the clause
             # is omitted from a table that declares a key type or ORDER BY.
+            require_server_version(self.dialect, (4, 1), f"RANGE distribution (table {table.name!r})")
             parsed_distribution = StarRocksTableDefinitionParser.parse_distribution(distributed_by)
             if parsed_distribution and parsed_distribution.buckets is not None:
                 logger.warning(
@@ -1533,9 +1548,12 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         """
         return cls._SCHEDULE_REFRESH.sub(r"\1ASYNC", str(refresh), count=1)
 
-    @staticmethod
-    def _view_security_keyword(view: Table, security: str) -> str:
-        """Return the view's SECURITY keyword, refusing anything but the NONE and INVOKER that StarRocks has."""
+    def _view_security_keyword(self, view: Table, security: str) -> str:
+        """Return the view's SECURITY keyword, refusing anything but the NONE and INVOKER that StarRocks has.
+
+        StarRocks takes a view's SECURITY from 3.4.1; 3.4.0 and older reject the clause as a syntax error.
+        """
+        require_server_version(self.dialect, (3, 4, 1), f"View SECURITY (view {view.name!r})")
         keyword = str(security).upper()
         if keyword not in ViewSecurityType.ALLOWED_ITEMS - {ViewSecurityType.EMPTY}:
             raise exc.CompileError(
