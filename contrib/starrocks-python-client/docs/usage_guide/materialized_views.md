@@ -151,4 +151,4 @@ No matter whether using `--autogenerate` or manual scripting, you should use `al
   - activate/deactivate,
   - swap,
 
-For a change ALTER cannot make, such as a new definition, comment, partitioning, distribution or sort order, autogenerate drops the materialized view and creates it again, and warns that StarRocks refills the new one as it refreshes. The downgrade drops it and creates it as the database had it. A change to the refresh or the properties is an `op.alter_materialized_view(...)`.
+For a change ALTER cannot make, such as a new definition, comment, partitioning, distribution, sort order or refresh moment (IMMEDIATE or DEFERRED), autogenerate drops the materialized view and creates it again, and warns that StarRocks refills the new one as it refreshes. The new one keeps the database's refresh when the model states none, and its `session.*` and other properties that SHOW CREATE lists only once set, when the model leaves them out. The downgrade drops it and creates it as the database had it. A change to the refresh scheme (ASYNC, MANUAL or the schedule) or the properties is an `op.alter_materialized_view(...)`.

@@ -9,7 +9,7 @@ Alembic is a database migration tool for SQLAlchemy that allows you to manage ch
 First, ensure you have Alembic installed. If not, you can install it via pip:
 
 ```bash
-pip install "alembic>=1.16"
+pip install "alembic>=1.14"
 ```
 
 For more detailed installation instructions, refer to the [Alembic Installation Guide](https://alembic.sqlalchemy.org/en/latest/front.html#installation).
@@ -442,7 +442,7 @@ def downgrade():
   - New views/MVs in metadata: emits `op.create_view(...)` or `op.create_materialized_view(...)`.
   - Dropped views/MVs from metadata: emits `op.drop_view(...)` or `op.drop_materialized_view(...)`.
   - Definition changes: a view gets `op.alter_view(...)`. A materialized view, whose definition ALTER cannot change, is dropped and created again (`op.drop_materialized_view(...)` and `op.create_materialized_view(...)`), with a warning that StarRocks refills it.
-  - Refresh and property changes of a materialized view: emits `op.alter_materialized_view(...)`.
+  - Changes to a materialized view's refresh scheme (ASYNC, MANUAL or the schedule) and properties: emits `op.alter_materialized_view(...)`. A change of the refresh moment (IMMEDIATE or DEFERRED) drops the materialized view and creates it again.
 - **View comment and security:** `ALTER VIEW ... AS` drops the view's comment and StarRocks has no ALTER for it, so `op.alter_view` applies a definition, column or comment change as `CREATE OR REPLACE VIEW` with the full definition, columns and comment. A security change is applied with `ALTER VIEW ... SET SECURITY`. Autogenerate emits an `op.alter_view` that carries all of this.
 - **Definition Comparison:** View/MV definition comparison uses normalization: remove identifier backticks, strip comments, collapse whitespace, and compare case-insensitively. But, it's still recommended to give the definition with a good and unified SQL style.
 

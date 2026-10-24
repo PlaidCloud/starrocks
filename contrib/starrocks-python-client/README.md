@@ -228,7 +228,7 @@ Refer to [generating models](./docs/usage_guide/alembic.md#Generating-models-fro
 #### 1. Install and Initialize Alembic
 
 ```bash
-pip install "alembic>=1.16"
+pip install "alembic>=1.14"
 alembic init alembic
 ```
 

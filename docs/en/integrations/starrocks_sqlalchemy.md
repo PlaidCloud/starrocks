@@ -49,7 +49,7 @@ Schema changes can be applied to development, staging, and production with the s
 - StarRocks: 3.3.3 or later. View `starrocks_security` needs 3.4.1, and RANGE distribution and `VARIANT` columns need 4.1; on an older server the dialect refuses them with a `CompileError`.
 - StarRocks Python client: 1.3.2 or later
 - `SQLAlchemy`: 1.4 or later. Views, materialized views, the `starrocks+asyncmy` driver and `sqlacodegen` need SQLAlchemy 2.0. On SQLAlchemy 1.4, Alembic autogenerate compares tables and leaves the database's views and materialized views alone.
-- `Alembic`: 1.16 or later
+- `Alembic`: 1.14 or later
 
 ### Installing StarRocks Python client
 
