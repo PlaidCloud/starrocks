@@ -379,7 +379,7 @@ def _build_name_to_table(
     return result
 
 
-@comparators_dispatch_for_starrocks("schema")
+@comparators_dispatch_for_starrocks("schema", run_last=True)
 def _autogen_for_views(
     autogen_context: AutogenContext,
     upgrade_ops: UpgradeOps,
@@ -952,7 +952,7 @@ def _compare_view_columns(conn_view: View, metadata_view: View) -> bool:
 # ==============================================================================
 # Materialized View Comparison
 # ==============================================================================
-@comparators_dispatch_for_starrocks("schema")
+@comparators_dispatch_for_starrocks("schema", run_last=True)
 def _autogen_for_mvs(
     autogen_context: AutogenContext,
     upgrade_ops: UpgradeOps,

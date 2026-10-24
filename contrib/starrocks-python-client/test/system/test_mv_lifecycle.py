@@ -21,7 +21,6 @@ from starrocks.common.utils import TableAttributeNormalizer
 from starrocks.datatype import INTEGER, VARCHAR
 from starrocks.sql.schema import MaterializedView, View
 from test.system.lifecycle import (
-    VIEW_CREATED_BEFORE_ITS_TABLE,
     ScriptContentParser,
     _AlembicLifecycleBase,
     wait_for_alter_table_column_or_optimization,
@@ -33,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 
 class MaterializedViewLifecycleTest(_AlembicLifecycleBase):
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_create_mv_basic(self, alembic_env, sr_engine):
         """Tests creating a basic MV."""
         Base = declarative_base()
@@ -57,7 +55,6 @@ class MaterializedViewLifecycleTest(_AlembicLifecycleBase):
         mv_names = inspector.get_materialized_view_names()
         assert "mv1" not in mv_names
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_create_mv_comprehensive(self, alembic_env, sr_engine):
         """Tests creating a comprehensive MV with all attributes."""
         Base = declarative_base()
@@ -85,7 +82,6 @@ class MaterializedViewLifecycleTest(_AlembicLifecycleBase):
         alembic_env.harness.upgrade("head")
         # Verification of reflected attributes is covered in reflection tests
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_alter_mv_lifecycle(self, alembic_env, sr_engine):
         """Tests altering an MV's mutable attributes."""
         # 1. Initial state
@@ -111,7 +107,7 @@ class MaterializedViewLifecycleTest(_AlembicLifecycleBase):
             AlteredBase.metadata,
             definition=f"SELECT t_alter.id FROM {schema}.t_alter",
             starrocks_refresh="MANUAL",
-            starrocks_properties={"replication_num": "1", "session.insert_timeout": "1000"},
+            starrocks_properties={"replication_num": "1", "session.query_timeout": "1000"},
         )
         alembic_env.harness.generate_autogen_revision(metadata=AlteredBase.metadata, message="Alter MV")
 
@@ -120,12 +116,11 @@ class MaterializedViewLifecycleTest(_AlembicLifecycleBase):
         upgrade_content = ScriptContentParser.extract_upgrade_content(script_content)
         assert "op.alter_materialized_view('mv_to_alter'" in upgrade_content
         assert "refresh='MANUAL'" in upgrade_content
-        assert "'session.insert_timeout': '1000'" in upgrade_content
+        assert "'session.query_timeout': '1000'" in upgrade_content
 
         alembic_env.harness.upgrade("head")
         # Downgrade and verify is complex, covered by integration tests
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_mixed_schema_lifecycle(self, alembic_env, sr_engine):
         """
         Tests a complex migration with mixed operations on Tables, Views, and MVs.
@@ -205,7 +200,6 @@ class MaterializedViewLifecycleTest(_AlembicLifecycleBase):
         assert "mv1" in mv_names
         assert "mv2" not in mv_names
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_multi_schema_support(self, database, alembic_env, sr_engine):
         """Tests that autogenerate correctly handles multiple schemas with filtering.
 

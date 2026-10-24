@@ -26,18 +26,21 @@ from starrocks.sql.schema import View
 from test.system.lifecycle import (
     EMPTY_DOWNGRADE_STR,
     EMPTY_UPGRADE_STR,
-    VIEW_CREATED_BEFORE_ITS_TABLE,
     ScriptContentParser,
     _AlembicLifecycleBase,
 )
-from test.util import VIEW_TEXT_REWRITTEN_BEFORE_4_0_6, normalize_py_call, normalize_sql
+from test.util import (
+    VIEW_SECURITY_NEEDS_3_4_1,
+    VIEW_TEXT_REWRITTEN_BEFORE_4_0_6,
+    normalize_py_call,
+    normalize_sql,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
 class ViewLifecycleTest(_AlembicLifecycleBase):
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_create_view_basic(self, database, alembic_env, sr_engine):
         """Tests creating a view."""
         # 1. Define metadata with a view
@@ -80,7 +83,6 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         inspector.clear_cache()
         is_true('user_view' not in inspector.get_view_names())
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_create_view_with_columns(self, database, alembic_env, sr_engine):
         """Tests creating a view with explicit column definitions."""
         # 1. Define metadata with a view that has columns
@@ -130,7 +132,7 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         inspector.clear_cache()
         is_true('user_view' not in inspector.get_view_names())
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
+    @VIEW_SECURITY_NEEDS_3_4_1
     def test_view_idempotency(self, database, alembic_env, sr_engine):
         """Tests that no changes are detected if the view is in sync.
         Qualifiers, like '`schema`.`table`.', for column names are removed.
@@ -164,7 +166,7 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         is_true(re.search(EMPTY_UPGRADE_STR, script_content), "Upgrade script should be empty")
         is_true(re.search(EMPTY_DOWNGRADE_STR, script_content), "Downgrade script should be empty")
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
+    @VIEW_SECURITY_NEEDS_3_4_1
     def test_alter_view_comment_and_security(self, database, alembic_env, sr_engine):
         """
         Tests that altering view comment and security generates an AlterViewOp
@@ -183,7 +185,7 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
             Base.metadata,
             definition='SELECT id FROM user',
             comment='Initial comment',
-            starrocks_security='NONE'  # DEFINDER is not supported in StarRocks v3.5.
+            starrocks_security='NONE'
         )
         alembic_env.harness.generate_autogen_revision(
             metadata=Base.metadata, message="Initial view with attrs"
@@ -238,7 +240,6 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         assert 'COMMENT "Initial comment"' in view_ddl()
         assert "SECURITY NONE" in view_ddl()
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_alter_view_definition(self, database, alembic_env, sr_engine):
         """Tests altering a view's definition.
         Qualifiers, like '`schema`.`table`.', for column names are removed.
@@ -300,7 +301,6 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         definition = inspector.get_view_definition('user_view')
         assert 'name' not in definition.lower()
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_drop_view(self, database, alembic_env, sr_engine):
         """Tests dropping a view."""
         # 1. Initial state
@@ -344,7 +344,6 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         normalized_def = TableAttributeNormalizer.normalize_sql(definition, remove_qualifiers=True)
         assert "select id from user" in normalized_def
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_columns_change(self, database, alembic_env, sr_engine):
         """Tests that a column-only change generates an ALTER VIEW that redefines the view with the new columns."""
 
@@ -419,7 +418,6 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         assert "op.alter_view" in upgrade_content
         assert "email" in upgrade_content
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_create_view_with_schema(self, database, alembic_env, sr_engine):
         """Tests creating a view in a specific schema (non-default schema)."""
         # 1. Define metadata with a view in a schema
@@ -463,7 +461,6 @@ class ViewLifecycleTest(_AlembicLifecycleBase):
         inspector.clear_cache()
         is_true('user_view' not in inspector.get_view_names(schema=database))
 
-    @VIEW_CREATED_BEFORE_ITS_TABLE
     def test_multiple_views_in_one_migration(self, database, alembic_env, sr_engine):
         """Tests creating, altering, and dropping multiple views in one migration.
 
