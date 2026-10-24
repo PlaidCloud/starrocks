@@ -42,6 +42,11 @@ AUTO_INCREMENT_IS_BIGINT = testing.skip(
     "StarRocks requires an AUTO_INCREMENT column to be BIGINT, so the dialect creates the INTEGER column as BIGINT "
     "and there is no type change to detect",
 )
+AUTOINCREMENT_LEFT_OFF_UNLESS_IT_CHANGES = testing.skip(
+    "starrocks",
+    "StarRocks can't add or remove AUTO_INCREMENT and keeps it through a MODIFY COLUMN, so the dialect leaves "
+    "autoincrement off an alter unless the model declares one the database lacks; upstream expects it on the alter",
+)
 
 
 class AutogenerateFKOptionsTest(_AutogenerateFKOptionsTest):
@@ -73,6 +78,21 @@ if hasattr(alembic_suite, "AutogenerateEmptyCommentsTest"):
 class AutoincrementTest(_AutoincrementTest):
     test_alter_column_autoincrement_pk_explicit_true = AUTO_INCREMENT_IS_BIGINT(
         _AutoincrementTest.test_alter_column_autoincrement_pk_explicit_true
+    )
+    test_alter_column_autoincrement_pk_false = AUTOINCREMENT_LEFT_OFF_UNLESS_IT_CHANGES(
+        _AutoincrementTest.test_alter_column_autoincrement_pk_false
+    )
+    test_alter_column_autoincrement_pk_implicit_true = AUTOINCREMENT_LEFT_OFF_UNLESS_IT_CHANGES(
+        _AutoincrementTest.test_alter_column_autoincrement_pk_implicit_true
+    )
+    test_alter_column_autoincrement_nonpk_false = AUTOINCREMENT_LEFT_OFF_UNLESS_IT_CHANGES(
+        _AutoincrementTest.test_alter_column_autoincrement_nonpk_false
+    )
+    test_alter_column_autoincrement_nonpk_explicit_true = AUTOINCREMENT_LEFT_OFF_UNLESS_IT_CHANGES(
+        _AutoincrementTest.test_alter_column_autoincrement_nonpk_explicit_true
+    )
+    test_alter_column_autoincrement_compositepk_false = AUTOINCREMENT_LEFT_OFF_UNLESS_IT_CHANGES(
+        _AutoincrementTest.test_alter_column_autoincrement_compositepk_false
     )
 
 
