@@ -56,7 +56,8 @@ from sqlalchemy.engine.interfaces import ExecutionContext
 
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
 from sqlalchemy.engine.row import Row
-from sqlalchemy.sql import bindparam, sqltypes
+from sqlalchemy.sql import bindparam, operators, sqltypes
+from sqlalchemy.sql.elements import BinaryExpression
 from sqlalchemy.sql.expression import Delete, Insert, Select, TableClause, Update
 
 from starrocks.common import utils
@@ -113,6 +114,8 @@ from .datatype import (
     VARBINARY,
     VARCHAR,
     VARIANT,
+    JSONIndexType,
+    JSONPathType,
     StructuredType,
     quote_struct_field_name,
 )
@@ -218,6 +221,8 @@ colspecs = {
     sqltypes.DECIMAL: DECIMAL,
     sqltypes.Time: TIME,
     sqltypes.JSON: JSON,
+    sqltypes.JSON.JSONIndexType: JSONIndexType,
+    sqltypes.JSON.JSONPathType: JSONPathType,
 }
 
 def require_server_version(
@@ -390,22 +395,39 @@ class StarRocksSQLCompiler(MySQLCompiler):
             raise exc.CompileError(f"starrocks_label must be a non-empty string, not {label!r}")
         return self.preparer.quote(label)
 
+    _JSON_ACCESS_OPERATORS: Final[Tuple[Any, ...]] = (operators.json_getitem_op, operators.json_path_getitem_op)
+
     def _render_json_extract_from_binary(self, binary: Any, operator: Any, **kw: Any) -> str:
         """Render a JSON index or path access with ``json_query`` or the ``get_json_*`` function for its type.
 
         StarRocks has no ``JSON_EXTRACT``. ``json_query`` returns JSON, with a JSON null kept as JSON null, and
-        the ``get_json_*`` functions return the SQL type of the accessor (``as_integer()`` and the like), with a
-        missing key, a JSON null or a value of another type all becoming SQL NULL.
+        the ``get_json_*`` functions return the SQL type of the accessor (``as_integer()`` and the like): a
+        missing key or a JSON null is SQL NULL, and a value of another type is converted as StarRocks casts it,
+        so the JSON string ``"5"`` reads as 5 and ``1.5`` as 1.
+
+        A chained access such as ``j["arr"][1]`` is one call with its paths joined at run time: StarRocks returns
+        NULL when ``json_query`` indexes into an array an inner ``json_query`` returned.
         """
         function = self._json_access_function(binary.type)
-        document = self.process(binary.left, **kw)
-        path = self.process(binary.right, **kw)
+        document, paths = self._json_document_and_paths(binary, **kw)
+        path = paths[0] if len(paths) == 1 else "concat(%s)" % ", ".join(
+            [paths[0], *(f"substring({later}, 2)" for later in paths[1:])]
+        )
         access = f"{function}({document}, {path})"
         if function == "get_json_double" and binary.type._type_affinity is sqltypes.Numeric:
             precision, scale = binary.type.precision, binary.type.scale
             if precision is not None and scale is not None:
                 return f"CAST({access} AS DECIMAL({precision}, {scale}))"
         return access
+
+    def _json_document_and_paths(self, binary: Any, **kw: Any) -> Tuple[str, List[str]]:
+        """Return the JSON document a chain of accesses starts from, and the path of each access in order."""
+        left = binary.left
+        if isinstance(left, BinaryExpression) and left.operator in self._JSON_ACCESS_OPERATORS:
+            document, paths = self._json_document_and_paths(left, **kw)
+        else:
+            document, paths = self.process(left, **kw), []
+        return document, [*paths, self.process(binary.right, **kw)]
 
     def _json_access_function(self, access_type: sqltypes.TypeEngine) -> str:
         affinity = access_type._type_affinity

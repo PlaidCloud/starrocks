@@ -24,6 +24,7 @@ from sqlalchemy import (
     String,
     Table,
     cast,
+    exc,
     insert,
     null,
     select,
@@ -63,6 +64,12 @@ class JsonAccessCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "CAST(get_json_double(documents.data, %s) AS DECIMAL(10, 2))",
         ),
         ("path_as_integer", lambda: DATA[("a", 1)].as_integer(), "get_json_int(documents.data, %s)"),
+        ("chained", lambda: DATA["a"][1], "json_query(documents.data, concat(%s, substring(%s, 2)))"),
+        (
+            "chained_three",
+            lambda: DATA["a"]["b"]["c"].as_string(),
+            "get_json_string(documents.data, concat(%s, substring(%s, 2), substring(%s, 2)))",
+        ),
         id_="iaa",
         argnames="expression_factory, expected",
     )
@@ -189,6 +196,21 @@ class JsonAccessTest(fixtures.TablesTest):
         eq_(self._scalar(connection, data[("nested", "deep", "leaf")].as_integer()), 7)
         eq_(self._scalar(connection, data[("items", 1)].as_integer()), 20)
         eq_(self._scalar(connection, data[("nested", "deep")]), {"leaf": 7})
+
+    def test_chained_access(self, connection):
+        """Each level is joined into one path; nested json_query calls would read NULL from an array."""
+        data = self.tables.json_access.c.data
+        eq_(self._scalar(connection, data["items"][1]), 20)
+        eq_(self._scalar(connection, data["nested"]["deep"]["leaf"]), 7)
+        eq_(self._scalar(connection, data["items"][2].as_integer()), 30)
+
+    @testing.combinations(("empty", ""), ("double_quote", 'q"uote'), id_="ia", argnames="key")
+    def test_a_key_a_path_cannot_name_is_refused(self, connection, key):
+        data = self.tables.json_access.c.data
+        with testing.expect_raises_message(exc.StatementError, "cannot name the key"):
+            self._scalar(connection, data[key])
+        with testing.expect_raises_message(exc.StatementError, "cannot name the key"):
+            self._scalar(connection, data[("nested", key)])
 
     def test_index_in_where(self, connection):
         table = self.tables.json_access

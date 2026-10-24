@@ -22,6 +22,7 @@ import re
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple, Type, Union
 
 from sqlalchemy import func, literal_column, util
+import sqlalchemy.dialects.mysql.json as mysql_json
 import sqlalchemy.dialects.mysql.types as mysql_types
 from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.compiler import compiles
@@ -717,6 +718,30 @@ def _is_json_leaf(type_: sqltypes.TypeEngine, dialect: Dialect) -> bool:
 def compile_structured_bind_expression(element: StructuredBindExpression, compiler: Any, **kw: Any) -> str:
     bound_sql = compiler.process(element.bindvalue, **kw)
     return _StructuredExpressionRenderer(compiler).render(element.type, bound_sql)
+
+
+def _check_json_path_key(element: Any) -> None:
+    """Refuse a key StarRocks' JSON path cannot name: an empty one reads the whole document, and one holding a
+    double quote cannot be escaped, so either would read the wrong value."""
+    if not isinstance(element, int) and (element == "" or '"' in str(element)):
+        raise ValueError(f"StarRocks JSON paths cannot name the key {element!r}, which is empty or holds a double quote")
+
+
+class JSONIndexType(mysql_json.JSONIndexType):
+    """The path of one JSON index, ``$."key"`` or ``$[0]``, for a key StarRocks' path syntax can name."""
+
+    def _format_value(self, value: Any) -> str:
+        _check_json_path_key(value)
+        return super()._format_value(value)
+
+
+class JSONPathType(mysql_json.JSONPathType):
+    """The path of a JSON path index, ``$."a"[0]``, for keys StarRocks' path syntax can name."""
+
+    def _format_value(self, value: Any) -> str:
+        for element in value:
+            _check_json_path_key(element)
+        return super()._format_value(value)
 
 
 class JSON(sqltypes.JSON):
