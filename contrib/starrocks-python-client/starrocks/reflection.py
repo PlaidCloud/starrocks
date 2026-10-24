@@ -776,7 +776,8 @@ class StarRocksTableDefinitionParser(object):
         # logger.debug("partial parsed mv state. mv: %s, state: %s", mv_fqn, parsed_state)
 
         if column_rows:
-            parsed_state.columns = [self._parse_column(col) for col in self._sort_columns(column_rows)]
+            ordered_rows = self._order_like_mv_column_list(self._sort_columns(column_rows), ddl)
+            parsed_state.columns = [self._parse_column(col) for col in ordered_rows]
 
         # 2. Augment/overwrite with more reliable info from other sources.
         self._merge_table_options(
@@ -791,6 +792,52 @@ class StarRocksTableDefinitionParser(object):
 
         logger.debug("parsed mv state. mv: %s, state: %s", mv_fqn, parsed_state)
         return parsed_state
+
+    @classmethod
+    def _order_like_mv_column_list(cls, column_rows: List[_DecodingRow], create_mv_ddl: str) -> List[_DecodingRow]:
+        """Order an MV's information_schema columns as the column list of its CREATE statement names them.
+
+        information_schema lists an MV's columns in storage order, sort key first, while the column list in its
+        DDL follows the SELECT. A CREATE MATERIALIZED VIEW built from the reflection applies its column names to
+        the SELECT items by position, so it needs the DDL's order.
+        """
+        names = cls._mv_column_list(create_mv_ddl)
+        if not names:
+            return column_rows
+        position = {name: index for index, name in enumerate(names)}
+        return sorted(column_rows, key=lambda row: position.get(row.COLUMN_NAME, len(names)))
+
+    @staticmethod
+    def _mv_column_list(create_mv_ddl: str) -> List[str]:
+        """Return the column names in the parenthesised list after the MV's name, or [] when there is none."""
+        header = re.match(r"\s*CREATE\s+MATERIALIZED\s+VIEW\s+(?:`(?:[^`]|``)+`|[\w.]+)(?:\.`(?:[^`]|``)+`)?\s*\(",
+                          create_mv_ddl, re.IGNORECASE)
+        if header is None:
+            return []
+        names: List[str] = []
+        depth, quote, escaped, item_start = 1, None, False, header.end()
+        for position in range(header.end(), len(create_mv_ddl)):
+            char = create_mv_ddl[position]
+            if escaped:
+                escaped = False
+            elif quote:
+                escaped = char == "\\" and quote != "`"
+                quote = None if char == quote else quote
+            elif char in "`'\"":
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char in ",)" and depth == 1:
+                item = re.match(r"\s*(`(?:[^`]|``)+`|\w+)", create_mv_ddl[item_start:position])
+                if item:
+                    name = item.group(1)
+                    names.append(name[1:-1].replace("``", "`") if name.startswith("`") else name)
+                item_start = position + 1
+                if char == ")":
+                    return names
+            elif char == ")":
+                depth -= 1
+        return []
 
     def _merge_table_options(self, table_options: Dict[str, Any], new_options: Dict[str, Any]) -> None:
         """
