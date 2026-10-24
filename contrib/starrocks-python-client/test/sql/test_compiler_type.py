@@ -115,6 +115,8 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         (ARRAY(INTEGER), "ARRAY<INTEGER>"),
         (ARRAY(VARCHAR(50)), "ARRAY<VARCHAR(50)>"),
         (ARRAY(ARRAY(INTEGER)), "ARRAY<ARRAY<INTEGER>>"),
+        (sa.ARRAY(sa.Integer, dimensions=2), "ARRAY<ARRAY<INTEGER>>"),
+        (sa.ARRAY(sa.String(20), dimensions=3), "ARRAY<ARRAY<ARRAY<VARCHAR(20)>>>"),
         (MAP(STRING, INTEGER), "MAP<STRING, INTEGER>"),
         (MAP(VARCHAR(50), DOUBLE), "MAP<VARCHAR(50), DOUBLE>"),
         (MAP(STRING, MAP(INTEGER, STRING)), "MAP<STRING, MAP<INTEGER, STRING>>"),
@@ -295,6 +297,7 @@ class IntegerCastExecutionTest(fixtures.TestBase):
     def test_cast_keeps_a_wide_value(self, connection, target_type, value):
         """The generic ``Integer`` names no width, so its cast keeps 64 bits, as ``SIGNED INTEGER`` did on 4.1."""
         eq_(int(connection.scalar(sa.select(sa.cast(sa.literal(str(value)), target_type)))), value)
+
     @testing.combinations(
         ("tinyint_unsigned", mysql.TINYINT(unsigned=True), 255),
         ("smallint_unsigned", mysql.SMALLINT(unsigned=True), 65535),
@@ -309,3 +312,34 @@ class IntegerCastExecutionTest(fixtures.TestBase):
     def test_cast_to_a_mysql_integer_keeps_its_whole_range(self, connection, target_type, value):
         eq_(int(connection.scalar(sa.select(sa.cast(sa.literal(str(value)), target_type)))), value)
 
+
+class GenericArrayTest(fixtures.TablesTest):
+    """SQLAlchemy's generic ``ARRAY`` binds and reads as the dialect's ARRAY does."""
+
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @classmethod
+    def define_tables(cls, metadata):
+        sa.Table(
+            "generic_array",
+            metadata,
+            sa.Column("id", INTEGER),
+            sa.Column("numbers", sa.ARRAY(sa.Integer)),
+            sa.Column("words", sa.ARRAY(sa.String(10))),
+            sa.Column("number_grid", sa.ARRAY(sa.Integer, dimensions=2)),
+            sa.Column("word_grid", sa.ARRAY(sa.String(10), dimensions=2)),
+            starrocks_duplicate_key="id",
+        )
+
+    def test_round_trip(self, connection):
+        table = self.tables.generic_array
+        connection.execute(table.insert(), {"id": 1, "numbers": [1, 2, 3], "words": ["x", None]})
+        eq_(connection.execute(sa.select(table.c.numbers, table.c.words)).one(), ([1, 2, 3], ["x", None]))
+
+    def test_dimensions_round_trip(self, connection):
+        """``dimensions`` declares an array of arrays, which the generic ARRAY cannot nest."""
+        table = self.tables.generic_array
+        grids = {"number_grid": [[1, 2], [3], None], "word_grid": [["a", "b"], [None]]}
+        connection.execute(table.insert(), {"id": 2, **grids})
+        eq_(connection.execute(sa.select(table.c.number_grid, table.c.word_grid)).one(), tuple(grids.values()))
