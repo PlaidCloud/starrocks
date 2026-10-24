@@ -171,7 +171,7 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(sa.cast(x, target_type), expected)
 
     @testing.combinations(
-        (sa.Integer(), "CAST(t.x AS INT)"),
+        (sa.Integer(), "CAST(t.x AS BIGINT)"),
         (sa.INTEGER(), "CAST(t.x AS INT)"),
         (sa.BigInteger(), "CAST(t.x AS BIGINT)"),
         (sa.SmallInteger(), "CAST(t.x AS SMALLINT)"),
@@ -278,8 +278,14 @@ class IntegerCastExecutionTest(fixtures.TestBase):
     __backend__ = True
     __only_on__ = "starrocks"
 
-    @testing.combinations((sa.BigInteger(), 5000000000), (LARGEINT(), 2**100), argnames="target_type, value")
+    @testing.combinations(
+        (sa.Integer(), 5000000000),
+        (sa.BigInteger(), 5000000000),
+        (LARGEINT(), 2**100),
+        argnames="target_type, value",
+    )
     def test_cast_keeps_a_wide_value(self, connection, target_type, value):
+        """The generic ``Integer`` names no width, so its cast keeps 64 bits, as ``SIGNED INTEGER`` did on 4.1."""
         eq_(int(connection.scalar(sa.select(sa.cast(sa.literal(str(value)), target_type)))), value)
 
     @testing.combinations(

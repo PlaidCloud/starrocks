@@ -571,7 +571,11 @@ class StarRocksSQLCompiler(MySQLCompiler):
     )
     """Each integer type with the StarRocks type a cast to it names, signed and unsigned."""
 
-    _GENERIC_INTEGER_CAST_TARGET: Final[str] = "INT"
+    _GENERIC_INTEGER_CAST_TARGET: Final[str] = "BIGINT"
+    """The generic ``Integer`` names no width, so it is cast to the 64 bits ``SIGNED INTEGER`` has on 4.1.
+
+    A value that fits 64 bits, such as an id or an epoch in milliseconds, is therefore not turned into NULL.
+    """
 
     def _integer_cast_target(self, type_: sqltypes.Integer) -> str:
         """Name the StarRocks integer type of the same width, without a display width, UNSIGNED or ZEROFILL.
