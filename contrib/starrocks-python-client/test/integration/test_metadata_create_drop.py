@@ -52,3 +52,23 @@ class MetaDataCreateDropTest(fixtures.TestBase):
 
         metadata.drop_all(connection)
         assert not {"cd_base", "cd_view", "cd_mv"} & self._names(connection)
+
+    @testing.requires.sqlalchemy_2
+    def test_views_are_created_after_the_tables_they_read(self, connection):
+        """The view and MV are defined before their base table, and ``create_all()`` keeps definition order."""
+        metadata = MetaData()
+        View("aa_view", metadata, definition="SELECT id FROM zz_base")
+        MaterializedView("ab_mv", metadata, definition="SELECT id FROM zz_base", starrocks_refresh="MANUAL")
+        Table(
+            "zz_base",
+            metadata,
+            Column("id", INTEGER),
+            starrocks_duplicate_key="id",
+            starrocks_distributed_by="HASH(id) BUCKETS 1",
+        )
+
+        metadata.create_all(connection)
+        assert {"zz_base", "aa_view", "ab_mv"} <= self._names(connection)
+
+        metadata.drop_all(connection)
+        assert not {"zz_base", "aa_view", "ab_mv"} & self._names(connection)

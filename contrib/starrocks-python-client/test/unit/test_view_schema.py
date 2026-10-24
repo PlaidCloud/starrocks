@@ -14,12 +14,12 @@
 
 """Unit tests for View schema definition and column handling."""
 
-from sqlalchemy import Column, MetaData, testing
+from sqlalchemy import Column, Integer, MetaData, Table, select, testing
 from sqlalchemy.testing import expect_raises_message, fixtures
 
 from starrocks.alembic.ops import AlterViewOp, CreateViewOp, DropViewOp
 from starrocks.datatype import STRING
-from starrocks.sql.schema import View
+from starrocks.sql.schema import MaterializedView, View
 
 
 class ViewColumnDefinitionsTest(fixtures.TestBase):
@@ -431,3 +431,55 @@ class AlterViewOpsWithColumnsTest(fixtures.TestBase):
         reverse_op = op.reverse()
         assert reverse_op.columns[1]['comment'] == 'Original comment'
 
+
+class ViewCreationOrderTest(fixtures.TestBase):
+    """``MetaData.sorted_tables`` puts a view after the tables it reads, whatever their names."""
+
+    __requires__ = ("sqlalchemy_2",)
+
+    @staticmethod
+    def _base(metadata):
+        return Table("z_orders", metadata, Column("id", Integer))
+
+    @staticmethod
+    def _order(metadata):
+        return [table.name for table in metadata.sorted_tables]
+
+    @testing.combinations(
+        ("bare", "SELECT id FROM z_orders"),
+        ("backticked_and_qualified", "SELECT id FROM `shop`.`z_orders`"),
+        ("upper_case", "SELECT ID FROM Z_ORDERS"),
+        argnames="definition",
+        id_="ia",
+    )
+    def test_string_definition(self, definition):
+        metadata = MetaData()
+        self._base(metadata)
+        View("a_order_view", metadata, definition=definition)
+        assert self._order(metadata) == ["z_orders", "a_order_view"]
+
+    def test_selectable_definition(self):
+        metadata = MetaData()
+        orders = self._base(metadata)
+        View("a_order_view", metadata, definition=select(orders.c.id))
+        assert self._order(metadata) == ["z_orders", "a_order_view"]
+
+    def test_name_inside_a_string_literal_is_not_a_dependency(self):
+        metadata = MetaData()
+        self._base(metadata)
+        View("a_label_view", metadata, definition="SELECT 'z_orders' AS label")
+        assert self._order(metadata) == ["a_label_view", "z_orders"]
+
+    def test_explicit_dependency(self):
+        metadata = MetaData()
+        orders = self._base(metadata)
+        view = View("a_constant_view", metadata, definition="SELECT 1 AS one")
+        view.add_is_dependent_on(orders)
+        assert self._order(metadata) == ["z_orders", "a_constant_view"]
+
+    def test_materialized_view_on_a_view(self):
+        metadata = MetaData()
+        self._base(metadata)
+        View("b_order_view", metadata, definition="SELECT id FROM z_orders")
+        MaterializedView("a_order_mv", metadata, definition="SELECT id FROM b_order_view", starrocks_refresh="MANUAL")
+        assert self._order(metadata) == ["z_orders", "b_order_view", "a_order_mv"]

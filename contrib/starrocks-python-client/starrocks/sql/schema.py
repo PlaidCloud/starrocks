@@ -13,12 +13,14 @@
 # limitations under the License.
 
 import logging
-from typing import Any, Dict, List, Optional, Union
+import re
+from typing import Any, Dict, List, Optional, Set, Union
 
 from sqlalchemy import Column, Table, event
 from sqlalchemy.schema import MetaData
 from sqlalchemy.sql.selectable import Selectable
 from sqlalchemy.sql.expression import ClauseElement
+from sqlalchemy.sql.util import find_tables
 
 from starrocks.common.params import DialectName, TableInfoKey, TableInfoKeyWithPrefix, TableKind, TableObjectInfoKey
 from starrocks.datatype import STRING
@@ -71,8 +73,14 @@ def extract_view_columns(table: Table) -> Union[List[Dict[str, Any]], None]:
     ]
 
 
+_SQL_STRING_LITERAL = re.compile(r"'(?:[^'\\]|\\.|'')*'")
+_SQL_IDENTIFIER = re.compile(r"`([^`]+)`|([A-Za-z_][A-Za-z0-9_$]*)")
+
+
 class View(Table):
     """Represents a View object."""
+
+    _explicit_dependencies: Set[Table]
 
     def __init__(
         self,
@@ -292,6 +300,38 @@ class View(Table):
                 # )
                 # It must not raise error in View constructor, because it will cause RecursionError.
         return result
+
+    @property
+    def _extra_dependencies(self) -> Set[Table]:
+        """The tables to create before this view: those added with ``add_is_dependent_on()`` and those it reads.
+
+        ``MetaData.create_all()`` orders unrelated tables by name, so without these a view whose name sorts before
+        its base table would be created first, and fail. A Selectable definition names the tables it reads; for a
+        string definition, every other table in the MetaData whose name appears in it as an identifier counts.
+        """
+        return self._explicit_dependencies | self._tables_read_by_definition()
+
+    @_extra_dependencies.setter
+    def _extra_dependencies(self, tables: Set[Table]) -> None:
+        self._explicit_dependencies = tables
+
+    def add_is_dependent_on(self, table: Table) -> None:
+        """Create this view after ``table``, as ``Table.add_is_dependent_on`` does."""
+        self._explicit_dependencies.add(table)
+
+    def _tables_read_by_definition(self) -> Set[Table]:
+        """Return the other tables of this view's MetaData that its definition reads."""
+        if self.selectable is not None:
+            return {table for table in find_tables(self.selectable) if isinstance(table, Table) and table is not self}
+        if not isinstance(self.definition, str):
+            return set()
+        without_literals = _SQL_STRING_LITERAL.sub("''", self.definition)
+        identifiers = {(quoted or bare).lower() for quoted, bare in _SQL_IDENTIFIER.findall(without_literals)}
+        return {
+            table
+            for table in self.metadata.tables.values()
+            if table is not self and table.name.lower() in identifiers
+        }
 
     @property
     def definition(self) -> str:
