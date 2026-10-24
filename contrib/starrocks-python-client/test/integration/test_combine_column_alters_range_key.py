@@ -27,10 +27,11 @@ batch (``SchemaChangeHandler``):
 ``ALTER TABLE``, so such a revision becomes unexecutable even though the same
 changes work as separate statements.
 
-These tests require a shared-data cluster whose default distribution is RANGE;
-they skip on a shared-nothing cluster (where ``needsRangeRewriteSchemaChange``
-returns false immediately and the restriction cannot trigger). The tables live in
-the plugin's alternate test schema, which each parallel worker has its own of.
+These tests require a shared-data cluster whose default distribution is RANGE, and skip elsewhere. A
+shared-nothing cluster gets RANGE tables only with ``SET enable_range_distribution = true``, and there
+StarRocks 4.1 refuses a DROP of a sort-key column outright, on its own as in a batch ("DROP COLUMN on a
+sort-key column is not supported on tables with range distribution"), so batching makes no difference.
+The tables live in the plugin's alternate test schema, which each parallel worker has its own of.
 """
 
 import logging
@@ -50,8 +51,8 @@ logger = logging.getLogger(__name__)
 
 COALESCES_RANGE_SORT_KEY_CHANGES = testing.fails_on(
     "starrocks",
-    "combine_column_alters coalesces unconditionally; range sort-key changes must stay standalone, because the "
-    "FE rejects them in a multi-clause ALTER",
+    "combine_column_alters coalesces unconditionally; on a shared-data RANGE table, range sort-key changes must "
+    "stay standalone, because the FE rejects them in a multi-clause ALTER",
 )
 
 
@@ -88,8 +89,8 @@ class CombineColumnAltersOnRangeTableTest(fixtures.TestBase):
         with config.db.begin() as connection:
             if not _range_distribution_available(connection):
                 config.skip_test(
-                    "cluster has no RANGE-distributed tables (shared-nothing run_mode); "
-                    "the FE's single-clause routing restriction cannot trigger here"
+                    "the cluster's default distribution is not RANGE; the FE routes range sort-key changes to "
+                    "single-clause rewrite jobs only on shared-data RANGE tables"
                 )
 
     @testing.fixture
