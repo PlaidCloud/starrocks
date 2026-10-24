@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""UPDATE, DELETE and INSERT compilation."""
+"""UPDATE, DELETE and INSERT compilation and execution."""
 
-from sqlalchemy import Column, Integer, MetaData, Table, delete, exc, testing, update
-from sqlalchemy.testing import expect_raises_message, fixtures
+import uuid
+
+from sqlalchemy import Column, Integer, MetaData, Table, delete, exc, insert, literal, select, testing, text, update
+from sqlalchemy.testing import eq_, expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
 from starrocks.dialect import StarRocksDialect
@@ -72,3 +74,86 @@ class UnsupportedLimitTest(fixtures.TestBase):
             f"Argument 'starrocks_limit' is not accepted by dialect 'starrocks' on behalf of .*{statement_class}",
         ):
             statement_factory().with_dialect_options(starrocks_limit=3)
+
+
+class InsertOverwriteAndLabelCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    __dialect__ = StarRocksDialect()
+
+    @testing.combinations(
+        ({}, "INSERT INTO a (id, v) VALUES (%s, %s)"),
+        ({"starrocks_overwrite": True}, "INSERT OVERWRITE a (id, v) VALUES (%s, %s)"),
+        ({"starrocks_overwrite": False}, "INSERT INTO a (id, v) VALUES (%s, %s)"),
+        ({"starrocks_label": "l1"}, "INSERT INTO a WITH LABEL l1 (id, v) VALUES (%s, %s)"),
+        (
+            {"starrocks_overwrite": True, "starrocks_label": "l1"},
+            "INSERT OVERWRITE a WITH LABEL l1 (id, v) VALUES (%s, %s)",
+        ),
+        ({"starrocks_label": "my-label"}, "INSERT INTO a WITH LABEL `my-label` (id, v) VALUES (%s, %s)"),
+        argnames="dialect_options, expected",
+    )
+    def test_insert_values(self, dialect_options, expected):
+        self.assert_compile(insert(A).values(id=1, v=2).with_dialect_options(**dialect_options), expected)
+
+    def test_insert_from_select(self):
+        self.assert_compile(
+            insert(A)
+            .from_select(["id", "v"], select(B.c.id, B.c.w))
+            .with_dialect_options(starrocks_overwrite=True, starrocks_label="l1"),
+            "INSERT OVERWRITE a WITH LABEL l1 (id, v) SELECT b.id, b.w FROM b",
+        )
+
+    def test_insert_into_schema_table(self):
+        schema_table = Table("t", MetaData(), Column("id", Integer), schema="db1")
+        self.assert_compile(
+            insert(schema_table).values(id=1).with_dialect_options(starrocks_overwrite=True, starrocks_label="l1"),
+            "INSERT OVERWRITE db1.t WITH LABEL l1 (id) VALUES (%s)",
+        )
+
+    @testing.combinations(("",), (7,), (None,), argnames="label")
+    def test_invalid_label_is_rejected(self, label):
+        statement = insert(A).values(id=1)
+        statement = statement.with_dialect_options(starrocks_label=label)
+        if label is None:
+            self.assert_compile(statement, "INSERT INTO a (id) VALUES (%s)")
+            return
+        with expect_raises_message(exc.CompileError, "starrocks_label must be a non-empty string"):
+            statement.compile(dialect=self.__dialect__)
+
+
+class InsertOverwriteAndLabelTest(fixtures.TablesTest):
+    __backend__ = True
+    __only_on__ = "starrocks"
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table("overwrite_target", metadata, Column("id", Integer, primary_key=True, autoincrement=False))
+
+    def test_overwrite_replaces_existing_rows(self, connection):
+        target = self.tables.overwrite_target
+        connection.execute(insert(target).values(id=1))
+        connection.execute(insert(target).values(id=2).with_dialect_options(starrocks_overwrite=True))
+        eq_(connection.execute(select(target.c.id)).all(), [(2,)])
+
+    def test_overwrite_from_select(self, connection):
+        target = self.tables.overwrite_target
+        connection.execute(insert(target).values(id=1))
+        connection.execute(
+            insert(target).from_select(["id"], select(literal(5))).with_dialect_options(starrocks_overwrite=True)
+        )
+        eq_(connection.execute(select(target.c.id)).all(), [(5,)])
+
+    def test_label_names_the_load_job(self, connection):
+        target = self.tables.overwrite_target
+        label = f"sqla_label_{uuid.uuid4().hex}"
+        connection.execute(insert(target).values(id=3).with_dialect_options(starrocks_label=label))
+        loads = connection.execute(
+            text("SELECT label FROM information_schema.loads WHERE label = :label"), {"label": label}
+        ).all()
+        eq_(loads, [(label,)])
+
+    def test_reused_label_is_rejected_by_server(self, connection):
+        target = self.tables.overwrite_target
+        label = f"sqla_label_{uuid.uuid4().hex}"
+        connection.execute(insert(target).values(id=3).with_dialect_options(starrocks_label=label))
+        with expect_raises_message(exc.DBAPIError, "has already been used"):
+            connection.execute(insert(target).values(id=4).with_dialect_options(starrocks_label=label))

@@ -49,7 +49,7 @@ from sqlalchemy.engine import reflection
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
 from sqlalchemy.engine.row import Row
 from sqlalchemy.sql import sqltypes, bindparam
-from sqlalchemy.sql.expression import Delete, Select, Update, TableClause
+from sqlalchemy.sql.expression import Delete, Insert, Select, Update, TableClause
 
 from starrocks.common import utils
 from starrocks.common.defaults import ReflectionMVDefaults, ReflectionTableDefaults, ReflectionViewDefaults
@@ -322,6 +322,31 @@ class StarRocksSQLCompiler(MySQLCompiler):
         if not delete_stmt._where_criteria:
             return "TRUNCATE TABLE " + table
         return result
+
+    def visit_insert(self, insert_stmt: Insert, **kw: Any) -> str:
+        """Render ``INSERT OVERWRITE`` and ``WITH LABEL`` when the ``starrocks_overwrite`` and ``starrocks_label`` options ask.
+
+        StarRocks takes the label straight after the table, ``INSERT INTO t WITH LABEL l (a, b) VALUES ...``, and
+        replaces ``INTO`` with ``OVERWRITE``. The base compiler renders the whole statement, so the head is rewritten
+        around the table name it just emitted.
+        """
+        text: str = super().visit_insert(insert_stmt, **kw)
+        overwrite = bool(insert_stmt.dialect_options[self.dialect.name]["overwrite"])
+        label = insert_stmt.dialect_options[self.dialect.name]["label"]
+        if not overwrite and label is None:
+            return text
+        into_table = "INTO " + self.preparer.format_table(insert_stmt.table)
+        head, found, tail = text.partition(into_table)
+        if not found:
+            raise exc.CompileError(f"Cannot apply starrocks_overwrite or starrocks_label to: {text}")
+        keyword = "OVERWRITE" if overwrite else "INTO"
+        label_clause = "" if label is None else " WITH LABEL " + self._quoted_insert_label(label)
+        return f"{head}{keyword} {into_table[len('INTO '):]}{label_clause}{tail}"
+
+    def _quoted_insert_label(self, label: Any) -> str:
+        if not isinstance(label, str) or not label:
+            raise exc.CompileError(f"starrocks_label must be a non-empty string, not {label!r}")
+        return self.preparer.quote(label)
 
     def update_tables_clause(
         self,
@@ -1522,6 +1547,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
     construct_arguments = [
         (Table, {variant: None for k in TableInfoKey.ALL for variant in (k.lower(), k.upper())}),
         (Column, {variant: None for k in ColumnAggInfoKey.ALL for variant in (k.lower(), k.upper())}),
+        (Insert, {"overwrite": False, "label": None}),
         (sa_schema.PrimaryKeyConstraint, {"using": None}),
         (
             sa_schema.Index,
