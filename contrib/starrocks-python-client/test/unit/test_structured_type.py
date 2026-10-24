@@ -15,10 +15,11 @@
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import enum
 import json
 import warnings
 
-from sqlalchemy import Column, MetaData, Table, insert, testing
+from sqlalchemy import Column, Enum, MetaData, Table, TypeDecorator, insert, testing
 from sqlalchemy.testing import AssertsCompiledSQL, fixtures
 
 from starrocks import datatype
@@ -422,6 +423,60 @@ class StructuredTypeBindProcessorTest(fixtures.TestBase):
     def test_value_of_the_wrong_shape_is_rejected(self, type_obj, value):
         with testing.expect_raises_message(ValueError, "expected"):
             _bind(type_obj, value)
+
+
+class _Reversed(TypeDecorator):
+    impl = datatype.VARCHAR(10)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return value[::-1]
+
+
+class _Cents(TypeDecorator):
+    impl = datatype.INTEGER()
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return round(value * 100)
+
+
+class _Color(enum.Enum):
+    RED = 1
+    GREEN = 2
+
+
+class _Float(float):
+    """A float subclass whose repr is not a float literal, as numpy's float64 is under numpy 2."""
+
+    def __repr__(self):
+        return f"_Float({float(self)!r})"
+
+
+class StructuredLeafBindProcessingTest(fixtures.TestBase):
+    """An element goes through its type's own bind processing, as a plain column value does."""
+
+    @testing.combinations(
+        ("whole_float", datatype.ARRAY(datatype.INTEGER()), [2.0], ["2"]),
+        ("whole_decimal", datatype.ARRAY(datatype.BIGINT()), [Decimal("2.0"), Decimal("2E+1")], ["2", "20"]),
+        ("float_subclass", datatype.ARRAY(datatype.DOUBLE()), [_Float(0.5)], ["0.5"]),
+        ("type_decorator", datatype.ARRAY(_Reversed()), ["abc"], ["cba"]),
+        ("type_decorator_number", datatype.STRUCT(m=_Cents()), {"m": 5.5}, ["550"]),
+        ("enum", datatype.ARRAY(Enum(_Color)), [_Color.GREEN], ["GREEN"]),
+        id_="iaaa",
+        argnames="type_obj,value,encoded",
+    )
+    def test_encoded(self, type_obj, value, encoded):
+        assert json.loads(_bind(type_obj, value)) == encoded
+
+    def test_a_fraction_in_an_integer_element_is_refused(self):
+        with testing.expect_raises_message(ValueError, "cannot store 1.7 in an integer element exactly"):
+            _bind(datatype.ARRAY(datatype.INTEGER()), [1.7])
+
+    @testing.combinations(("false",), ("0",), (2,), argnames="value")
+    def test_a_boolean_element_is_as_strict_as_a_boolean_column(self, value):
+        with testing.expect_raises((TypeError, ValueError)):
+            _bind(datatype.ARRAY(datatype.BOOLEAN()), [value])
 
 
 class StructuredTypeBindExpressionTest(fixtures.TestBase, AssertsCompiledSQL):

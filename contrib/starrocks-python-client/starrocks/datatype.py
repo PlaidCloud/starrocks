@@ -285,10 +285,12 @@ class StructuredType(UserDefinedType):
         but JSON elements, so the server-side expression built by ``bind_expression``
         casts it back losslessly; see ``StructuredBindExpression``.
         """
+        encode = structured_value_encoder(self, dialect)
+
         def process(value: Optional[Any]) -> Optional[str]:
             if value is None:
                 return None
-            return json.dumps(encode_structured_value(self, value, dialect))
+            return json.dumps(encode(value))
 
         return process
 
@@ -458,9 +460,17 @@ class STRUCT(StructuredType):
         return types
 
 
+def _structured_leaf_impl(type_: sqltypes.TypeEngine, dialect: Dialect) -> sqltypes.TypeEngine:
+    """Return the type an element's values are stored as: its dialect type, or a TypeDecorator's underlying one."""
+    impl = type_.dialect_impl(dialect)
+    while isinstance(impl, sqltypes.TypeDecorator):
+        impl = impl.impl.dialect_impl(dialect)
+    return impl
+
+
 def _structured_leaf_kind(type_: sqltypes.TypeEngine, dialect: Dialect) -> str:
     """Classify a non-structured element type by how its values travel inside the bound JSON document."""
-    impl = type_.dialect_impl(dialect)
+    impl = _structured_leaf_impl(type_, dialect)
     if isinstance(impl, sqltypes.JSON):
         return "json"
     if isinstance(impl, sqltypes.Boolean):
@@ -478,17 +488,22 @@ def _structured_leaf_kind(type_: sqltypes.TypeEngine, dialect: Dialect) -> str:
     return "other"
 
 
-def _encode_number(value: Any) -> str:
+def _encode_number(value: Any, integral: bool) -> str:
+    """Write a number as the exact text the element's CAST reads.
+
+    The CAST yields NULL for text it cannot read, so an integer element gets a whole float or Decimal as an
+    integer and refuses a fraction, and a float subclass such as numpy's is written as a plain float.
+    """
     if isinstance(value, bool):
         return str(int(value))
-    if isinstance(value, Decimal):
-        if not value.is_finite():
+    if isinstance(value, (Decimal, float)):
+        if not (value.is_finite() if isinstance(value, Decimal) else math.isfinite(value)):
             raise ValueError("cannot store %r in a numeric element" % (value,))
-        return format(value, "f")
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("cannot store %r in a numeric element" % (value,))
-        return repr(value)
+        if integral:
+            if value != int(value):
+                raise ValueError("cannot store %r in an integer element exactly" % (value,))
+            return str(int(value))
+        return format(value, "f") if isinstance(value, Decimal) else repr(float(value))
     return str(value)
 
 
@@ -503,13 +518,13 @@ def _encode_datetime(value: Any) -> str:
     return value.isoformat() if isinstance(value, date) else str(value)
 
 
-def _encode_structured_leaf(kind: str, value: Any) -> Any:
+def _encode_structured_leaf(kind: str, value: Any, integral: bool = False) -> Any:
     if kind == "json":
         return value
     if kind == "boolean":
         return "true" if value else "false"
     if kind == "number":
-        return _encode_number(value)
+        return _encode_number(value, integral)
     if kind in ("datetime", "date"):
         return _encode_datetime(value)
     if kind == "binary":
@@ -537,33 +552,68 @@ def _struct_values_in_field_order(type_: "STRUCT", value: Any) -> List[Any]:
 
 
 def encode_structured_value(type_: sqltypes.TypeEngine, value: Any, dialect: Dialect) -> Any:
-    """Encode a Python value as the JSON-ready form the bind expression of ``type_`` decodes.
+    """Encode a Python value as the JSON-ready form the bind expression of ``type_`` decodes."""
+    return structured_value_encoder(type_, dialect)(value)
+
+
+def structured_value_encoder(type_: sqltypes.TypeEngine, dialect: Dialect) -> Callable[[Any], Any]:
+    """Build the function that encodes a Python value of ``type_`` as the JSON-ready form its bind expression decodes.
 
     An ARRAY is a list of its encoded items, a MAP is ``[keys, values]``, and a STRUCT is the list of its
-    fields in declared order, so no name or key is ever looked up in the document. A leaf is a string
-    (a number as exact text) unless it is JSON, which is nested as is. ``None`` stays JSON null.
+    fields in declared order, so no name or key is ever looked up in the document. A leaf goes through its
+    type's own bind processing, as a plain column's value does, and is then a string (a number as exact text)
+    unless it is JSON, which is nested as is. ``None`` stays JSON null.
     """
     type_ = StructuredType._check_subtype(type_)
-    if value is None:
-        return None
     if isinstance(type_, ARRAY):
-        if not isinstance(value, (list, tuple)):
-            raise ValueError("expected an ARRAY value as a list, got %r" % (value,))
-        return [encode_structured_value(type_.item_type, item, dialect) for item in value]
+        encode_item = structured_value_encoder(type_.item_type, dialect)
+
+        def encode_array(value: Any) -> Any:
+            if value is None:
+                return None
+            if not isinstance(value, (list, tuple)):
+                raise ValueError("expected an ARRAY value as a list, got %r" % (value,))
+            return [encode_item(item) for item in value]
+
+        return encode_array
     if isinstance(type_, MAP):
-        if not isinstance(value, Mapping):
-            raise ValueError("expected a MAP value as a dict, got %r" % (value,))
-        return [
-            [encode_structured_value(type_.key_type, key, dialect) for key in value],
-            [encode_structured_value(type_.value_type, item, dialect) for item in value.values()],
-        ]
+        encode_key = structured_value_encoder(type_.key_type, dialect)
+        encode_value = structured_value_encoder(type_.value_type, dialect)
+
+        def encode_map(value: Any) -> Any:
+            if value is None:
+                return None
+            if not isinstance(value, Mapping):
+                raise ValueError("expected a MAP value as a dict, got %r" % (value,))
+            return [[encode_key(key) for key in value], [encode_value(item) for item in value.values()]]
+
+        return encode_map
     if isinstance(type_, STRUCT):
-        values = _struct_values_in_field_order(type_, value)
-        return [
-            encode_structured_value(field_type, item, dialect)
-            for (_, field_type), item in zip(type_.field_tuples, values)
-        ]
-    return _encode_structured_leaf(_structured_leaf_kind(type_, dialect), value)
+        encode_fields = [structured_value_encoder(field_type, dialect) for _, field_type in type_.field_tuples]
+
+        def encode_struct(value: Any) -> Any:
+            if value is None:
+                return None
+            values = _struct_values_in_field_order(type_, value)
+            return [encode(item) for encode, item in zip(encode_fields, values)]
+
+        return encode_struct
+    return _structured_leaf_encoder(type_, dialect)
+
+
+def _structured_leaf_encoder(type_: sqltypes.TypeEngine, dialect: Dialect) -> Callable[[Any], Any]:
+    kind = _structured_leaf_kind(type_, dialect)
+    if kind == "json":
+        return lambda value: value
+    process = type_.dialect_impl(dialect).bind_processor(dialect)
+    integral = kind == "number" and isinstance(_structured_leaf_impl(type_, dialect), sqltypes.Integer)
+
+    def encode_leaf(value: Any) -> Any:
+        if value is not None and process is not None:
+            value = process(value)
+        return None if value is None else _encode_structured_leaf(kind, value, integral)
+
+    return encode_leaf
 
 
 class StructuredBindExpression(ColumnElement):
