@@ -1126,7 +1126,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             text += self._get_view_column_clauses(table)
 
         if table.comment:
-            text += f"\nCOMMENT '{table.comment}'"
+            text += "\nCOMMENT " + self.sql_compiler.render_literal_value(table.comment, sqltypes.String())
         if security:
             text += f"\nSECURITY {security}"
         text += f"\nAS\n{definition}"

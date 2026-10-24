@@ -162,6 +162,23 @@ class DropViewCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(DropView(view, if_exists=True), "DROP VIEW IF EXISTS my_view")
 
 
+class ViewCommentCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    """A view comment is rendered as an escaped string literal, as table and column comments are."""
+
+    __dialect__ = StarRocksDialect()
+    __requires__ = ("sqlalchemy_2",)
+
+    @testing.combinations(
+        ("single_quote", "it's a view", "COMMENT 'it''s a view'"),
+        ("backslash", r"C:\temp", r"COMMENT 'C:\\temp'"),
+        argnames="comment, rendered",
+        id_="iaa",
+    )
+    def test_view_comment_escaping(self, comment, rendered):
+        view = View("my_view", MetaData(), definition="SELECT 1 AS one", comment=comment)
+        self.assert_compile(CreateView(view), "CREATE VIEW my_view" f"{rendered}" "AS" "SELECT 1 AS one")
+
+
 class ViewInMetaDataCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     """``MetaData.create_all()`` and ``drop_all()`` emit ``CreateTable`` and ``DropTable`` for a View."""
 
