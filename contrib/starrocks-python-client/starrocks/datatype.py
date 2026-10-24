@@ -20,7 +20,6 @@ import json
 import re
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
-from sqlalchemy import cast, func
 from sqlalchemy import cast, func, literal_column, util
 import sqlalchemy.dialects.mysql.json as mysql_json
 import sqlalchemy.dialects.mysql.types as mysql_types
@@ -70,7 +69,18 @@ class DECIMAL(mysql_types.DECIMAL):
 
 
 class DOUBLE(mysql_types.DOUBLE):
+    """DOUBLE returning ``float``; MySQL's default ``asdecimal=True`` would round every value to ten places."""
+
     __visit_name__ = "DOUBLE"
+
+    def __init__(
+        self,
+        precision: Optional[int] = None,
+        scale: Optional[int] = None,
+        asdecimal: bool = False,
+        **kw: Any,
+    ) -> None:
+        super().__init__(precision=precision, scale=scale, asdecimal=asdecimal, **kw)
 
 
 class FLOAT(mysql_types.FLOAT):
@@ -112,6 +122,15 @@ class DATETIME(mysql_types.DATETIME):
                     "datetime in the intended zone" % (value,)
                 )
             return value
+
+        return process
+
+    def literal_processor(self, dialect: Dialect) -> Callable[[datetime], str]:
+        """Render ``'YYYY-MM-DD HH:MM:SS[.ffffff]'``; SQLAlchemy 1.4 has no DATETIME literal renderer of its own."""
+        reject_aware = self.bind_processor(dialect)
+
+        def process(value: datetime) -> str:
+            return "'%s'" % reject_aware(value).isoformat(sep=" ")
 
         return process
 
@@ -288,6 +307,7 @@ class ARRAY(StructuredType):
     """
 
     __visit_name__ = "ARRAY"
+    cache_ok = True
 
     def __init__(self, item_type: sqltypes.TypeEngine, **kwargs):
         self.item_type = self._check_subtype(item_type)
@@ -323,6 +343,7 @@ class MAP(StructuredType):
     """
 
     __visit_name__ = "MAP"
+    cache_ok = True
 
     def __init__(self, key_type: sqltypes.TypeEngine, value_type: sqltypes.TypeEngine, **kwargs: Any):
         self.key_type = self._check_subtype(key_type)
@@ -361,6 +382,13 @@ class MAP(StructuredType):
 _PLAIN_FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+def quote_struct_field_name(name: str) -> str:
+    """Backquote a STRUCT field name unless it is a plain identifier."""
+    if _PLAIN_FIELD_NAME.fullmatch(name):
+        return name
+    return "`" + name.replace("`", "``") + "`"
+
+
 class STRUCT(StructuredType):
     """
     Usage:
@@ -373,6 +401,7 @@ class STRUCT(StructuredType):
 """
 
     __visit_name__ = "STRUCT"
+    cache_ok = True
 
     def __init__(self, *fields: Tuple[STRING, sqltypes.TypeEngine], **kwfields: sqltypes.TypeEngine):
         self.field_tuples = tuple(
@@ -383,6 +412,14 @@ class STRUCT(StructuredType):
             name.lower(): type_ for (name, type_) in self.field_tuples
         }
         super().__init__()
+
+    @util.memoized_property
+    def _static_cache_key(self) -> Tuple[Any, ...]:
+        """Key on the field names and types; the fields are positional, so the default key would ignore them."""
+        return (
+            self.__class__,
+            tuple((name, type_._static_cache_key) for name, type_ in self.field_tuples),
+        )
 
     @property
     def python_type(self) -> Optional[Type[Any]]:
@@ -405,9 +442,7 @@ class STRUCT(StructuredType):
         fields_sql = []
         for name, type_ in self.field_tuples:
             type_sql = self.get_sub_type_col_spec(type_, **kw)
-            if not _PLAIN_FIELD_NAME.fullmatch(name):
-                name = "`" + name.replace("`", "``") + "`"
-            fields_sql.append(f"{name} {type_sql}")
+            fields_sql.append(f"{quote_struct_field_name(name)} {type_sql}")
         return f"STRUCT<{', '.join(fields_sql)}>"
 
     def get_sub_item_types(self) -> Set[sqltypes.TypeEngine]:

@@ -124,6 +124,7 @@ class JsonAccessTest(fixtures.TablesTest):
         "text": "x y",
         "unicode": "réve",
         "number": 5,
+        "wide": 5000000000,
         "fraction": 1.5,
         "flag": True,
         "nothing": None,
@@ -168,6 +169,10 @@ class JsonAccessTest(fixtures.TablesTest):
         value = self._scalar(connection, getattr(data[key], accessor)())
         eq_(value, expected)
         eq_(type(value), type(expected))
+
+    def test_integer_cast_keeps_a_wide_value(self, connection):
+        data = self.tables.json_access.c.data
+        eq_(self._scalar(connection, cast(data["wide"], Integer)), 5000000000)
 
     def test_numeric_accessor(self, connection):
         data = self.tables.json_access.c.data

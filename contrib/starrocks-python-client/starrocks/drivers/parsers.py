@@ -71,10 +71,6 @@ class DataTypeTransformer(Transformer):
         # not a constructor argument.
         if type_name_lower == "largeint":
             args = None
-        # mysql.DOUBLE defaults to asdecimal=True, which rounds every value to
-        # ten decimal places; a reflected DOUBLE should return the stored float.
-        if type_name_lower == "double" and not args:
-            return self.type_map["double"](asdecimal=False)
 
         type_class = self.type_map.get(type_name_lower)
         # logger.debug(f"type_class: {type_class}")

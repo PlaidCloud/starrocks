@@ -43,7 +43,11 @@ class DataTypeParserTest(fixtures.TestBase):
         ("bigint", datatype.BIGINT),
         ("largeint", datatype.LARGEINT),
         ("decimal(10, 2)", datatype.DECIMAL(10, 2)),
-        ("double", datatype.DOUBLE(asdecimal=False)),
+        ("decimal256(76, 10)", datatype.DECIMAL(76, 10)),
+        ("decimalv2(27, 9)", datatype.DECIMAL(27, 9)),
+        ("numeric(10, 2)", datatype.DECIMAL(10, 2)),
+        ("text", datatype.STRING),
+        ("double", datatype.DOUBLE),
         ("float", datatype.FLOAT),
         ("char(10)", datatype.CHAR(10)),
         ("varchar(100)", datatype.VARCHAR(100)),
@@ -75,6 +79,8 @@ class DataTypeParserTest(fixtures.TestBase):
     @testing.combinations(
         ("array<int>", datatype.ARRAY(datatype.INTEGER)),
         ("array<varchar(20)>", datatype.ARRAY(datatype.VARCHAR(20))),
+        ("array<DECIMAL256(76,10)>", datatype.ARRAY(datatype.DECIMAL(76, 10))),
+        ("map<string, decimal256(76,10)>", datatype.MAP(datatype.STRING, datatype.DECIMAL(76, 10))),
         ("map<string, int>", datatype.MAP(datatype.STRING, datatype.INTEGER)),
         (
             "struct<name varchar(100), age int>",

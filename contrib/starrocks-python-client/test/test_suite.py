@@ -59,7 +59,7 @@ from test.util import normalize_sql
 
 
 if IS_SQLALCHEMY_2:
-    from sqlalchemy.testing.suite import EnumTest, TrueDivTest as _TrueDivTest
+    from sqlalchemy.testing.suite import TrueDivTest as _TrueDivTest
 else:
     from sqlalchemy.testing.suite import (
         HasIndexTest,
@@ -377,9 +377,6 @@ class NumericTest(_NumericTest,):
             return run
 
 
-FLOAT_CAST_SKIPPED = testing.fails_on(
-    "starrocks", "the dialect inherits MySQL's version check and skips CAST to FLOAT, which StarRocks supports"
-)
 DECIMAL_SCALE_ABOVE_38 = testing.skip(
     "starrocks", "the quotient of two DECIMAL(38, 20) needs scale 40; StarRocks allows 38"
 )
@@ -398,8 +395,8 @@ if IS_SQLALCHEMY_2:
         """Upstream's pair of combinations, flattened so StarRocks' DECIMAL limits can be marked per case."""
 
         @testing.combinations(
-            ("float-typed", "7.0", "3.5", Float(), "2", False, FLOAT_CAST_SKIPPED),
-            ("float-untyped_function", "7.0", "3.5", Float(), "2", True, FLOAT_CAST_SKIPPED),
+            ("float-typed", "7.0", "3.5", Float(), "2", False),
+            ("float-untyped_function", "7.0", "3.5", Float(), "2", True),
             ("numeric_whole_number-typed", "1", "2.00", Numeric(10, 2), "0.5", False),
             ("numeric_whole_number-untyped_function", "1", "2.00", Numeric(10, 2), "0.5", True),
             ("numeric_many_decimals-typed", MANY_DIGITS_DIVIDEND, MANY_DIGITS_DIVISOR, Numeric(22, 20), "7", False,
@@ -587,9 +584,7 @@ class ServerSideCursorsTest(_ServerSideCursorsTest):
 
 LongNameBlowoutTest.__requires__ = ("index_reflection",)  # This will do to make it skip for now, no multiple column index
 CompositeKeyReflectionTest.__requires__ = ('primary_key_constraint_reflection',) # This will make it also skip the fixture which is not creating succesfully
-if IS_SQLALCHEMY_2:
-    EnumTest.__requires__ = ("enums",)  # Fix Enum handling. Mysql has native ENUM type, but Starrocks has not
-else:
+if not IS_SQLALCHEMY_2:
     HasIndexTest.__requires__ = ('index_reflection',)
 
     class LikeFunctionsTest(_LikeFunctionsTest):

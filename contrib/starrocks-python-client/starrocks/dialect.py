@@ -16,6 +16,7 @@ import logging
 import re
 from textwrap import dedent
 from typing import Any, Dict, Final, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Collection, Dict, Final, List, Optional, Tuple, Type, Union
 
 from alembic.ddl.base import alter_table, format_column_name, format_server_default, format_table_name
 from alembic.ddl.mysql import (
@@ -45,13 +46,14 @@ from sqlalchemy.dialects.mysql.base import (
     colspecs as base_colspecs,
 )
 from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
+import sqlalchemy.dialects.mysql.types as mysql_types
 from sqlalchemy.engine import reflection
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
 from sqlalchemy.engine.row import Row
 from sqlalchemy.sql import sqltypes, bindparam
 from sqlalchemy.sql.expression import Delete, Insert, Select, Update, TableClause
 from sqlalchemy.sql import bindparam, operators, sqltypes
-from sqlalchemy.sql.elements import BinaryExpression, Grouping
+from sqlalchemy.sql.elements import BinaryExpression, Grouping, TypeClause
 
 from starrocks.common import utils
 from starrocks.common.defaults import ReflectionMVDefaults, ReflectionTableDefaults, ReflectionViewDefaults
@@ -163,10 +165,15 @@ ischema_names = {
     "decimal32": DECIMAL,
     "decimal64": DECIMAL,
     "decimal128": DECIMAL,
+    "decimal256": DECIMAL,
+    "decimalv2": DECIMAL,
+    "numeric": DECIMAL,
+    "number": DECIMAL,
     # === String ===
     "varchar": VARCHAR,
     "char": CHAR,
     "string": STRING,
+    "text": STRING,
     "json": JSON,
     "variant": VARIANT,
     # === Date and time ===
@@ -186,7 +193,9 @@ ischema_names = {
     "bitmap": BITMAP,
 }
 
-colspecs = base_colspecs | {
+colspecs = {
+    generic_type: impl_type for generic_type, impl_type in base_colspecs.items() if generic_type is not sqltypes.Enum
+} | {
     sqltypes.Date: DATE,
     sqltypes.DateTime: DATETIME,
     sqltypes.DECIMAL: DECIMAL,
@@ -226,6 +235,41 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
     def visit_STRING(self, type_, **kw):
         return "STRING"
 
+    def visit_DATETIME(self, type_: sqltypes.DateTime, **kw: Any) -> str:
+        """StarRocks DATETIME has no precision argument; ``DATETIME(6)`` is a syntax error."""
+        return "DATETIME"
+
+    def visit_TIMESTAMP(self, type_: sqltypes.TIMESTAMP, **kw: Any) -> str:
+        """TIMESTAMP is not a StarRocks type keyword; DATETIME is the equivalent."""
+        return "DATETIME"
+
+    def visit_enum(self, type_: sqltypes.Enum, **kw: Any) -> str:
+        """StarRocks has no ENUM type, so sa.Enum is always stored as VARCHAR.
+
+        VARCHAR(n) counts bytes in StarRocks, so n is at least the longest value's UTF-8 length, not its character
+        count, and at least the ``length`` the Enum asks for.
+        """
+        longest_value_bytes = max((len(value.encode("utf-8")) for value in type_.enums), default=None)
+        if longest_value_bytes is not None and type_.length:
+            longest_value_bytes = max(longest_value_bytes, type_.length)
+        return self.visit_VARCHAR(sqltypes.String(longest_value_bytes), **kw)
+
+    def visit_NCHAR(self, type_: sqltypes.NCHAR, **kw: Any) -> str:
+        """StarRocks has no NATIONAL CHAR; its CHAR is UTF-8 already, as NVARCHAR's VARCHAR is."""
+        return self.visit_CHAR(type_, **kw)
+
+    def visit_CHAR(self, type_: sqltypes.CHAR, **kw: Any) -> str:
+        """Render ``CHAR(n)`` or ``CHAR`` alone, as :meth:`visit_VARCHAR` renders VARCHAR.
+
+        MySQL's compiler adds NATIONAL for ``mysql.NCHAR`` and ``CHAR(national=True)``, and COLLATE or BINARY for
+        a collation, all of which StarRocks refuses in a column definition.
+        """
+        return "CHAR" if type_.length is None else f"CHAR({type_.length})"
+
+    def visit_TEXT(self, type_: sqltypes.Text, **kw: Any) -> str:
+        """StarRocks stores TEXT as varchar(65533), which is what STRING means."""
+        return "STRING"
+
     def visit_VARCHAR(self, type_, **kw):
         # StarRocks supports unbounded strings via STRING. When no length is
         # provided (e.g. from SQLAlchemy String() without length), render
@@ -235,10 +279,16 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
         return f"VARCHAR({type_.length})"
 
     def visit_BINARY(self, type_, **kw):
-        return "BINARY"
+        return self._binary_with_length("BINARY", type_)
 
     def visit_VARBINARY(self, type_, **kw):
-        return "VARBINARY"
+        return self._binary_with_length("VARBINARY", type_)
+
+    @staticmethod
+    def _binary_with_length(keyword: str, type_: sqltypes.TypeEngine) -> str:
+        """Render a binary keyword with the declared length; StarRocks stores BINARY(n) as varbinary(n)."""
+        length = getattr(type_, "length", None)
+        return keyword if length is None else f"{keyword}({length})"
 
     def visit_ARRAY(self, type_: ARRAY, **kw):
         """Compiles the ARRAY type into the correct StarRocks syntax."""
@@ -252,13 +302,15 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
         value_type_sql = self.process(type_.value_type, **kw)
         return f"MAP<{key_type_sql}, {value_type_sql}>"
 
-    def visit_STRUCT(self, type_: STRUCT, **kw):
-        # logger.debug("visit_STRUCT: type_: %r, kw: %s", type_, kw)
-        fields_sql = []
-        for name, type_ in type_.field_tuples:
-            name_sql = self.process(name, **kw) if isinstance(name, sqltypes.TypeEngine) else name
-            type_sql = self.process(type_, **kw)
-            fields_sql.append(f"{name_sql} {type_sql}")
+    def visit_STRUCT(self, type_: STRUCT, **kw: Any) -> str:
+        """Render ``STRUCT<name type, ...>``, with each field name quoted by the identifier preparer.
+
+        The preparer quotes a field name as it quotes a column name: a name StarRocks reserves, such as ``key``,
+        or one that is not a plain lowercase identifier, is backquoted, and a ``%`` is doubled for a driver that
+        formats parameters with ``%``.
+        """
+        preparer = self.dialect.identifier_preparer
+        fields_sql = [f"{preparer.quote(name)} {self.process(field_type, **kw)}" for name, field_type in type_.field_tuples]
         return f"STRUCT<{', '.join(fields_sql)}>"
 
     def visit_HLL(self, type_, **kw):
@@ -267,11 +319,14 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
     def visit_BITMAP(self, type_, **kw):
         return "BITMAP"
 
+    def visit_PERCENTILE(self, type_: PERCENTILE, **kw: Any) -> str:
+        return "PERCENTILE"
+
     def visit_VARIANT(self, type_, **kw):
         return "VARIANT"
 
     def visit_BLOB(self, type_, **kw):
-        return "BINARY"
+        return self._binary_with_length("BINARY", type_)
 
 
 class StarRocksSQLCompiler(MySQLCompiler):
@@ -450,15 +505,51 @@ class StarRocksSQLCompiler(MySQLCompiler):
 
     def visit_typeclause(
         self,
-        typeclause,
-        type_=None,
+        typeclause: TypeClause,
+        type_: Optional[sqltypes.TypeEngine] = None,
         **kw: Any,
-    ):
+    ) -> str:
+        """Render a CAST target; booleans, integers and ARRAY, MAP and STRUCT are cast to StarRocks' own types.
+
+        MySQL casts integers to ``SIGNED INTEGER``, which StarRocks reads as INT on 3.3 and 3.5 and as BIGINT on
+        4.1, so a BIGINT or LARGEINT cast lost its range on one version or the other. See
+        :meth:`_integer_cast_target` for the integer types.
+        """
         if type_ is None:
             type_ = typeclause.type.dialect_impl(self.dialect)
+        if isinstance(type_, sqltypes.Integer):
+            return self._integer_cast_target(type_)
         if isinstance(type_, (sqltypes.Boolean, StructuredType)):
             return self.dialect.type_compiler.process(type_)
         return super().visit_typeclause(typeclause, type_, **kw)
+
+    _INTEGER_CAST_TARGETS: Final[Tuple[Tuple[Type[sqltypes.Integer], str, str], ...]] = (
+        (mysql_types.TINYINT, "TINYINT", "SMALLINT"),
+        (sqltypes.SmallInteger, "SMALLINT", "INT"),
+        (mysql_types.MEDIUMINT, "INT", "INT"),
+        (sqltypes.INTEGER, "INT", "BIGINT"),
+        (sqltypes.BigInteger, "BIGINT", "LARGEINT"),
+        (LARGEINT, "LARGEINT", "LARGEINT"),
+    )
+    """Each integer type with the StarRocks type a cast to it names, signed and unsigned."""
+
+    _GENERIC_INTEGER_CAST_TARGET: Final[str] = "BIGINT"
+    """The generic ``Integer`` names no width, so it is cast to the 64 bits ``SIGNED INTEGER`` has on 4.1.
+
+    A value that fits 64 bits, such as an id or an epoch in milliseconds, is therefore not turned into NULL.
+    """
+
+    def _integer_cast_target(self, type_: sqltypes.Integer) -> str:
+        """Name the StarRocks integer type of the same width, without a display width, UNSIGNED or ZEROFILL.
+
+        StarRocks has no unsigned integers and refuses those keywords, and MEDIUMINT, in a CAST. An unsigned type
+        is widened to the next signed type that holds its whole range, and MEDIUMINT is INT.
+        """
+        unsigned = bool(getattr(type_, "unsigned", False))
+        for integer_type, signed_target, unsigned_target in self._INTEGER_CAST_TARGETS:
+            if isinstance(type_, integer_type):
+                return unsigned_target if unsigned else signed_target
+        return self._GENERIC_INTEGER_CAST_TARGET
 
     def visit_insert_into_files(self, insert_into, **kw):
         return (
@@ -871,11 +962,11 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         This method extends the base MySQL compiler to support:
         - **KEY specifier**: For AGGREGATE KEY tables, key columns can be marked
-          with `info={'starrocks_is_agg_key': True}`. The compiler validates that
+          with `Column(..., starrocks_is_agg_key=True)`. The compiler validates that
           a column is not both a key and an aggregate.
         - **Aggregate Functions**: For AGGREGATE KEY tables, value columns can have
-          an aggregate function (e.g., 'SUM', 'REPLACE') specified via the
-          `info={'starrocks_agg': '...'}` dictionary on a Column.
+          an aggregate function (e.g., 'SUM', 'REPLACE', or a state function such as
+          'sum(BIGINT)') given as `Column(..., starrocks_agg_type='...')`.
         - **AUTO_INCREMENT**: Automatically renders `AUTO_INCREMENT` for columns
           with `autoincrement=True`. It also ensures these columns are `BIGINT`
           and `NOT NULL` as required by StarRocks.
@@ -972,11 +1063,11 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         This method extends the base MySQL compiler to support:
         - **KEY specifier**: For AGGREGATE KEY tables, key columns can be marked
-          with `info={'starrocks_is_agg_key': True}`. The compiler validates that
+          with `Column(..., starrocks_is_agg_key=True)`. The compiler validates that
           a column is not both a key and an aggregate.
         - **Aggregate Functions**: For AGGREGATE KEY tables, value columns can have
-          an aggregate function (e.g., 'SUM', 'REPLACE') specified via the
-          `info={'starrocks_agg': '...'}` dictionary on a Column.
+          an aggregate function (e.g., 'SUM', 'REPLACE', or a state function such as
+          'sum(BIGINT)') given as `Column(..., starrocks_agg_type='...')`.
         - **AUTO_INCREMENT**: Automatically renders `AUTO_INCREMENT` for columns
           with `autoincrement=True`. It also ensures these columns are `BIGINT`
           and `NOT NULL` as required by StarRocks.
@@ -1101,7 +1192,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             return ColumnAggType.KEY
         elif has_agg_type:
             agg_val = str(opt_dict[ColumnAggInfoKey.AGG_TYPE])
-            if agg_val.upper() not in ColumnAggType.ALLOWED_ITEMS:
+            if not ColumnAggType.is_valid(agg_val):
                 raise exc.CompileError(
                     f"Unsupported aggregate type for column '{column.name}': {agg_val}"
                 )
@@ -1467,6 +1558,8 @@ class StarRocksDialect(MySQLDialect_pymysql):
     # Warnings are generated by SQLAlchemy if this flag is not explicitly set
     # and tests are needed before being enabled
     supports_statement_cache = True
+    supports_native_enum = False
+    _support_float_cast = True
     supports_empty_insert = False
 
     ischema_names = ischema_names

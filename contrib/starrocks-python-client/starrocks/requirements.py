@@ -275,3 +275,8 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
     @property
     def unicode_ddl(self):
         return exclusions.open()
+    @property
+    def nvarchar_types(self) -> exclusions.compound:
+        """NCHAR and NVARCHAR, which compile to StarRocks' CHAR and VARCHAR, both UTF-8."""
+        return exclusions.open()
+
