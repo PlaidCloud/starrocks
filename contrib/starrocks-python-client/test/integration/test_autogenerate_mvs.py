@@ -17,7 +17,7 @@ import logging
 from alembic.autogenerate import api
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import MetaData, text
-from sqlalchemy.testing import config, expect_raises, fixtures
+from sqlalchemy.testing import config, fixtures
 
 from starrocks.alembic.compare import combine_include_object
 from starrocks.alembic.ops import (
@@ -192,10 +192,21 @@ class AlterMaterializedViewTest(_MaterializedViewAutogenerateBase):
         connection.execute(text(f"CREATE MATERIALIZED VIEW {mv_name} REFRESH MANUAL AS SELECT val FROM t_autogen"))
         try:
             target_metadata = MetaData()
-            MaterializedView(mv_name, target_metadata, definition="SELECT val + 1 AS val FROM t_autogen")
+            MaterializedView(
+                mv_name, target_metadata, definition="SELECT val + 1 AS val FROM t_autogen", starrocks_refresh="MANUAL"
+            )
             mc = create_migration_context(connection, target_metadata)
-            with expect_raises(NotImplementedError):
-                api.produce_migrations(mc, target_metadata)
+            script = api.produce_migrations(mc, target_metadata)
+
+            upgrade = [(type(op), op.view_name) for op in script.upgrade_ops.ops]
+            assert upgrade == [(DropMaterializedViewOp, mv_name), (CreateMaterializedViewOp, mv_name)]
+            assert "val + 1" in script.upgrade_ops.ops[1].definition
+            downgrade = script.downgrade_ops.ops
+            assert [(type(op), op.view_name) for op in downgrade] == [
+                (DropMaterializedViewOp, mv_name),
+                (CreateMaterializedViewOp, mv_name),
+            ]
+            assert "val + 1" not in downgrade[1].definition
         finally:
             connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 

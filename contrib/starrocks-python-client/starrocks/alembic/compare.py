@@ -69,6 +69,10 @@ from starrocks.sql.schema import MaterializedView, View
 logger = logging.getLogger(__name__)
 
 
+class UnalterableChange(NotImplementedError):
+    """A difference between metadata and database that StarRocks has no ALTER statement for."""
+
+
 INTEGER_VISIT_NAMES_WITH_DISPLAY_WIDTH = {"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "LARGEINT"}
 
 # ``context.configure()`` option: schema to host the transient view/MV canonicalization
@@ -1129,11 +1133,10 @@ def _compare_mv_definition(
             object_label="Materialized view",
         )
         mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
-        raise NotImplementedError(
+        raise UnalterableChange(
             f"Detected DEFINITION change on materialized view {mv_fqn!r}, "
             f"from {conn_def_norm!r} (in database, normalized) to {meta_def_norm!r} (in metadata, normalized). "
-            f"StarRocks does not support altering MV definition. "
-            f"You need to manually DROP and CREATE the materialized view."
+            f"StarRocks does not support altering MV definition."
         )
 
 
@@ -1145,10 +1148,9 @@ def _compare_mv_comment(
     metadata_mv: Union[MaterializedView, Table]
 ) -> None:
     """
-    Compare MV comment and raise error if changed.
+    Compare MV comment, raising UnalterableChange if it changed.
 
-    Note: StarRocks does not support altering MV comment, so this will raise an error
-    if a change is detected.
+    StarRocks cannot alter a materialized view's comment, so the caller recreates the materialized view.
     """
     conn_comment = (conn_mv.comment or "").strip()
     meta_comment = (metadata_mv.comment or "").strip()
@@ -1156,11 +1158,10 @@ def _compare_mv_comment(
 
     if conn_comment != meta_comment:
         mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
-        raise NotImplementedError(
+        raise UnalterableChange(
             f"Detected COMMENT change on materialized view {mv_fqn!r}, "
             f"from {conn_comment!r} to {meta_comment!r}. "
-            f"StarRocks does not support altering MV comment. "
-            f"You need to manually DROP and CREATE the materialized view."
+            f"StarRocks does not support altering MV comment."
         )
 
 
@@ -1270,9 +1271,9 @@ def _compare_mv(
     - Immutable attributes (require DROP + CREATE): definition, partition_by,
       distributed_by, order_by, comment
 
-    Note: For immutable attributes, this will raise NotImplementedError if changes are detected,
-    as StarRocks does not support altering these attributes.
-    It will generate multiple AlterOps if there are several different attribute changes.
+    A change to an immutable attribute is applied by dropping the materialized view and creating it again, since its
+    data is derived from its base tables; the mutable attributes then need no ALTER. Otherwise it generates one
+    AlterOp per changed mutable attribute.
     """
     # Handle MV creation and deletion scenarios (should not happen here)
     if conn_mv is None or metadata_mv is None:
@@ -1301,47 +1302,51 @@ def _compare_mv(
     ops_before = len(upgrade_ops.ops)
 
     # Compare each MV attribute using dedicated functions
-    # Order: immutable attributes first (will raise error if changed), then mutable attributes
-    # Immutable attributes (will raise NotImplementedError if changed):
+    # Order: immutable attributes first (a change means DROP + CREATE), then mutable attributes
     resolved_schema = schema or autogen_context.dialect.default_schema_name
     temp_view_schema = _configured_temp_view_schema(autogen_context) or resolved_schema
-    _compare_mv_definition(upgrade_ops.ops, resolved_schema, mv_name, conn_mv, metadata_mv,
-                           conn=autogen_context.connection, temp_view_schema=temp_view_schema)
-    _compare_table_partition(
-        upgrade_ops.ops,
-        schema,
-        mv_name,
-        conn_mv_attributes,
-        meta_mv_attributes,
-        default_value_override=ReflectionMVDefaults.partition_by(),
-        support_change_override=AlterMVEnablement.PARTITION_BY,
-        ddl_object="MATERIALIZED VIEW",
-        object_label="Materialized view",
-    )
-    _compare_table_distribution(
-        upgrade_ops.ops,
-        schema,
-        mv_name,
-        conn_mv_attributes,
-        meta_mv_attributes,
-        default_value_override=ReflectionMVDefaults.distribution_type(),
-        support_change_override=AlterMVEnablement.DISTRIBUTED_BY,
-        ddl_object="MATERIALIZED VIEW",
-        object_label="Materialized view",
-        skip_when_meta_unset=True,
-    )
-    _compare_table_order_by(
-        upgrade_ops.ops,
-        schema,
-        mv_name,
-        conn_mv_attributes,
-        meta_mv_attributes,
-        default_value_override=ReflectionMVDefaults.order_by(),
-        support_change_override=AlterMVEnablement.ORDER_BY,
-        ddl_object="MATERIALIZED VIEW",
-        object_label="Materialized view",
-    )
-    _compare_mv_comment(upgrade_ops.ops, schema, mv_name, conn_mv, metadata_mv)
+    unalterable_changes = _collect_unalterable_changes([
+        lambda: _compare_mv_definition(upgrade_ops.ops, resolved_schema, mv_name, conn_mv, metadata_mv,
+                                       conn=autogen_context.connection, temp_view_schema=temp_view_schema),
+        lambda: _compare_table_partition(
+            upgrade_ops.ops,
+            schema,
+            mv_name,
+            conn_mv_attributes,
+            meta_mv_attributes,
+            default_value_override=ReflectionMVDefaults.partition_by(),
+            support_change_override=AlterMVEnablement.PARTITION_BY,
+            ddl_object="MATERIALIZED VIEW",
+            object_label="Materialized view",
+        ),
+        lambda: _compare_table_distribution(
+            upgrade_ops.ops,
+            schema,
+            mv_name,
+            conn_mv_attributes,
+            meta_mv_attributes,
+            default_value_override=ReflectionMVDefaults.distribution_type(),
+            support_change_override=AlterMVEnablement.DISTRIBUTED_BY,
+            ddl_object="MATERIALIZED VIEW",
+            object_label="Materialized view",
+            skip_when_meta_unset=True,
+        ),
+        lambda: _compare_table_order_by(
+            upgrade_ops.ops,
+            schema,
+            mv_name,
+            conn_mv_attributes,
+            meta_mv_attributes,
+            default_value_override=ReflectionMVDefaults.order_by(),
+            support_change_override=AlterMVEnablement.ORDER_BY,
+            ddl_object="MATERIALIZED VIEW",
+            object_label="Materialized view",
+        ),
+        lambda: _compare_mv_comment(upgrade_ops.ops, schema, mv_name, conn_mv, metadata_mv),
+    ])
+    if unalterable_changes:
+        _recreate_materialized_view(upgrade_ops, schema, mv_name, conn_mv, metadata_mv, unalterable_changes)
+        return
 
     # Mutable attributes (will generate AlterMaterializedViewOp if changed):
     _compare_mv_refresh(upgrade_ops.ops, schema, mv_name, conn_mv_attributes, meta_mv_attributes)
@@ -1354,6 +1359,41 @@ def _compare_mv(
         mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
         num_changes = ops_after - ops_before
         logger.debug("Materialized view %r comparison complete: %d ALTER operation(s) generated", mv_fqn, num_changes)
+
+def _collect_unalterable_changes(comparisons: List[Callable[[], None]]) -> List[str]:
+    """Run each attribute comparison and return the messages of the changes StarRocks cannot ALTER."""
+    changes = []
+    for compare_attribute in comparisons:
+        try:
+            compare_attribute()
+        except UnalterableChange as change:
+            changes.append(str(change))
+    return changes
+
+
+def _recreate_materialized_view(
+    upgrade_ops: UpgradeOps,
+    schema: Optional[str],
+    mv_name: str,
+    conn_mv: Union[MaterializedView, Table],
+    metadata_mv: Union[MaterializedView, Table],
+    changes: List[str],
+) -> None:
+    """Apply changes ALTER MATERIALIZED VIEW cannot express by dropping the materialized view and creating it again.
+
+    Its data is derived from its base tables, so recreating it applies the model as written; StarRocks then fills it
+    again according to its refresh scheme. The drop keeps the database's definition, so the downgrade restores it.
+    """
+    mv_fqn = utils.gen_simple_qualified_name(mv_name, schema)
+    logger.warning(
+        "Materialized view %r changed in ways ALTER MATERIALIZED VIEW cannot express, so the migration drops it and "
+        "creates it again, and StarRocks refills it as it refreshes. %s",
+        mv_fqn,
+        " ".join(changes),
+    )
+    upgrade_ops.ops.append(DropMaterializedViewOp.from_materialized_view(conn_mv))
+    upgrade_ops.ops.append(CreateMaterializedViewOp.from_materialized_view(metadata_mv))
+
 
 @comparators_dispatch_for_starrocks("table")
 def check_table_kind_for_view_mv(
@@ -1407,10 +1447,6 @@ def check_table_kind_for_view_mv(
 # Only starrocks-specific table attributes are compared.
 # Other table attributes are compared using generic comparison logic in Alembic.
 # ==============================================================================
-class UnalterableChange(NotImplementedError):
-    """A difference between metadata and database that StarRocks has no ALTER statement for."""
-
-
 def _skip_unalterable_change(compare_attribute: Callable[[], None]) -> None:
     """Run one table attribute comparison, turning a change StarRocks cannot ALTER into a warning.
 

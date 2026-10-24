@@ -19,10 +19,10 @@ import warnings
 
 from alembic.operations import ops
 from sqlalchemy import MetaData, Table, testing
-from sqlalchemy.testing import eq_, expect_raises_message, fixtures
+from sqlalchemy.testing import eq_, fixtures
 
 from starrocks.alembic.compare import _autogen_for_mvs, _compare_mv
-from starrocks.alembic.ops import AlterMaterializedViewOp, CreateMaterializedViewOp
+from starrocks.alembic.ops import AlterMaterializedViewOp, CreateMaterializedViewOp, DropMaterializedViewOp
 from starrocks.common.params import DialectName, TableInfoKey, TableKind, TableObjectInfoKey
 from starrocks.sql.schema import MaterializedView
 
@@ -61,7 +61,7 @@ class CompareMaterializedViewTest(fixtures.TestBase):
         if comment:
             table.comment = comment
 
-        dialect_opts = table.dialect_options.setdefault(DialectName, {})
+        dialect_opts = table.dialect_options[DialectName]
         if partition_by:
             dialect_opts[TableInfoKey.PARTITION_BY] = partition_by
         if distributed_by:
@@ -120,32 +120,39 @@ class CompareMaterializedViewTest(fixtures.TestBase):
     # DROP/CREATE MV - Immutable Attributes
     # ========================================================================
 
-    def test_modify_mv_definition_changed(self):
+    @staticmethod
+    def _assert_recreated(upgrade_ops, caplog, reason):
+        """The materialized view is dropped and created again, and the warning names the change behind it."""
+        eq_([type(op) for op in upgrade_ops.ops], [DropMaterializedViewOp, CreateMaterializedViewOp])
+        assert "drops it and creates it again" in caplog.text
+        assert reason in caplog.text
+
+    def test_modify_mv_definition_changed(self, caplog):
         """DROP/CREATE: Definition changed."""
         upgrade_ops = ops.UpgradeOps([])
         conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1")
         meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 2")
 
-        with expect_raises_message(NotImplementedError, "does not support altering MV definition"):
-            _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        self._assert_recreated(upgrade_ops, caplog, "does not support altering MV definition")
 
-    def test_modify_mv_partition_by_changed(self):
+    def test_modify_mv_partition_by_changed(self, caplog):
         """DROP/CREATE: Partition by changed."""
         upgrade_ops = ops.UpgradeOps([])
         conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", partition_by="date_trunc('day', dt)")
         meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_partition_by="dt")
 
-        with expect_raises_message(NotImplementedError, "does not support 'ALTER MATERIALIZED VIEW PARTITION BY'"):
-            _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        self._assert_recreated(upgrade_ops, caplog, "does not support 'ALTER MATERIALIZED VIEW PARTITION BY'")
 
-    def test_modify_mv_distributed_by_changed(self):
+    def test_modify_mv_distributed_by_changed(self, caplog):
         """DROP/CREATE: Distributed by changed."""
         upgrade_ops = ops.UpgradeOps([])
         conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", distributed_by="HASH(id)")
         meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_distributed_by="RANDOM")
 
-        with expect_raises_message(NotImplementedError, "does not support 'ALTER MATERIALIZED VIEW DISTRIBUTED BY'"):
-            _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        self._assert_recreated(upgrade_ops, caplog, "does not support 'ALTER MATERIALIZED VIEW DISTRIBUTED BY'")
 
     @testing.combinations(
         ("explicit_bucket_count", "RANDOM BUCKETS 10"),
@@ -170,14 +177,14 @@ class CompareMaterializedViewTest(fixtures.TestBase):
 
         eq_(len(upgrade_ops.ops), 0)
 
-    def test_modify_mv_order_by_changed(self):
+    def test_modify_mv_order_by_changed(self, caplog):
         """DROP/CREATE: Order by changed."""
         upgrade_ops = ops.UpgradeOps([])
         conn_mv = self._create_reflected_mv("my_mv", definition="SELECT 1", order_by="id")
         meta_mv = MaterializedView("my_mv", MetaData(), definition="SELECT 1", starrocks_order_by="name")
 
-        with expect_raises_message(NotImplementedError, "does not support 'ALTER MATERIALIZED VIEW ORDER BY'"):
-            _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        _compare_mv(self.mock_autogen_context, upgrade_ops, None, "my_mv", conn_mv, meta_mv)
+        self._assert_recreated(upgrade_ops, caplog, "does not support 'ALTER MATERIALIZED VIEW ORDER BY'")
 
     # ========================================================================
     # No-Change Tests
