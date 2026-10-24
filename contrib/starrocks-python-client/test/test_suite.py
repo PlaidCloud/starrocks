@@ -127,7 +127,12 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL, SRAssertsCompiledSQLMix
 
 
 class StarrocksMogrifyTest(fixtures.TablesTest, AssertsCompiledSQL):
-    # Not strictly a dialect test, but allows me to test why mogrify is not working correctly
+    """The driver's ``mogrify`` renders a compiled statement with its parameters as literals.
+
+    pymysql compiles named ``%(name)s`` placeholders and asyncmy positional ``%s`` ones, so the
+    expected placeholder and the parameters given to ``mogrify`` follow the dialect's paramstyle.
+    """
+
     def test_mogrify_query_with_parameters(self, connection):
         t = table('t1', column('c1'), column('c2'), column('test_param'))
 
@@ -140,14 +145,18 @@ class StarrocksMogrifyTest(fixtures.TablesTest, AssertsCompiledSQL):
                 ),
         )
 
+        positional = connection.dialect.positional
+        placeholder = "%s" if positional else "%(test_param_1)s"
         self.assert_compile(
             sel,
-            result="SELECT CAST(t1.c1 AS CHAR(4000)) AS c1, CAST(t1.c2 AS CHAR(4000)) AS c2 FROM t1 WHERE t1.test_param = %(test_param_1)s",
+            result=f"SELECT CAST(t1.c1 AS CHAR(4000)) AS c1, CAST(t1.c2 AS CHAR(4000)) AS c2 FROM t1 WHERE t1.test_param = {placeholder}",
             params={'test_param_1':'Y'},
             render_postcompile=True,
         )
         compiled = sel.compile(connection, compile_kwargs={"render_postcompile": True})
-        mog = connection.engine.raw_connection().cursor().mogrify(str(compiled).replace('\n', ''), compiled.params)
+        params = tuple(compiled.params[name] for name in compiled.positiontup) if positional else compiled.params
+        cursor = connection.connection.driver_connection.cursor()
+        mog = cursor.mogrify(str(compiled).replace('\n', ''), params)
         assert mog == "SELECT CAST(t1.c1 AS CHAR(4000)) AS c1, CAST(t1.c2 AS CHAR(4000)) AS c2 FROM t1 WHERE t1.test_param = 'Y'"
 
     # def test_select_nonrecursive_round_trip(self, connection):
