@@ -221,6 +221,14 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
     def visit_STRING(self, type_, **kw):
         return "STRING"
 
+    def visit_DATETIME(self, type_, **kw):
+        """StarRocks DATETIME has no precision argument; ``DATETIME(6)`` is a syntax error."""
+        return "DATETIME"
+
+    def visit_TIMESTAMP(self, type_, **kw):
+        """TIMESTAMP is not a StarRocks type keyword; DATETIME is the equivalent."""
+        return "DATETIME"
+
     def visit_enum(self, type_: sqltypes.Enum, **kw: Any) -> str:
         """StarRocks has no ENUM type, so sa.Enum is always stored as VARCHAR.
 

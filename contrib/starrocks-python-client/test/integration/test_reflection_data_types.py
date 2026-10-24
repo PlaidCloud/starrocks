@@ -27,7 +27,7 @@ issues where:
 """
 import logging
 
-from sqlalchemy import Column, MetaData, Table, Text, UnicodeText, text
+from sqlalchemy import TIMESTAMP, Column, MetaData, Table, Text, UnicodeText, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.testing import fixtures
 
@@ -234,6 +234,24 @@ class DataTypeReflectionTest(fixtures.TestBase):
         for name in ("text_col", "unicode_text_col"):
             assert reflected_table.c[name].type.length == 65533
             assert run_compare(reflected_table.c[name].type, table.c[name].type) is False
+
+    def test_datetime_precision_and_timestamp_create_datetime_columns(self, connection):
+        """``DATETIME(6)`` and ``TIMESTAMP`` are syntax errors in StarRocks; both must create DATETIME columns."""
+        table_name = "test_reflect_datetime_precision"
+        table = Table(
+            table_name,
+            MetaData(),
+            Column("id_col", INTEGER()),
+            Column("fsp_col", DATETIME(fsp=6)),
+            Column("timestamp_col", TIMESTAMP()),
+            starrocks_distributed_by='HASH(id_col)',
+            starrocks_properties={"replication_num": "1"},
+        )
+
+        reflected_table = self._create_and_reflect_table(connection, table_name, table)
+
+        assert isinstance(reflected_table.c.fsp_col.type, DATETIME)
+        assert isinstance(reflected_table.c.timestamp_col.type, DATETIME)
 
     def test_reflect_datetime_types(self, connection):
         """Test reflection of datetime data types"""

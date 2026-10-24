@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from sqlalchemy import Column, LargeBinary, Text, UnicodeText, testing
+from sqlalchemy import TIMESTAMP, Column, LargeBinary, Text, UnicodeText, testing
 from sqlalchemy.testing import fixtures
 
 from starrocks.alembic.starrocks import StarRocksImpl
@@ -158,6 +158,10 @@ simple_type_params = [
     ("VARCHAR(65533) vs UnicodeText (equivalent)", VARCHAR(65533), UnicodeText(), False),
     ("VARCHAR(65532) vs Text (different)", VARCHAR(65532), Text(), True),
     ("INTEGER vs Text (different)", INTEGER(), Text(), True),
+
+    # 1.8 DATETIME precision and TIMESTAMP are not StarRocks syntax; both are stored as DATETIME
+    ("DATETIME vs DATETIME(fsp=6) (same)", DATETIME(), DATETIME(fsp=6), False),
+    ("DATETIME vs TIMESTAMP (same)", DATETIME(), TIMESTAMP(), False),
 ]
 
 # 2. Complex type vs Simple type

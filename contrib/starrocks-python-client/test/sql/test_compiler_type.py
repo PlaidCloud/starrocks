@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from sqlalchemy import Column, Enum, LargeBinary, MetaData, Table, Text, UnicodeText, testing
+import sqlalchemy as sa
+from sqlalchemy import TIMESTAMP, Column, Enum, LargeBinary, MetaData, Table, Text, UnicodeText, testing
+from sqlalchemy.dialects import mysql
 from sqlalchemy.schema import CreateColumn
 from sqlalchemy.testing import expect_warnings, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
@@ -84,6 +86,10 @@ class DataTypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         (LargeBinary(100), "BINARY(100)"),
         (DATE(), "DATE"),
         (DATETIME(), "DATETIME"),
+        (DATETIME(fsp=6), "DATETIME"),
+        (sa.DateTime(), "DATETIME"),
+        (TIMESTAMP(), "DATETIME"),
+        (mysql.TIMESTAMP(fsp=3), "DATETIME"),
         (HLL(), "HLL"),
         (BITMAP(), "BITMAP"),
         (PERCENTILE(), "PERCENTILE"),
