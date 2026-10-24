@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any, Dict
+
 from alembic.testing.requirements import SuiteRequirements as AlembicSuiteRequirements
 import sqlalchemy
 from sqlalchemy.testing import exclusions
@@ -279,6 +281,23 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
     @property
     def unicode_ddl(self):
         return exclusions.open()
+    @property
+    def isolation_level(self) -> exclusions.compound:
+        """``AUTOCOMMIT``, the default, and ``READ COMMITTED``, which runs DML in StarRocks transactions."""
+        return exclusions.open()
+
+    @property
+    def autocommit(self) -> exclusions.compound:
+        return exclusions.open()
+
+    def get_isolation_levels(self, config: Any) -> Dict[str, Any]:
+        """The default level, and the levels the server can run: ``READ COMMITTED`` needs StarRocks 3.5."""
+        with config.db.connect() as conn:
+            supported = list(conn.dialect.get_isolation_level_values(None))
+            if conn.dialect.server_version_info < (3, 5):
+                supported = [level for level in supported if level == "AUTOCOMMIT"]
+            return {"default": conn.dialect.default_isolation_level, "supported": supported}
+
     @property
     def nvarchar_types(self) -> exclusions.compound:
         """NCHAR and NVARCHAR, which compile to StarRocks' CHAR and VARCHAR, both UTF-8."""

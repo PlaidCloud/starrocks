@@ -14,12 +14,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, Optional, Union
 
 from sqlalchemy import pool, util
 from sqlalchemy.connectors.asyncio import AsyncIODBAPIConnection
 from sqlalchemy.dialects.mysql.asyncmy import AsyncAdapt_asyncmy_dbapi, AsyncAdapt_asyncmy_ss_cursor
-from sqlalchemy.engine.interfaces import DBAPIConnection, DBAPICursor, DBAPIModule, PoolProxiedConnection
+from sqlalchemy.engine.interfaces import (
+    DBAPIConnection,
+    DBAPICursor,
+    DBAPIModule,
+    ExecutionContext,
+    PoolProxiedConnection,
+)
 from sqlalchemy.engine.url import URL
 
 from .dialect import StarRocksDialect
@@ -99,6 +106,23 @@ class StarRocksDialect_asyncmy(StarRocksDialect):
 
     def do_terminate(self, dbapi_connection: DBAPIConnection) -> None:
         dbapi_connection.terminate()
+
+    def _pause(self, seconds: float) -> None:
+        """Wait between schema-change polls without blocking the event loop."""
+        util.await_only(asyncio.sleep(seconds))
+
+    @staticmethod
+    def _read_every_ddl_result(cursor: DBAPICursor, context: Optional[ExecutionContext]) -> None:
+        """Read the results of every statement a DDL construct compiled to, through asyncmy's own cursor.
+
+        SQLAlchemy's async cursor adapter returns None from ``nextset()`` even when it has moved to the next
+        result, so the loop of :meth:`StarRocksDialect._read_every_ddl_result` would stop after one, and the
+        error of a third statement would only be logged when the cursor closes.
+        """
+        if context is not None and context.isddl:
+            driver_cursor = getattr(cursor, "_cursor", cursor)
+            while util.await_only(driver_cursor.nextset()):
+                pass
 
     def create_connect_args(self, url: URL) -> ConnectArgsType:  # type: ignore[override]  # noqa: E501
         return super().create_connect_args(

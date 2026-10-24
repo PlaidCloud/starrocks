@@ -15,10 +15,10 @@
 import logging
 
 from alembic.autogenerate import api
+from alembic.operations import Operations
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import MetaData, text
-from sqlalchemy.testing import config, fixtures
 from sqlalchemy import MetaData, exc, testing, text
+from sqlalchemy.testing import config, expect_raises_message, fixtures
 
 from starrocks.alembic.compare import combine_include_object
 from starrocks.alembic.ops import (
@@ -27,6 +27,7 @@ from starrocks.alembic.ops import (
     DropMaterializedViewOp,
 )
 from starrocks.common.types import SystemRunMode
+from starrocks.sql.ddl import AlterMaterializedView
 from starrocks.sql.schema import MaterializedView
 
 
@@ -158,6 +159,23 @@ class DropMaterializedViewTest(_MaterializedViewAutogenerateBase):
 
 class AlterMaterializedViewTest(_MaterializedViewAutogenerateBase):
     """ALTER MATERIALIZED VIEW related tests."""
+
+    def test_a_failing_second_statement_raises(self, connection) -> None:
+        """A refresh and properties compile to two statements; the second's error must reach the caller."""
+        mv_name = "test_alter_mv_second_statement"
+        connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
+        connection.execute(text(f"CREATE MATERIALIZED VIEW {mv_name} REFRESH ASYNC AS SELECT val FROM t_autogen"))
+        try:
+            with expect_raises_message(exc.DBAPIError, "query_timeout"):
+                connection.execute(
+                    AlterMaterializedView(mv_name, refresh="MANUAL", properties={"session.query_timeout": "abc"})
+                )
+            with expect_raises_message(exc.DBAPIError, "query_timeout"):
+                Operations(MigrationContext.configure(connection)).alter_materialized_view(
+                    mv_name, refresh="MANUAL", properties={"session.query_timeout": "abc"}
+                )
+        finally:
+            connection.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {mv_name}"))
 
     def test_alter_mutable_attributes(self, connection) -> None:
         """ALTER: Change mutable attributes (refresh, properties)."""

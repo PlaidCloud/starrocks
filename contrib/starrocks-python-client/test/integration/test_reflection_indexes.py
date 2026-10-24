@@ -176,6 +176,29 @@ class SecondaryIndexCreateTest(fixtures.TestBase):
 
         assert self._indexes_once_built(connection, "idx_create_t") == [("ix_city", "city", "BITMAP")]
 
+    def test_create_all_with_two_indexes_on_one_table(self, connection, metadata):
+        """The second CREATE INDEX waits for the first index's build, which StarRocks runs as a schema change."""
+        table = Table(
+            "idx_two_t",
+            metadata,
+            Column("id", INTEGER),
+            Column("city", String(20)),
+            Column("country", String(20)),
+            starrocks_duplicate_key="id",
+            starrocks_distributed_by="HASH(id) BUCKETS 1",
+        )
+        Index("ix_city", table.c.city, starrocks_using="BITMAP")
+        Index("ix_country", table.c.country, starrocks_using="BITMAP")
+        metadata.create_all(connection)
+
+        deadline = time.monotonic() + 60
+        while len(self._indexes_once_built(connection, "idx_two_t")) < 2 and time.monotonic() < deadline:
+            time.sleep(1)
+        assert sorted(self._indexes_once_built(connection, "idx_two_t")) == [
+            ("ix_city", "city", "BITMAP"),
+            ("ix_country", "country", "BITMAP"),
+        ]
+
     def test_create_ngrambf_index_with_properties_and_comment(self, connection, metadata):
         table = Table(
             "idx_ngram_t",

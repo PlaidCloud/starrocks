@@ -15,8 +15,8 @@
 from functools import cache
 import logging
 import re
+import time
 from textwrap import dedent
-from typing import Any, Collection, Dict, Final, List, Optional, Tuple, Union
 from typing import TYPE_CHECKING, Any, Collection, Dict, Final, List, Optional, Tuple, Type, Union
 
 from alembic.ddl.base import (
@@ -57,6 +57,8 @@ from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
 from sqlalchemy.dialects.mysql.reserved_words import RESERVED_WORDS_MYSQL
 import sqlalchemy.dialects.mysql.types as mysql_types
 from sqlalchemy.engine import reflection
+from sqlalchemy.engine import URL, Connection, reflection
+from sqlalchemy.engine.interfaces import ExecutionContext
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
 from sqlalchemy.engine.row import Row
 from sqlalchemy.sql import sqltypes, bindparam
@@ -80,12 +82,17 @@ from starrocks.common.types import (
     ColumnAggType,
     SystemRunMode,
     TableEngine,
+    TableModel,
     TableType,
     ViewSecurityType,
 )
 from starrocks.common.utils import TableAttributeNormalizer
 from starrocks.reserved_words import STARROCKS_RESERVED_WORDS
 from starrocks.sql.schema import View
+
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine.interfaces import DBAPICursor
 
 from . import reflection as _reflection
 from .datatype import (
@@ -225,14 +232,19 @@ colspecs = {
     sqltypes.JSON.JSONPathType: JSONPathType,
 }
 
-def require_server_version(dialect: "StarRocksDialect", minimum: Tuple[int, ...], feature: str) -> None:
-    """Raise CompileError when the connected StarRocks is older than ``minimum``, the first version with ``feature``.
+def require_server_version(
+    dialect: "StarRocksDialect",
+    minimum: Tuple[int, ...],
+    feature: str,
+    error: Type[exc.SQLAlchemyError] = exc.CompileError,
+) -> None:
+    """Raise ``error`` when the connected StarRocks is older than ``minimum``, the first version with ``feature``.
 
     Compiling without a connection, as Alembic's offline mode does, knows no server version and checks nothing.
     """
     version = dialect.server_version_info
     if version and tuple(version) < minimum:
-        raise exc.CompileError(
+        raise error(
             f"{feature} needs StarRocks {'.'.join(map(str, minimum))} or later; "
             f"the server is {'.'.join(map(str, version))}"
         )
@@ -1876,9 +1888,17 @@ class StarRocksDialect(MySQLDialect_pymysql):
         # some test parameters
         # self.test_replication_num: Optional[int] = None
 
-    def create_connect_args(self, url, _translate_args: Optional[Dict[str, Any]] = None):
-        # Allow the superclass to create the base connect arguments
+    def create_connect_args(
+        self, url: URL, _translate_args: Optional[Dict[str, Any]] = None
+    ) -> Tuple[List[Any], Dict[str, Any]]:
+        """Build the driver's connect arguments, with the driver's autocommit on unless the URL turns it off.
+
+        StarRocks commits every statement on its own outside an explicit transaction, so connections start in
+        ``AUTOCOMMIT``, the isolation level that describes that; see :meth:`set_isolation_level`.
+        """
         _, connect_args = super(StarRocksDialect, self).create_connect_args(url, _translate_args)
+        util.coerce_kw_type(connect_args, "autocommit", bool)
+        connect_args.setdefault("autocommit", True)
         logger.debug("connect_args: %s", connect_args)
 
         # Handle the test-specific replication_num parameter
@@ -1891,13 +1911,497 @@ class StarRocksDialect(MySQLDialect_pymysql):
         return [], connect_args
 
     def initialize(self, connection: Connection) -> None:
+        """Read the server's version and run mode, and refuse a ``READ COMMITTED`` first connection before 3.5.
+
+        SQLAlchemy sets the first connection's isolation level before the server version is known, so
+        :meth:`set_isolation_level` can't refuse it there.
+        """
         super().initialize(connection)
         self._init_run_mode(connection)
+        if not self._driver_autocommits(connection.connection):
+            self._require_transactions(self._READ_COMMITTED_CONNECTION)
 
     def _init_run_mode(self, connection: Connection) -> None:
         if self.run_mode is None:
             self.run_mode = self._get_run_mode(connection)
             logger.debug("system run mode: %s" % self.run_mode)
+
+    _SCHEMA_CHANGE_JOB_KINDS: Final[Tuple[str, ...]] = ("COLUMN", "OPTIMIZE")
+    _SCHEMA_CHANGE_ENDED_STATES: Final[frozenset[str]] = frozenset({"FINISHED", "CANCELLED"})
+    _SCHEMA_CHANGE_POLL_SECONDS: Final[float] = 1.0
+
+    def do_execute(
+        self,
+        cursor: "DBAPICursor",
+        statement: str,
+        parameters: Any,
+        context: Optional[ExecutionContext] = None,
+    ) -> None:
+        """Execute a statement once the connection's transaction and the table it alters are ready for it.
+
+        See :meth:`_match_transaction_to` for the transaction. StarRocks builds an index, changes most columns and
+        redistributes a table in an asynchronous job, and rejects every other change to that table, with "A schema
+        change operation is in progress", until the job ends. ``create_all`` creates a table's indexes one after
+        another, and a migration alters a table one statement at a time, so each ALTER TABLE, CREATE INDEX and DROP
+        INDEX compiled from a DDL construct first waits for the job before it.
+        """
+        self._prepare_connection_for(cursor, statement, context)
+        super().do_execute(cursor, statement, parameters, context)
+        self._read_every_ddl_result(cursor, context)
+        self._track_transaction_control(statement, context)
+
+    def do_executemany(
+        self,
+        cursor: "DBAPICursor",
+        statement: str,
+        parameters: Any,
+        context: Optional[ExecutionContext] = None,
+    ) -> None:
+        """Execute a statement for many parameter sets, prepared as :meth:`do_execute` prepares one."""
+        self._prepare_connection_for(cursor, statement, context)
+        super().do_executemany(cursor, statement, parameters, context)
+        self._track_transaction_control(statement, context)
+
+    def do_execute_no_params(
+        self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext] = None
+    ) -> None:
+        self._prepare_connection_for(cursor, statement, context)
+        super().do_execute_no_params(cursor, statement, context)
+        self._read_every_ddl_result(cursor, context)
+        self._track_transaction_control(statement, context)
+
+    @staticmethod
+    def _read_every_ddl_result(cursor: "DBAPICursor", context: Optional[ExecutionContext]) -> None:
+        """Read the results of every statement a DDL construct compiled to, so a later statement's error raises.
+
+        ALTER MATERIALIZED VIEW with a refresh and properties, and ALTER TABLE SET with properties StarRocks takes
+        one at a time, compile to several statements. The driver reads a later statement's result only when the
+        cursor closes, and logs its error there instead of raising it.
+        """
+        if context is not None and context.isddl:
+            while cursor.nextset():
+                pass
+
+    def _prepare_connection_for(
+        self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext]
+    ) -> None:
+        """Refuse what StarRocks would run other than as asked, then ready the transaction and the table."""
+        self._refuse_split_overwrite_or_label(statement, context)
+        self._match_transaction_to(cursor, statement, context)
+        self._wait_for_schema_change_blocking(cursor, statement, context)
+
+    def _refuse_split_overwrite_or_label(self, statement: str, context: Optional[ExecutionContext]) -> None:
+        """Refuse an ``INSERT OVERWRITE`` or ``INSERT ... WITH LABEL`` run with many parameter sets.
+
+        The driver sends an executemany as one statement per row or per batch of rows. Each overwrite would replace
+        the rows the statement before it wrote, and each statement after the first would reuse a label whose load
+        has already committed. An ``insert()`` says so in its dialect options, and text in its INSERT keywords.
+        """
+        if context is None or not context.executemany:
+            return
+        if context.isinsert:
+            options = context.compiled.statement.dialect_options[self.name]
+            keeps_rows_together = bool(options["overwrite"]) or options["label"] is not None
+        else:
+            keyword = self._statement_keyword_token(statement)
+            keeps_rows_together = keyword is not None and bool(
+                self._INSERT_KEEPING_ROWS_TOGETHER.match(statement, keyword.start())
+            )
+        if keeps_rows_together:
+            raise exc.InvalidRequestError(
+                "INSERT OVERWRITE and INSERT ... WITH LABEL (starrocks_overwrite and starrocks_label) need the rows "
+                "in one statement, but executemany sends several; pass the rows to insert().values([...]) instead"
+            )
+
+    _ISOLATION_LEVELS: Final[Tuple[str, ...]] = ("AUTOCOMMIT", "READ COMMITTED")
+    _TRANSACTIONS_SINCE: Final[Tuple[int, ...]] = (3, 5)
+    _READ_COMMITTED_CONNECTION: Final[str] = "A READ COMMITTED connection (StarRocks transactions)"
+    _TRANSACTION_OPEN: Final[str] = "starrocks_transaction_open"
+    _DML_KEYWORDS: Final[frozenset[str]] = frozenset({"INSERT", "UPDATE", "DELETE"})
+    _DDL_KEYWORDS: Final[frozenset[str]] = frozenset(
+        {"CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "GRANT", "REVOKE", "REFRESH"}
+    )
+    _LEADING_COMMENTS: Final[re.Pattern[str]] = re.compile(r"(?:\s+|/\*.*?\*/|(?:--|#)[^\n]*(?:\n|$))*", re.DOTALL)
+    _STATEMENT_TOKEN: Final[re.Pattern[str]] = re.compile(
+        r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|`(?:[^`]|``)*`|/\*.*?\*/|(?:--|#)[^\n]*|\w+|[()]|[^\w\s()]",
+        re.DOTALL,
+    )
+    _TRANSACTION_START: Final[re.Pattern[str]] = re.compile(r"(?:BEGIN|START\s+TRANSACTION)\b", re.IGNORECASE)
+    _TRANSACTION_END: Final[re.Pattern[str]] = re.compile(
+        r"(?:COMMIT|ROLLBACK)\b(?!\s+(?:WORK\s+)?TO\b)", re.IGNORECASE
+    )
+    _GAP: Final[str] = r"(?:\s|/\*.*?\*/|(?:--|#)[^\n]*(?:\n|$))"
+    _IDENTIFIER: Final[str] = r"(`(?:[^`]|``)+`|\w+)"
+    _QUALIFIED_NAME: Final[str] = (
+        rf"{_IDENTIFIER}(?:{_GAP}*\.{_GAP}*{_IDENTIFIER})?(?:{_GAP}*\.{_GAP}*{_IDENTIFIER})?"
+    )
+    _DELETE_TARGET: Final[re.Pattern[str]] = re.compile(
+        rf"DELETE\b{_GAP}*FROM\b{_GAP}*{_QUALIFIED_NAME}", re.IGNORECASE | re.DOTALL
+    )
+    _INSERT_INTO_FILES: Final[re.Pattern[str]] = re.compile(
+        rf"INSERT\b{_GAP}*INTO\b{_GAP}*FILES{_GAP}*\(", re.IGNORECASE | re.DOTALL
+    )
+    _INSERT_KEEPING_ROWS_TOGETHER: Final[re.Pattern[str]] = re.compile(
+        rf"INSERT\b{_GAP}*(?:OVERWRITE\b|INTO\b{_GAP}*{_QUALIFIED_NAME}{_GAP}*"
+        rf"(?:(?:TEMPORARY{_GAP}+)?PARTITION{_GAP}*\([^)]*\){_GAP}*)?WITH{_GAP}+LABEL\b)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    _KEYED_MODELS_WITHOUT_PRIMARY_KEY: Final[frozenset[str]] = frozenset({
+        TableModel.DUP_KEYS, TableModel.DUP_KEYS2, TableModel.AGG_KEYS, TableModel.AGG_KEYS2,
+        TableModel.UNQ_KEYS, TableModel.UNQ_KEYS2,
+    })
+
+    def get_isolation_level_values(self, dbapi_conn: Any) -> Tuple[str, ...]:
+        """Return ``AUTOCOMMIT``, how StarRocks runs statements by default, and ``READ COMMITTED``, its transactions."""
+        return self._ISOLATION_LEVELS
+
+    def get_isolation_level(self, dbapi_connection: Any) -> str:
+        """Return the level the driver's autocommit mode stands for; StarRocks reports REPEATABLE-READ regardless."""
+        return "AUTOCOMMIT" if self._driver_autocommits(dbapi_connection) else "READ COMMITTED"
+
+    def set_isolation_level(self, dbapi_connection: Any, level: str) -> None:
+        """Turn the driver's autocommit on for ``AUTOCOMMIT`` and off for ``READ COMMITTED``.
+
+        StarRocks ignores ``SET AUTOCOMMIT`` and the session isolation level, and keeps committing each statement
+        on its own until a ``BEGIN WORK``. Off, the driver's autocommit tells :meth:`_match_transaction_to` to open
+        one for the connection's first INSERT, UPDATE or DELETE. ``READ COMMITTED`` is refused before StarRocks
+        3.5, which has no transactions, so a migration fails before its first statement rather than part way
+        through; :meth:`initialize` refuses it for the first connection, whose server version isn't known here yet.
+        """
+        level = level.replace("_", " ").upper()
+        if level not in self._ISOLATION_LEVELS:
+            raise exc.ArgumentError(
+                f"Invalid value {level!r} for isolation_level. "
+                f"Valid isolation levels for {self.name!r} are {', '.join(self._ISOLATION_LEVELS)}"
+            )
+        if level == "READ COMMITTED":
+            self._require_transactions(self._READ_COMMITTED_CONNECTION)
+        self._dbapi_connection_of(dbapi_connection).autocommit(level == "AUTOCOMMIT")
+
+    @staticmethod
+    def _dbapi_connection_of(connection: Any) -> Any:
+        """Return the DBAPI connection behind a pooled connection, which SQLAlchemy 1.4 passes as well."""
+        return getattr(connection, "dbapi_connection", connection)
+
+    def _driver_autocommits(self, connection: Any) -> bool:
+        """Return whether the driver connection is in autocommit mode; None means the server's default, which is on."""
+        mode = self.get_driver_connection(self._dbapi_connection_of(connection)).autocommit_mode
+        return mode is None or bool(mode)
+
+    def do_commit(self, dbapi_connection: Any) -> None:
+        """Commit, and forget the StarRocks transaction the dialect saw opened on the connection."""
+        self._forget_transaction(dbapi_connection)
+        super().do_commit(dbapi_connection)
+
+    def do_rollback(self, dbapi_connection: Any) -> None:
+        """Roll back, and forget the StarRocks transaction the dialect saw opened on the connection.
+
+        The rollback goes to StarRocks even when the dialect saw no transaction open, so the pool's rollback on
+        checkin also ends one opened through a raw DBAPI cursor.
+        """
+        self._forget_transaction(dbapi_connection)
+        super().do_rollback(dbapi_connection)
+
+    def _forget_transaction(self, connection: Any) -> None:
+        info = self._pool_info(connection)
+        if info is not None:
+            info.pop(self._TRANSACTION_OPEN, None)
+
+    @staticmethod
+    def _pool_info(connection: Any) -> Optional[Dict[str, Any]]:
+        """Return a pooled connection's ``info`` dictionary, which lives as long as its DBAPI connection.
+
+        A DBAPI connection has none, and the connection SQLAlchemy initializes the dialect with raises
+        NotImplementedError for it; both return None.
+        """
+        try:
+            info = getattr(connection, "info", None)
+        except NotImplementedError:
+            return None
+        return info if isinstance(info, dict) else None
+
+    @classmethod
+    def _statement_keyword(cls, statement: str) -> str:
+        """Return the statement's keyword, upper case: see :meth:`_statement_keyword_token`."""
+        token = cls._statement_keyword_token(statement)
+        return token.group(0).upper() if token else ""
+
+    @classmethod
+    def _statement_keyword_token(cls, statement: str) -> Optional[re.Match[str]]:
+        """Return the token of the statement's first keyword, past leading comments.
+
+        For ``WITH``, it is the keyword of the statement the common table expressions belong to: the first
+        SELECT, INSERT, UPDATE or DELETE outside parentheses.
+        """
+        tokens = cls._STATEMENT_TOKEN.finditer(statement, cls._LEADING_COMMENTS.match(statement).end())
+        first = next(tokens, None)
+        if first is None or first.group(0).upper() != "WITH":
+            return first
+        depth = 0
+        for token in tokens:
+            text = token.group(0)
+            if text == "(":
+                depth += 1
+            elif text == ")":
+                depth -= 1
+            elif depth == 0 and text.upper() in cls._DML_KEYWORDS | {"SELECT"}:
+                return token
+        return first
+
+    def _match_transaction_to(
+        self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext]
+    ) -> None:
+        """Open or commit the connection's StarRocks transaction as ``statement`` needs.
+
+        - On a ``READ COMMITTED`` connection the first INSERT, UPDATE or DELETE opens a transaction with BEGIN WORK,
+          which the SQLAlchemy commit or rollback ends. Reads open none.
+        - StarRocks refuses DDL inside a transaction, so DDL first commits the open one, as MySQL does.
+        - A BEGIN or START TRANSACTION sent as text is refused before StarRocks 3.5, which accepts it and ignores it.
+        - Text holding several statements is refused on a ``READ COMMITTED`` connection or with a transaction
+          open: see :meth:`_refuse_several_statements_in_transaction`.
+
+        A statement compiled from a construct is classified by the construct, and text by its first keyword.
+        """
+        if context is None:
+            return
+        info = self._pool_info(context.root_connection.connection)
+        if info is None:
+            return
+        self._refuse_several_statements_in_transaction(statement, context, info)
+        keyword = self._statement_keyword(statement)
+        if context.isinsert or context.isupdate or context.isdelete or keyword in self._DML_KEYWORDS:
+            self._open_transaction_for_dml(cursor, statement, keyword, context, info)
+        elif info.get(self._TRANSACTION_OPEN) and (context.isddl or keyword in self._DDL_KEYWORDS):
+            cursor.execute("COMMIT")
+            del info[self._TRANSACTION_OPEN]
+        elif self._TRANSACTION_START.match(statement, self._LEADING_COMMENTS.match(statement).end()):
+            self._require_transactions("A transaction (BEGIN)")
+
+    def _refuse_several_statements_in_transaction(
+        self, statement: str, context: ExecutionContext, info: Dict[str, Any]
+    ) -> None:
+        """Refuse text holding several statements on a ``READ COMMITTED`` connection or with a transaction open.
+
+        StarRocks runs each statement of such text, but the dialect can open, commit or refuse a transaction only
+        for the first, and the driver reads the later statements' results only when the cursor closes, where it
+        logs their errors instead of raising them. So ``SELECT 1; INSERT ...`` would commit its insert at once,
+        and a refused second statement would be dropped without an error. A DDL construct that compiles to several
+        statements commits the open transaction first, as any DDL does.
+        """
+        if context.isddl or not self._holds_several_statements(statement):
+            return
+        if info.get(self._TRANSACTION_OPEN) or not self._driver_autocommits(context.root_connection.connection):
+            raise exc.InvalidRequestError(
+                "Text holding several statements can't run on a READ COMMITTED connection or inside a transaction: "
+                "the dialect would open the transaction for the first statement only, and the driver drops the "
+                "errors of the others; execute each statement on its own"
+            )
+
+    @classmethod
+    def _holds_several_statements(cls, statement: str) -> bool:
+        """Return whether a statement is followed by another, past a ``;`` outside quotes and comments."""
+        ended = False
+        for token in cls._STATEMENT_TOKEN.finditer(statement):
+            text = token.group(0)
+            if text.startswith(("/*", "--", "#")):
+                continue
+            if text == ";":
+                ended = True
+            elif ended:
+                return True
+        return False
+
+    def _track_transaction_control(self, statement: str, context: Optional[ExecutionContext]) -> None:
+        """Note a BEGIN, START TRANSACTION, COMMIT or ROLLBACK sent as text, once StarRocks has accepted it.
+
+        So the SQLAlchemy commit and rollback, and DDL, see a transaction opened by hand on an ``AUTOCOMMIT``
+        connection. ``ROLLBACK TO`` a savepoint ends nothing.
+        """
+        info = self._pool_info(context.root_connection.connection) if context is not None else None
+        if info is None:
+            return
+        position = self._LEADING_COMMENTS.match(statement).end()
+        if self._TRANSACTION_START.match(statement, position):
+            info[self._TRANSACTION_OPEN] = True
+        elif self._TRANSACTION_END.match(statement, position):
+            info.pop(self._TRANSACTION_OPEN, None)
+
+    def _require_transactions(self, feature: str) -> None:
+        """Refuse a transaction before StarRocks 3.5, which accepts BEGIN WORK and commits each statement anyway."""
+        require_server_version(self, self._TRANSACTIONS_SINCE, feature, error=exc.InvalidRequestError)
+
+    def _open_transaction_for_dml(
+        self,
+        cursor: "DBAPICursor",
+        statement: str,
+        keyword: str,
+        context: ExecutionContext,
+        info: Dict[str, Any],
+    ) -> None:
+        """Open a transaction for a DML statement on a ``READ COMMITTED`` connection, unless one is open already.
+
+        A ``delete()`` without a WHERE clause compiles to TRUNCATE TABLE, which StarRocks runs outside any
+        transaction, so it is refused. ``INSERT INTO FILES`` writes files, not a table, and opens no transaction;
+        StarRocks can't run one inside a transaction, so with a transaction open it is refused.
+        """
+        transaction_open = bool(info.get(self._TRANSACTION_OPEN))
+        if not transaction_open and self._driver_autocommits(context.root_connection.connection):
+            return
+        if keyword == "TRUNCATE":
+            raise exc.InvalidRequestError(
+                "A delete() without a WHERE clause compiles to TRUNCATE TABLE, which StarRocks runs outside the "
+                "transaction; give it a WHERE clause, or run it on an AUTOCOMMIT connection"
+            )
+        writes_files = self._writes_files(statement)
+        if writes_files and transaction_open:
+            raise exc.InvalidRequestError(
+                "StarRocks can't run INSERT INTO FILES inside a transaction; run it before the transaction's first "
+                "INSERT, UPDATE or DELETE, or on an AUTOCOMMIT connection"
+            )
+        self._refuse_delete_escaping_transaction(cursor, statement, context)
+        if transaction_open or writes_files:
+            return
+        self._require_transactions("A transaction (isolation_level 'READ COMMITTED')")
+        cursor.execute("BEGIN WORK")
+        info[self._TRANSACTION_OPEN] = True
+
+    @classmethod
+    def _writes_files(cls, statement: str) -> bool:
+        """Return whether the statement is an ``INSERT INTO FILES(...)``, past any comment or optimizer hint."""
+        keyword = cls._statement_keyword_token(statement)
+        return keyword is not None and cls._INSERT_INTO_FILES.match(statement, keyword.start()) is not None
+
+    def _refuse_delete_escaping_transaction(
+        self, cursor: "DBAPICursor", statement: str, context: ExecutionContext
+    ) -> None:
+        """Refuse a DELETE that StarRocks would apply at once, outside the transaction.
+
+        StarRocks runs a DELETE on a DUPLICATE, AGGREGATE or UNIQUE KEY table as a job of its own, which ROLLBACK
+        does not undo (https://github.com/StarRocks/starrocks/issues/81471). Any other DELETE, on a table
+        information_schema doesn't list or on a view, is left for StarRocks to judge.
+        """
+        target = self._delete_target(statement, context)
+        if target is None:
+            return
+        table_name, schema = target
+        table_model = self._table_model(cursor, table_name, schema)
+        if table_model in self._KEYED_MODELS_WITHOUT_PRIMARY_KEY:
+            raise exc.InvalidRequestError(
+                f"StarRocks applies a DELETE on the {table_model} table {table_name!r} at once, outside the "
+                "transaction, and ROLLBACK does not undo it (https://github.com/StarRocks/starrocks/issues/81471); "
+                "delete from it on an AUTOCOMMIT connection instead"
+            )
+
+    @classmethod
+    def _delete_target(
+        cls, statement: str, context: Optional[ExecutionContext] = None
+    ) -> Optional[Tuple[str, Optional[str]]]:
+        """Return the (name, schema) of the table a DELETE deletes from, or None for other statements.
+
+        A ``delete()`` construct names its table, in the schema the ``schema_translate_map`` gives it. Text is read
+        from its DELETE keyword, after a WITH clause too, past comments and optimizer hints before the table, and a
+        catalog-qualified ``catalog.database.table`` gives the database as the schema. A text DELETE whose table
+        can't be read raises InvalidRequestError, since it might escape the transaction unnoticed.
+        """
+        if context is not None and context.isdelete:
+            table = context.compiled.statement.table
+            return table.name, cls._schema_as_executed(getattr(table, "schema", None), context)
+        keyword = cls._statement_keyword_token(statement)
+        if keyword is None or keyword.group(0).upper() != "DELETE":
+            return None
+        target = cls._DELETE_TARGET.match(statement, keyword.start())
+        if target is None:
+            raise exc.InvalidRequestError(
+                "The dialect can't read which table this DELETE deletes from, so it can't tell whether StarRocks "
+                "would apply it outside the transaction; name the table after FROM, or run the DELETE on an "
+                "AUTOCOMMIT connection"
+            )
+        names = [cls._unquote_identifier(name) for name in target.groups() if name]
+        return names[-1], names[-2] if len(names) > 1 else None
+
+    @staticmethod
+    def _schema_as_executed(schema: Optional[str], context: ExecutionContext) -> Optional[str]:
+        """Return the schema a construct's table has in the executed statement, after the ``schema_translate_map``."""
+        schema_translate_map = context.execution_options.get("schema_translate_map")
+        return schema_translate_map.get(schema, schema) if schema_translate_map else schema
+
+    @staticmethod
+    def _unquote_identifier(name: str) -> str:
+        """Return a backquoted identifier's name, undoubling its backquotes, or a bare one as it is."""
+        return name[1:-1].replace("``", "`") if name.startswith("`") else name
+
+    @staticmethod
+    def _table_model(cursor: "DBAPICursor", table_name: str, schema: Optional[str]) -> Optional[str]:
+        """Return the table's TABLE_MODEL from information_schema.tables_config, or None if it lists no such table."""
+        schema_condition = "TABLE_SCHEMA = %s" if schema is not None else "TABLE_SCHEMA = DATABASE()"
+        parameters = (schema, table_name) if schema is not None else (table_name,)
+        cursor.execute(
+            f"SELECT TABLE_MODEL FROM information_schema.tables_config WHERE {schema_condition} AND TABLE_NAME = %s",
+            parameters,
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def _wait_for_schema_change_blocking(
+        self, cursor: "DBAPICursor", statement: str, context: Optional[ExecutionContext]
+    ) -> None:
+        altered = self._table_altered_by(statement, context)
+        if altered is not None:
+            self.wait_while_schema_change_runs(cursor, *altered)
+
+    @classmethod
+    def _table_altered_by(
+        cls, statement: str, context: Optional[ExecutionContext]
+    ) -> Optional[Tuple[str, Optional[str]]]:
+        """Return the (name, schema) of the existing table a compiled DDL statement changes, if it changes one."""
+        if context is None or not context.isddl:
+            return None
+        ddl = context.compiled.statement
+        if isinstance(ddl, (sa_schema.CreateIndex, sa_schema.DropIndex)):
+            table = ddl.element.table
+            return (table.name, cls._schema_as_executed(table.schema, context)) if table is not None else None
+        if statement.lstrip()[:11].upper() != "ALTER TABLE":
+            return None
+        if isinstance(getattr(ddl, "table_name", None), str):
+            return ddl.table_name, cls._schema_as_executed(getattr(ddl, "schema", None), context)
+        element = getattr(ddl, "element", None)
+        if isinstance(element, Table):
+            return element.name, cls._schema_as_executed(element.schema, context)
+        return None
+
+    def wait_while_schema_change_runs(self, cursor: "DBAPICursor", table_name: str, schema: Optional[str]) -> None:
+        """Block until the table's newest COLUMN and OPTIMIZE jobs, if any is still running, have ended.
+
+        A job that ends CANCELLED counts as ended: the statement waiting for it reports its own errors.
+        """
+        quoted_name = table_name.replace("\\", "\\\\").replace("'", "\\'")
+        for kind in self._SCHEMA_CHANGE_JOB_KINDS:
+            query = self.gen_show_alter_table_statement(
+                quoted_name, kind, schema=schema, state=None, order_by="JobId DESC", limit=1
+            )
+            state = self._newest_job_state(cursor, query)
+            while state is not None and state not in self._SCHEMA_CHANGE_ENDED_STATES:
+                logger.info("Waiting for the %s job on table %r to end (state: %s).", kind, table_name, state)
+                self._pause(self._SCHEMA_CHANGE_POLL_SECONDS)
+                state = self._newest_job_state(cursor, query)
+
+    def _newest_job_state(self, cursor: "DBAPICursor", query: str) -> Optional[str]:
+        """Return the State of the job the query lists, or None when it lists none or fails.
+
+        A failure, such as an unknown database, is left for the statement that waits to report.
+        """
+        try:
+            cursor.execute(query)
+            row = cursor.fetchone()
+        except self.dbapi.Error:
+            return None
+        if row is None:
+            return None
+        names = [column[0] for column in cursor.description]
+        return row[names.index("State")] if "State" in names else None
+
+    def _pause(self, seconds: float) -> None:
+        time.sleep(seconds)
 
     def _get_server_version_info(self, connection: Connection) -> Tuple[int, ...]:
         # get database server version info explicitly over the wire
