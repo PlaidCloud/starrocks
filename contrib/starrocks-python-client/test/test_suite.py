@@ -42,7 +42,7 @@ from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.suite import *  # noqa: F403, I001
 from sqlalchemy.testing.suite import (
     ComponentReflectionTest as _ComponentReflectionTest,
-    CompositeKeyReflectionTest,
+    CompositeKeyReflectionTest as _CompositeKeyReflectionTest,
     CTETest as _CTETest,
     FetchLimitOffsetTest as _FetchLimitOffsetTest,
     JSONLegacyStringCastIndexTest as _JSONLegacyStringCastIndexTest,
@@ -604,6 +604,15 @@ class JSONLegacyStringCastIndexTest(_JSONLegacyStringCastIndexTest):
 
 
 FOR_UPDATE = testing.skip("starrocks", "StarRocks does not support SELECT ... FOR UPDATE")
+KEY_COLUMNS_IN_TABLE_ORDER = testing.skip(
+    "starrocks", "StarRocks keeps a table's key columns in the table's column order, not the constraint's"
+)
+
+
+class CompositeKeyReflectionTest(_CompositeKeyReflectionTest):
+    """The composite key is reflected, but in column order: StarRocks has no separate key column order."""
+
+    test_pk_column_order = KEY_COLUMNS_IN_TABLE_ORDER(_CompositeKeyReflectionTest.test_pk_column_order)
 
 
 class ServerSideCursorsTest(_ServerSideCursorsTest):
@@ -684,7 +693,6 @@ class ServerSideCursorsTest(_ServerSideCursorsTest):
         pass
 
 LongNameBlowoutTest.__requires__ = ("index_reflection",)  # This will do to make it skip for now, no multiple column index
-CompositeKeyReflectionTest.__requires__ = ('primary_key_constraint_reflection',) # This will make it also skip the fixture which is not creating succesfully
 if not IS_SQLALCHEMY_2:
     HasIndexTest.__requires__ = ('index_reflection',)
 

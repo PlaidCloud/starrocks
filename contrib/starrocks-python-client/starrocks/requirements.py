@@ -67,8 +67,8 @@ class Requirements(SuiteRequirements, AlembicSuiteRequirements):
 
     @property
     def primary_key_constraint_reflection(self):
-        # ToDo - open when multi-column index is supported
-        return exclusions.closed()
+        """PRIMARY KEY, UNIQUE KEY and AGGREGATE KEY tables reflect their key as the primary key."""
+        return exclusions.open()
 
     @property
     def foreign_key_constraint_reflection(self):
