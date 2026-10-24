@@ -15,6 +15,7 @@
 """How the dialect compiles Alembic's MySQL column-alter elements: MODIFY COLUMN, CHANGE COLUMN and ALTER DEFAULT."""
 
 from alembic import op
+from alembic.ddl.base import ColumnName
 from alembic.ddl.mysql import MySQLAlterDefault, MySQLChangeColumn, MySQLModifyColumn
 from alembic.testing.fixtures import op_fixture
 from sqlalchemy import exc, testing, text
@@ -22,7 +23,7 @@ from sqlalchemy.testing import expect_raises_message, fixtures
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 
 import starrocks.alembic  # noqa: F401
-from starrocks.datatype import INTEGER, STRING
+from starrocks.datatype import BIGINT, DATETIME, INTEGER, STRING
 from starrocks.dialect import StarRocksDialect
 
 
@@ -75,21 +76,33 @@ class AlterColumnCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "ALTER TABLE `my schema`.`order` MODIFY COLUMN `select` INTEGER NOT NULL",
         )
 
-    def test_modify_autoincrement(self):
-        self.assert_compile(
+    def test_modify_autoincrement_is_refused(self):
+        """StarRocks answers "Column 'c' can not be AUTO_INCREMENT when MODIFY COLUMN"."""
+        with expect_raises_message(exc.CompileError, "cannot set AUTO_INCREMENT in MODIFY COLUMN"):
             MySQLModifyColumn(
                 "t", "c", schema=None, type_=INTEGER(), nullable=False, default=False, autoincrement=True, comment=False
+            ).compile(dialect=self.__dialect__)
+
+    def test_change_to_the_same_name_is_a_modify(self):
+        """Alembic's MySQL impl sends every DATETIME change as a CHANGE COLUMN to the column's own name."""
+        self.assert_compile(
+            MySQLChangeColumn(
+                "t",
+                "d",
+                schema=None,
+                newname="d",
+                type_=DATETIME(),
+                nullable=True,
+                default=False,
+                autoincrement=None,
+                comment="when",
             ),
-            "ALTER TABLE t MODIFY COLUMN c INTEGER NOT NULL AUTO_INCREMENT",
+            "ALTER TABLE t MODIFY COLUMN d DATETIME NULL COMMENT 'when'",
         )
 
-    def test_change_rename_only(self):
-        """Alembic always passes the column type to CHANGE COLUMN, so a rename also emits a MODIFY COLUMN.
-
-        StarRocks rejects MODIFY and RENAME in one statement; ``test_suite_alembic.BackendAlterColumnTest``
-        marks the resulting failure, and this expectation changes when the dialect is fixed.
-        """
-        self.assert_compile(
+    def test_change_that_renames_and_modifies_is_refused(self):
+        """StarRocks refuses MODIFY COLUMN and RENAME COLUMN in one ALTER TABLE."""
+        with expect_raises_message(exc.CompileError, "cannot MODIFY and RENAME column 'old' in one ALTER TABLE"):
             MySQLChangeColumn(
                 "t",
                 "old",
@@ -100,25 +113,10 @@ class AlterColumnCompileTest(fixtures.TestBase, AssertsCompiledSQL):
                 default=False,
                 autoincrement=None,
                 comment=False,
-            ),
-            "ALTER TABLE t MODIFY COLUMN old INTEGER NULL, RENAME COLUMN old TO new",
-        )
+            ).compile(dialect=self.__dialect__)
 
-    def test_change_rename_and_modify(self):
-        self.assert_compile(
-            MySQLChangeColumn(
-                "t",
-                "old",
-                schema=None,
-                newname="new",
-                type_=INTEGER(),
-                nullable=False,
-                default="0",
-                autoincrement=None,
-                comment="changed",
-            ),
-            "ALTER TABLE t MODIFY COLUMN old INTEGER NOT NULL DEFAULT '0' COMMENT 'changed', RENAME COLUMN old TO new",
-        )
+    def test_rename_column(self):
+        self.assert_compile(ColumnName("t", "old", "new", schema="s"), "ALTER TABLE s.t RENAME COLUMN old TO new")
 
     @testing.combinations(
         ("literal", "abc"),
@@ -159,3 +157,46 @@ class AlterColumnDefaultOperationTest(fixtures.TestBase):
         context = op_fixture("starrocks")
         op.alter_column("t", "c", type_=INTEGER(), existing_server_default="y", nullable=True)
         context.assert_("ALTER TABLE t MODIFY COLUMN c INTEGER NULL DEFAULT 'y'")
+
+
+class AlterColumnAutoincrementOperationTest(fixtures.TestBase):
+    """``op.alter_column`` leaves an unchanged AUTO_INCREMENT out of MODIFY COLUMN and refuses a changed one."""
+
+    def test_unchanged_autoincrement_is_left_out(self):
+        context = op_fixture("starrocks")
+        op.alter_column("t", "id", comment="key", existing_type=BIGINT(), existing_nullable=False,
+                        autoincrement=True, existing_autoincrement=True)
+        context.assert_("ALTER TABLE t MODIFY COLUMN id BIGINT NOT NULL COMMENT 'key'")
+
+    @testing.combinations((True, False), (False, True), argnames="autoincrement,existing")
+    def test_changed_autoincrement_is_refused(self, autoincrement, existing):
+        op_fixture("starrocks")
+        with expect_raises_message(exc.CompileError, "AUTO_INCREMENT on column 'id'"):
+            op.alter_column("t", "id", existing_type=BIGINT(), existing_nullable=False,
+                            autoincrement=autoincrement, existing_autoincrement=existing)
+
+    @testing.combinations((True,), (False,), argnames="autoincrement")
+    def test_autoincrement_without_existing_is_refused_without_a_database(self, autoincrement):
+        op_fixture("starrocks")
+        with expect_raises_message(exc.CompileError, "pass existing_autoincrement"):
+            op.alter_column("t", "id", comment="key", existing_type=BIGINT(), existing_nullable=False,
+                            autoincrement=autoincrement)
+
+
+class AlterColumnRenameOperationTest(fixtures.TestBase):
+    """``op.alter_column(new_column_name=...)`` renames in an ALTER TABLE of its own, after any other change."""
+
+    def test_rename_alone(self):
+        context = op_fixture("starrocks")
+        op.alter_column("t", "old", new_column_name="new", existing_type=INTEGER())
+        context.assert_("ALTER TABLE t RENAME COLUMN old TO new")
+
+    def test_rename_with_a_type_change_modifies_first(self):
+        context = op_fixture("starrocks")
+        op.alter_column("t", "old", new_column_name="new", type_=INTEGER(), nullable=True, schema="s")
+        context.assert_("ALTER TABLE s.t MODIFY COLUMN old INTEGER NULL", "ALTER TABLE s.t RENAME COLUMN old TO new")
+
+    def test_a_datetime_comment_change_is_a_modify(self):
+        context = op_fixture("starrocks")
+        op.alter_column("t", "d", comment="when", existing_type=DATETIME(), existing_nullable=True)
+        context.assert_("ALTER TABLE t MODIFY COLUMN d DATETIME NULL COMMENT 'when'")

@@ -19,14 +19,21 @@ from textwrap import dedent
 from typing import Any, Collection, Dict, Final, List, Optional, Tuple, Union
 from typing import TYPE_CHECKING, Any, Collection, Dict, Final, List, Optional, Tuple, Type, Union
 
-from alembic.ddl.base import alter_table, format_column_name, format_server_default, format_table_name
+from alembic.ddl.base import (
+    ColumnName,
+    RenameTable,
+    alter_table,
+    format_column_name,
+    format_server_default,
+    format_table_name,
+)
 from alembic.ddl.mysql import (
     MySQLAlterDefault,
     MySQLChangeColumn,
     MySQLModifyColumn,
 )
 from alembic.operations.ops import AlterColumnOp
-from alembic.util.sqla_compat import compiles
+from alembic.util.sqla_compat import _literal_bindparam, compiles
 from sqlalchemy import (
     Column,
     Table,
@@ -128,6 +135,7 @@ from .sql.ddl import (
     CreateView,
     DropMaterializedView,
     DropView,
+    group_properties_for_set,
 )
 
 
@@ -765,6 +773,35 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             self.quoted_property_pair(key, value) for key, value in properties.items()
         )
 
+    def visit_add_constraint(self, create: sa_schema.AddConstraint, **kw: Any) -> str:
+        """Refuse ``ADD CONSTRAINT``, which StarRocks does not have, rather than send it to the server."""
+        raise exc.CompileError(self._unholdable_constraint_message(create.element, "add"))
+
+    def visit_drop_constraint(self, drop: sa_schema.DropConstraint, **kw: Any) -> str:
+        """Refuse ``DROP CONSTRAINT``: a StarRocks table has no constraint to drop."""
+        raise exc.CompileError(self._unholdable_constraint_message(drop.element, "drop"))
+
+    @staticmethod
+    def _unholdable_constraint_message(constraint: sa_schema.Constraint, action: str) -> str:
+        """Explain why StarRocks cannot add or drop a constraint, and what it offers instead."""
+        name = f" {constraint.name!r}" if constraint.name else ""
+        if isinstance(constraint, sa_schema.PrimaryKeyConstraint):
+            return (
+                f"StarRocks cannot {action} primary key{name}: a table's key is fixed when the table is created, "
+                "with starrocks_primary_key or another starrocks_*_key"
+            )
+        if isinstance(constraint, sa_schema.UniqueConstraint):
+            return (
+                f"StarRocks cannot {action} unique constraint{name}: use a PRIMARY KEY or UNIQUE KEY table, "
+                "or the unique_constraints table property"
+            )
+        if isinstance(constraint, sa_schema.ForeignKeyConstraint):
+            return (
+                f"StarRocks cannot {action} foreign key{name}: the foreign_key_constraints table property "
+                "records foreign keys for the optimizer"
+            )
+        return f"StarRocks cannot {action} constraint{name}: its tables hold no constraints besides their key"
+
     def _indexed_column_name(self, index: sa_schema.Index, expression: Any) -> str:
         """Return the quoted name of an indexed column, refusing expressions, which StarRocks cannot index."""
         if not isinstance(expression, sa_schema.Column):
@@ -1227,6 +1264,7 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
             type_: sqltypes.TypeEngine,
             autoincrement: Optional[bool],
             comment: Optional[Any],
+            key_or_aggregate: Optional[str] = None,
              **kw: Any) -> str:
         """Builds ALTER COLUMN DDL for StarRocks, handling StarRocks-specific features.
 
@@ -1245,8 +1283,9 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
 
         Args:
             column: The `sqlalchemy.schema.Column` object to process.
+            key_or_aggregate: ``KEY`` for a key column, or a value column's aggregate type, which StarRocks wants
+                after the type of a MODIFY COLUMN. The Alembic impl reads it from the database.
             **kw: Additional keyword arguments from the compiler.
-                - aggregate info should be stored here. But, it's not passed now.
 
         Returns:
             The DDL string for the alter column definition, without name.
@@ -1257,18 +1296,19 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         if type_:
             type_: str = self.dialect.type_compiler.process(type_)
             colspec.append(type_)
-
-            # Get and set column-level aggregate information for aggregate key tables.
-            # TODO: But currently it's not supported. we need to implement it.
-            # if agg_info := self._get_column_agg_info(column):
-            #     colspec.append(agg_info)
+            if key_or_aggregate:
+                colspec.append(key_or_aggregate)
 
         # NULL or NOT NULL.
         if nullable is not None:
             colspec.append("NULL" if nullable else "NOT NULL")
 
         if autoincrement:
-            colspec.append("AUTO_INCREMENT")
+            raise exc.CompileError(
+                f"StarRocks cannot set AUTO_INCREMENT in MODIFY COLUMN (column {name!r}); "
+                "op.alter_column leaves an unchanged AUTO_INCREMENT out, which StarRocks 4.1 keeps (3.3 and 3.5 "
+                "refuse any MODIFY COLUMN of an AUTO_INCREMENT column)"
+            )
         # DEFAULT: include if provided (even if 0 or empty string), but not when False
         elif default is not False and default is not None:
             default = format_server_default(self, default)
@@ -1726,15 +1766,17 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
         """Compile ALTER TABLE SET (...) DDL for StarRocks.
 
         Note:
-            Currently, SR only support one property in an ALTER TABLE SET statement.
-            So, we will generate multiple ALTER TABLE SET statements if there are multiple properties.
+            SR supports one property in an ALTER TABLE SET statement, except for the ones sharing the
+            ``dynamic_partition.`` or ``binlog_`` prefix. So, we will generate a SET statement for each
+            group of properties from `group_properties_for_set`.
         """
         table_name = format_table_name(self, alter.table_name, alter.schema)
-        # logger.debug("ALTER TABLE %r SET (%s)", table_name, alter.properties)
 
         multi_set_statement = "; ".join(
-            f"ALTER TABLE {table_name} SET ({self.quoted_property(k)} = {self.quoted_property(v)})"
-            for k, v in alter.properties.items()
+            f"ALTER TABLE {table_name} SET ("
+            + ", ".join(self.quoted_property_pair(k, v) for k, v in group.items())
+            + ")"
+            for group in group_properties_for_set(alter.properties)
         )
         logger.debug("Compiled SQL for AlterTableProperties: \n%s", multi_set_statement)
         return multi_set_statement
@@ -2693,6 +2735,7 @@ TODO: Then, we can add more StarRocks specific attributes, such as KEY/agg_type.
 
 @compiles(MySQLModifyColumn, DialectName)
 def _starrocks_modify_column(element: MySQLModifyColumn, compiler: StarRocksDDLCompiler, **kw: Any) -> str:
+    """Compile MODIFY COLUMN, with the ``KEY`` or aggregate type the Alembic impl found for the column, if any."""
     return "%s MODIFY COLUMN %s %s" % (
         alter_table(compiler, element.table_name, element.schema),
         format_column_name(compiler, element.column_name),
@@ -2703,24 +2746,28 @@ def _starrocks_modify_column(element: MySQLModifyColumn, compiler: StarRocksDDLC
             type_=element.type_,
             autoincrement=element.autoincrement,
             comment=element.comment,
+            key_or_aggregate=getattr(element, KEY_OR_AGGREGATE_ATTRIBUTE, None),
         ),
     )
 
 
+KEY_OR_AGGREGATE_ATTRIBUTE: Final[str] = "starrocks_key_or_aggregate"
+"""The attribute of a MODIFY or CHANGE COLUMN element that holds the column's ``KEY`` or aggregate type."""
+
+
 @compiles(MySQLChangeColumn, DialectName)
 def _starrocks_change_column(element: MySQLChangeColumn, compiler: StarRocksDDLCompiler, **kw: Any) -> str:
-    """
-    It's a must for RENAMEing a column, because MODIFY COLUMN does not support changing the name.
-    And in StarRocks, there should be two alter clauses if both RENAME and MODIFY
+    """Compile MySQL's CHANGE COLUMN as StarRocks' MODIFY COLUMN, or its RENAME COLUMN.
 
-    NOTE: Currently, MySQL will pass column_type even for RENAME COLUMN. SO, it will also generate
-    an MODIFY COLUMN clause, because we don't know whether the column_type is changed, and StarRocks
-    doesn't support CHANGE COLUMN.
+    StarRocks has no CHANGE COLUMN, and refuses MODIFY COLUMN and RENAME COLUMN in one ALTER TABLE, so a
+    CHANGE that does both raises; ``op.alter_column`` sends the two separately. Alembic's MySQL impl sends a
+    CHANGE to the same name for every DATETIME column, which is a MODIFY alone.
     """
+    renamed = element.newname is not None and element.newname != element.column_name
     rename_clause = "RENAME COLUMN %s TO %s" % (
         format_column_name(compiler, element.column_name),
         format_column_name(compiler, element.newname),
-    ) if element.newname else None
+    ) if renamed else None
 
     modify_clause = "MODIFY COLUMN %s %s" % (
         format_column_name(compiler, element.column_name),
@@ -2731,6 +2778,7 @@ def _starrocks_change_column(element: MySQLChangeColumn, compiler: StarRocksDDLC
             type_=element.type_,
             autoincrement=element.autoincrement,
             comment=element.comment,
+            key_or_aggregate=getattr(element, KEY_OR_AGGREGATE_ATTRIBUTE, None),
         ),
     ) if (element.nullable is not None
             or element.type_ is not None
@@ -2740,11 +2788,30 @@ def _starrocks_change_column(element: MySQLChangeColumn, compiler: StarRocksDDLC
 
     alter_claus_header: str = alter_table(compiler, element.table_name, element.schema)
     if rename_clause and modify_clause:
-        return "%s %s, %s" % (alter_claus_header, modify_clause, rename_clause)
-    elif rename_clause:
-        return "%s %s" % (alter_claus_header, rename_clause)
-    else:
-        return "%s %s" % (alter_claus_header, modify_clause)
+        raise exc.CompileError(
+            f"StarRocks cannot MODIFY and RENAME column {element.column_name!r} in one ALTER TABLE; "
+            "op.alter_column sends them separately"
+        )
+    return "%s %s" % (alter_claus_header, rename_clause or modify_clause)
+
+
+@compiles(ColumnName, DialectName)
+def _starrocks_rename_column(element: ColumnName, compiler: StarRocksDDLCompiler, **kw: Any) -> str:
+    """StarRocks renames a column with ``RENAME COLUMN``, where Alembic's default leaves out ``COLUMN``."""
+    return "%s RENAME COLUMN %s TO %s" % (
+        alter_table(compiler, element.table_name, element.schema),
+        format_column_name(compiler, element.column_name),
+        format_column_name(compiler, element.newname),
+    )
+
+
+@compiles(RenameTable, DialectName)
+def _starrocks_rename_table(element: RenameTable, compiler: StarRocksDDLCompiler, **kw: Any) -> str:
+    """StarRocks renames with ``ALTER TABLE t RENAME new_name``: there is no ``TO``, and the new name is unqualified."""
+    return "%s RENAME %s" % (
+        alter_table(compiler, element.table_name, element.schema),
+        format_table_name(compiler, element.new_table_name, None),
+    )
 
 
 @compiles(MySQLAlterDefault, DialectName)
@@ -2756,6 +2823,25 @@ def _starrocks_alter_default(element: MySQLAlterDefault, compiler: StarRocksDDLC
     StarRocks rejects it with "Column's type is null" even before it reaches the real limitation.
     """
     raise column_default_change_error(element.table_name, element.column_name)
+
+
+@compiles(_literal_bindparam, DialectName)
+def _starrocks_inline_literal(
+    element: _literal_bindparam,
+    compiler: StarRocksSQLCompiler,
+    skip_bind_expression: bool = False,
+    **kw: Any,
+) -> str:
+    """Render an Alembic inline literal inside its type's bind expression, as SQLAlchemy renders a literal bind.
+
+    Alembic renders ``op.inline_literal`` and, in offline mode, each value of ``op.bulk_insert`` as this
+    construct, and compiles it to the literal alone. An ARRAY, MAP or STRUCT literal is the JSON document that
+    its bind expression builds the value from, and the server cast the bare document to NULLs.
+    """
+    impl = element.type.dialect_impl(compiler.dialect)
+    if not skip_bind_expression and impl._has_bind_expression:
+        return compiler.process(impl.bind_expression(element), skip_bind_expression=True, **kw)
+    return compiler.render_literal_bindparam(element, **kw)
 
 
 def column_default_change_error(table_name: str, column_name: str) -> exc.CompileError:
