@@ -28,6 +28,7 @@ issues where:
 import logging
 
 from sqlalchemy import TIMESTAMP, Column, MetaData, Table, Text, UnicodeText, select, text
+from sqlalchemy.dialects import mysql
 from sqlalchemy.engine import Connection
 from sqlalchemy.testing import fixtures
 
@@ -190,6 +191,24 @@ class DataTypeReflectionTest(fixtures.TestBase):
         # Check lengths
         assert reflected_table.c.char_col.type.length == 10
         assert reflected_table.c.varchar_col.type.length == 255
+
+    def test_mysql_national_char_creates_a_char_column(self, connection):
+        """StarRocks refuses NATIONAL CHAR, which MySQL's compiler renders for its NCHAR and national CHAR."""
+        table_name = "test_reflect_national_char"
+        table = Table(
+            table_name,
+            MetaData(),
+            Column("id_col", INTEGER()),
+            Column("nchar_col", mysql.NCHAR(5)),
+            Column("national_col", mysql.CHAR(6, national=True)),
+            starrocks_distributed_by='HASH(id_col)',
+            starrocks_properties={"replication_num": "1"},
+        )
+
+        reflected_table = self._create_and_reflect_table(connection, table_name, table)
+
+        columns = [reflected_table.c.nchar_col, reflected_table.c.national_col]
+        assert [(type(column.type), column.type.length) for column in columns] == [(CHAR, 5), (CHAR, 6)]
 
     def test_reflect_binary_types(self, connection):
         """Test reflection of binary data types"""

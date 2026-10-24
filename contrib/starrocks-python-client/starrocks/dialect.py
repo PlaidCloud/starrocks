@@ -300,6 +300,14 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
         """StarRocks has no NATIONAL CHAR; its CHAR is UTF-8 already, as NVARCHAR's VARCHAR is."""
         return self.visit_CHAR(type_, **kw)
 
+    def visit_CHAR(self, type_: sqltypes.CHAR, **kw: Any) -> str:
+        """Render ``CHAR(n)`` or ``CHAR`` alone, as :meth:`visit_VARCHAR` renders VARCHAR.
+
+        MySQL's compiler adds NATIONAL for ``mysql.NCHAR`` and ``CHAR(national=True)``, and COLLATE or BINARY for
+        a collation, all of which StarRocks refuses in a column definition.
+        """
+        return "CHAR" if type_.length is None else f"CHAR({type_.length})"
+
     def visit_TEXT(self, type_: sqltypes.Text, **kw: Any) -> str:
         """StarRocks stores TEXT as varchar(65533), which is what STRING means."""
         return "STRING"
