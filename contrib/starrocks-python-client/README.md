@@ -16,6 +16,23 @@ pip install starrocks
 
 Python >= 3.10, <= 3.14
 
+#### Supported StarRocks Versions
+
+StarRocks 3.3.3 or later; the dialect is tested on 3.3.22, 3.5.21 and 4.1.6. A few features need a later version, and on an older server the dialect refuses them with a `CompileError`:
+
+| Feature | Needs |
+|---|---|
+| View `starrocks_security` | 3.4.1 |
+| `VARIANT` columns | 4.1 |
+
+Older versions also differ in ways the dialect handles for you:
+
+- Before 4.0.6, StarRocks stores a view's SQL in its own canonical form; autogenerate canonicalizes the model's SQL the same way before comparing.
+- `@@run_mode` exists from 4.0.7. Older servers report the run mode only through `ADMIN SHOW FRONTEND CONFIG`, which needs the OPERATE privilege; without it the dialect assumes shared-nothing.
+- Some table properties are newer than 3.3: `compaction_strategy` (4.0), `enable_statistic_collect_on_first_load` (3.5.10 and 4.0.2), and `bucket_size` defaults to 4 GiB before 4.0 and 1 GiB from 4.0. Declare only the properties your servers know.
+
+Views, materialized views and the `starrocks+asyncmy` driver need SQLAlchemy 2.0. On SQLAlchemy 1.4 the dialect covers tables, types, queries and reflection, and Alembic autogenerate compares tables and leaves the database's views and materialized views alone, with a warning that names them.
+
 #### Using a Virtual Environment (Recommended)
 
 It is highly recommended to install `starrocks` in a virtual environment to avoid conflicts with system-wide packages.
@@ -60,6 +77,8 @@ starrocks+asyncmy://<User>:<Password>@<Host>:<Port>/[<Catalog>.]<Database>
 
 > Note: The `Catalog` can be omitted and is managed by StarRocks.
 > The default is `default_catalog`.
+
+Connections autocommit by default, as StarRocks does. Pass `isolation_level="READ COMMITTED"` to `create_engine` to run INSERT, UPDATE and DELETE in StarRocks transactions; see [Transactions](./docs/usage_guide/sqlalchemy.md#transactions).
 
 ### Example: Basic Operations
 
@@ -208,7 +227,7 @@ Refer to [generating models](./docs/usage_guide/alembic.md#Generating-models-fro
 #### 1. Install and Initialize Alembic
 
 ```bash
-pip install "alembic>=1.16"
+pip install "alembic>=1.14"
 alembic init alembic
 ```
 
@@ -282,102 +301,104 @@ For a full tutorial on advanced topics like data migrations, handling complex ty
 
 ### Tests
 
-#### Running Unit Tests
+Every test runs under [SQLAlchemy's testing plugin](https://github.com/sqlalchemy/sqlalchemy/blob/main/README.dialects.rst), against a running StarRocks cluster. A single `pytest` run covers the StarRocks tests in `test/sql`, `test/unit`, `test/integration` and `test/system`, SQLAlchemy's dialect compliance suite (`test/test_suite.py`) and Alembic's dialect suite (`test/test_suite_alembic.py`).
 
-To run tests for the StarRocks SQLAlchemy dialect, first install the package in editable mode along with its testing dependencies:
+#### Setting Up
+
+Install the package in editable mode with its test and Alembic dependencies:
 
 ```bash
-pip install -e .
-pip install pytest mock
+pip install -e ".[test,alembic]"
 ```
 
-Then, you can run the test suite using `pytest`:
+Create the database the tests use, and the two extra schemas SQLAlchemy's suite needs:
+
+```SQL
+CREATE DATABASE IF NOT EXISTS test_sqla;
+CREATE DATABASE IF NOT EXISTS test_schema;
+CREATE DATABASE IF NOT EXISTS test_schema_2;
+
+-- set it if you're testing on a small shared-nothing cluster
+ADMIN SET FRONTEND CONFIG ("default_replication_num" = "1");
+```
+
+The connection URL is taken from, in order of precedence:
+
+1. `--dburi starrocks://<User>:<Password>@<Host>:<Port>/<Database>` on the command line;
+2. the `STARROCKS_URL` environment variable;
+3. a `[db]` section with a `default` URL in a git-ignored `test.cfg` next to `setup.cfg`;
+4. `setup.cfg`'s `[db] default`, which is `starrocks://root@localhost:9030/test_sqla`.
+
+#### Running the Tests
+
+Run `pytest` from this directory:
 
 ```bash
 pytest
 ```
 
-This will run the standard SQLAlchemy dialect test suite as well as StarRocks-specific tests. For more details, please check [SQLAlchemy's guide for dialect development](https://github.com/sqlalchemy/sqlalchemy/blob/main/README.dialects.rst).
+`pyproject.toml` runs the tests on four `pytest-xdist` workers. Each worker gets its own databases, created from the configured one and dropped at the end, so the workers do not interfere; pass `-n0` to run serially against the configured database. The system tests keep Alembic's scripts in a `scratch` directory here (`scratch_<worker>` under `pytest-xdist`), so do not run two serial runs from this directory at once.
 
-#### Test Logging
+Every test needs a reachable cluster, the ones in `test/sql` and `test/unit` included, because the plugin connects when the session starts.
 
-To see the raw SQL that the dialect compiles and executes during tests, you can modify the `[tool.pytest.ini_options]` section in the `pyproject.toml` file in your project with the following content:
+Tests that StarRocks itself cannot support are skipped. Tests that fail because of a known dialect bug are marked `fails_on`, or `fails_if` with a condition, and the reason, so a fix shows up as an unexpected pass. Such a test is reported as passed when it fails as expected; run with `-s` to see each "failed as expected" line and its reason.
 
-```ini
-[tool.pytest.ini_options]
-log_cli = true
-log_cli_level = DEBUG
-log_cli_format = %(levelname)-5.5s [%(name)s] %(message)s
+The tests run on SQLAlchemy 2.0 and 1.4, and were last run on 2.0.55 and 1.4.54. On 1.4, SQLAlchemy's compliance suite and the compile, reflection, comparison and rendering tests run; Alembic's suite, the system tests, and the tests that build `View` or `MaterializedView` objects or need SQLAlchemy 2.0's inspector need SQLAlchemy 2.0 and are skipped.
+
+SQLAlchemy 2.1 is untested, so the `test` extra installs SQLAlchemy below 2.1. SQLAlchemy 2.1.6 adds suite tests that the dialect does not pass yet.
+
+#### Running Part of the Tests
+
+Give `pytest` a directory, a module, a class or a test:
+
+```bash
+pytest test/sql
+pytest test/unit/test_compare_tables.py
+pytest test/unit/test_compare_tables.py::BucketSizeTest
+pytest test/unit/test_compare_tables.py::BucketSizeTest::test_explicit_change_detected
 ```
 
-#### Running Integration and System Tests
+The last one runs every combination of that test. A single combination has its parameters in brackets, as in `test_explicit_change_detected[1073741824-2147483648]`.
 
-To run the integration and system tests, you must have a running StarRocks cluster. The tests require a connection URL to be provided via the `STARROCKS_URL` environment variable.
+The plugin renames each class that runs against the database (one with `__backend__ = True`, which covers nearly every class in the two suites) after the driver and the server version, for example `ComponentReflectionTest_starrocks+pymysql_4_1_6`. Select those with `-k` rather than by node ID:
 
-1. **Set up your StarRocks database:**
-   Ensure your StarRocks instance is running and you have a database available for testing (e.g., `test_sqla`).
+```bash
+pytest test/test_suite.py -k "ComponentReflectionTest and test_get_table_names"
+pytest test/integration/test_reflection_table.py -k ReflectionTableOptionsTest
+```
 
-   ```SQL
-   CREATE DATABASE IF NOT EXISTS test_sqla;
+`pytest --collect-only -qq` lists the node IDs. For a short run, `-n0` saves starting the four workers, and `-x` stops at the first failure.
 
-   -- set it if you're testing cases on small shared-nothing clusters
-   ADMIN SET FRONTEND CONFIG ("default_replication_num" = "1");
-   ```
+#### Test Layout
 
-2. **Configure the connection URL:**
-   Set the `STARROCKS_URL` environment variable in your shell. The format should be:
+| Path | What it covers |
+| --- | --- |
+| `test/sql` | Compiling DDL and DML with `assert_compile`; a few classes also run what they compile against the server |
+| `test/unit` | Parsing, reflection helpers, the defaults tables, and Alembic comparison and rendering, without executing SQL |
+| `test/integration` | Reflection, result processing and Alembic autogenerate comparison, against tables the tests create |
+| `test/system` | Alembic revisions end to end (autogenerate, upgrade and downgrade), each test in a fresh database |
+| `test/test_suite.py` | SQLAlchemy's dialect compliance suite |
+| `test/test_suite_alembic.py` | Alembic's dialect suite |
 
-   ```bash
-   export STARROCKS_URL="starrocks://<User>:<Password>@<Host>:<Port>/<Database>"
-   ```
+The shared pieces:
 
-   For example (the default url will be this if you don't set it):
+- `test/conftest.py` loads the plugin and fails collection for any test the plugin would otherwise drop.
+- `starrocks/requirements.py` holds the `Requirements` class. Both suites consult it, and so do `__requires__` and `testing.requires.<name>` in the StarRocks tests.
+- A skip or `fails_on` mark is a module-level constant named after its cause. It is defined at the top of the module that uses it, or in `test/util.py` when several modules share it. `test/util.py` also holds the shared helpers.
+- `test/system/lifecycle.py` holds the base class and helpers for the system tests.
 
-   ```bash
-   export STARROCKS_URL="starrocks://root@127.0.0.1:9030/test_sqla"
-   ```
+#### Writing Tests
 
-3. **Run the tests:**
-   With the development environment set up and the environment variable configured, you can run the tests using `pytest`:
+Tests are classes derived from `sqlalchemy.testing.fixtures.TestBase`, with methods named `test_*`. The plugin silently ignores anything else, so collection fails for a module-level test function, a test method not named `test_*`, or a class of any name that has test methods but does not derive from `TestBase`; give a mixin a name that starts with `_`. Use `AssertsCompiledSQL` and `__dialect__` for compile tests, the `connection` and `metadata` fixtures for database tests, and `testing.combinations` for parametrized cases.
 
-   ```bash
-   pytest
-   ```
+#### Plugin Options and Logging
 
-#### Running the Full SQLAlchemy Test Suite
+SQLAlchemy's plugin adds its own options, which `pytest --help` lists. Besides `--dburi`, these are the useful ones:
 
-In addition to the StarRocks-specific tests, you can run the comprehensive test suite provided by SQLAlchemy to ensure full compatibility. To do this, you need to enable the SQLAlchemy test plugin in `test/conftest.py`.
+- `--dropfirst` drops the materialized views, views and tables earlier runs left in the configured database and the two extra schemas, for example after an interrupted `-n0` run.
+- `--log-info=sqlalchemy.engine` logs each statement the tests execute, and `--log-debug=sqlalchemy.engine` adds the rows. `pyproject.toml` turns on pytest's live log at INFO, so they show as the tests run.
 
-1. **Enable the SQLAlchemy test plugin:**
-   Open the file `test/conftest.py` and uncomment the line that imports from `sqlalchemy.testing.plugin.pytestplugin`.
-
-   ```python
-   # test/conftest.py
-
-   # ... other imports
-
-   # To run the test_suite.py and full SQLAlchemy test suite, uncomment the following line:
-   from sqlalchemy.testing.plugin.pytestplugin import *
-   ```
-
-   > NOTE: If you enable this line, StarRocks-specific tests will not run. We will modify the StarRocks-specific tests using SQLAlchemy's test framework in the future.
-
-   You can enable SQLAlchemy's tests from the file `test/test_suite.py` by uncomment the following line:
-
-   ```python
-   # To run the full SQLAlchemy test suite, uncomment the following line:
-   from sqlalchemy.testing.suite import *
-   ```
-
-2. **Run the tests:**
-
-   ```bash
-   pytest test/test_suite.py
-   ```
-
-This will run the standard SQLAlchemy dialect test suite as well as StarRocks-specific tests. For more details, please check [SQLAlchemy's guide for dialect development](https://github.com/sqlalchemy/sqlalchemy/blob/main/README.dialects.rst).
-
-**Note:** After running the full suite, it's good practice to re-comment the line in `test/conftest.py` to keep standard test runs focused on the dialect-specific tests.
+For the dialect's own debug messages too, add `--log-cli-level=DEBUG`.
 
 ### Build and Deploy
 

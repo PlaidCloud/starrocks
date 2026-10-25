@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, Union
 from sqlalchemy import schema as sa_schema
 from sqlalchemy.exc import StatementError
 
-from starrocks.common.params import DialectName
+from starrocks.common.params import DialectName, TableInfoKey
 from starrocks.engine.interfaces import ReflectedDistributionInfo, ReflectedPartitionInfo, ReflectedTableKeyInfo
 
 
@@ -95,6 +95,33 @@ def extract_dialect_options_as_case_insensitive(
     return CaseInsensitiveDict({k: v for k, v in raw_opts.items() if v is not None})
 
 
+def implied_primary_key_columns(table: sa_schema.Table) -> Optional[List[str]]:
+    """Return the primary key columns, in key order, of a table that names no StarRocks key model.
+
+    The key comes from ``primary_key=True`` columns or a ``PrimaryKeyConstraint``. Returns None when the table names
+    ``starrocks_primary_key`` or another ``starrocks_*_key``, or has no primary key.
+    """
+    opts = extract_dialect_options_as_case_insensitive(table)
+    if any(key_kwarg in opts for key_kwarg in TableInfoKey.KEY_KWARG_MAP):
+        return None
+    return [column.name for column in table.primary_key.columns] or None
+
+
+def inferred_primary_key_columns(table: sa_schema.Table) -> Optional[List[str]]:
+    """Return the key columns of a table that is created as a PRIMARY KEY table without naming a key model.
+
+    A table whose primary key is only implied (see :func:`implied_primary_key_columns`) becomes a PRIMARY KEY
+    table on those columns when they lead the table in key order, the shape StarRocks requires of a PRIMARY KEY
+    table. Otherwise CREATE TABLE sends no key clause, as earlier versions of the dialect did, and StarRocks makes
+    its default DUPLICATE KEY table. CREATE TABLE and the autogenerate comparison read the key from here, so they
+    agree on it. Returns None when no PRIMARY KEY is inferred.
+    """
+    key_columns = implied_primary_key_columns(table)
+    if not key_columns or [column.name for column in table.columns][: len(key_columns)] != key_columns:
+        return None
+    return key_columns
+
+
 def get_dialect_option(
     table: sa_schema.Table,
     key: str,
@@ -133,6 +160,12 @@ class TableAttributeNormalizer:
     # Matches spaces around closing parenthesis
     _CLOSE_PAREN_SPACE_PATTERN = re.compile(r'\s*(\)\s?)\s*')
     _COMMA_SPACE_PATTERN = re.compile(r'\s*,\s*')
+    _TIME_SLICE_PATTERN = re.compile(
+        r"\btime_slice\(\s*(?P<column>[^,()]+?)\s*,\s*"
+        r"(?:interval\s+(?P<interval>\d+)\s+(?P<unit>[a-z]+)|(?P<count>\d+)\s*,\s*'(?P<quoted_unit>[a-z]+)')"
+        r"(?:\s*,\s*'?(?P<boundary>floor|ceil)'?)?\s*\)",
+        re.IGNORECASE,
+    )
 
     @staticmethod
     def strip_identifier_backticks(sql: str) -> str:
@@ -306,9 +339,27 @@ class TableAttributeNormalizer:
         """
         if not partition:
             return partition
-        return TableAttributeNormalizer.normalize_column_identifiers(
+        normalized: str = TableAttributeNormalizer.normalize_column_identifiers(
             partition.partition_method if isinstance(partition, ReflectedPartitionInfo) else partition
         )
+        return TableAttributeNormalizer.normalize_time_slice_calls(normalized)
+
+    @staticmethod
+    def normalize_time_slice_calls(text: str) -> str:
+        """Rewrite every time_slice call to the form StarRocks reflects for FLOOR.
+
+        `time_slice(dt, INTERVAL 7 DAY)` and `time_slice(dt, 7, 'day', 'floor')` are the same
+        partitioning, but SHOW CREATE TABLE returns the second for FLOOR and the first
+        for CEIL, so both spellings, with or without the boundary, become
+        `time_slice(dt, 7, 'day', 'floor')`.
+        """
+        def canonical_call(match: re.Match[str]) -> str:
+            count: str = match.group('interval') or match.group('count')
+            unit: str = (match.group('unit') or match.group('quoted_unit')).lower()
+            boundary: str = (match.group('boundary') or 'floor').lower()
+            return f"time_slice({match.group('column')}, {int(count)}, '{unit}', '{boundary}')"
+
+        return TableAttributeNormalizer._TIME_SLICE_PATTERN.sub(canonical_call, text)
 
     @staticmethod
     def normalize_distribution_string(distribution: Union[ReflectedDistributionInfo, str]) -> Optional[str]:
@@ -397,3 +448,58 @@ def find_matching_parenthesis(text: str, start_index: int = 0) -> int:
 def gen_simple_qualified_name(table_name: str, schema: Optional[str] = None) -> str:
     """Generate a simple qualified name for a table."""
     return f"{schema}.{table_name}" if schema else table_name
+
+
+_SQL_STRING_LITERAL_BODY = re.compile(r"(?:[^'\\]|''|\\.)*", re.DOTALL)
+_SQL_STRING_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\x00", "b": "\b", "Z": "\x1a"}
+_FUNCTION_DEFAULT = re.compile(r"[A-Za-z_]\w*\s*\(.*\)", re.DOTALL)
+_KEYWORD_DEFAULT = re.compile(r"[A-Za-z_]\w*")
+
+
+def quote_sql_string_literal(value: str) -> str:
+    """
+    Render a string as the SQL literal StarRocks accepts: quotes doubled, backslashes and NUL escaped.
+
+    This is what SQLAlchemy emits for ``server_default="..."``, so a reflected default renders back to the DDL
+    that created it.
+    """
+    escaped = value.replace("\\", "\\\\").replace("'", "''").replace("\x00", "\\0")
+    return f"'{escaped}'"
+
+
+def unquote_sql_string_literal(text: str) -> Optional[str]:
+    """
+    Return the value of a single-quoted SQL string literal, or None if ``text`` is not one.
+    """
+    text = text.strip()
+    if len(text) < 2 or text[0] != "'" or text[-1] != "'" or not _SQL_STRING_LITERAL_BODY.fullmatch(text, 1, len(text) - 1):
+        return None
+    body = text[1:-1].replace("''", "'")
+    return re.sub(r"\\(.)", lambda m: _SQL_STRING_ESCAPES.get(m.group(1), m.group(1)), body, flags=re.DOTALL)
+
+
+def strip_wrapping_parentheses(text: str) -> str:
+    """
+    Remove the parentheses that wrap the whole expression, however many, as in ``((uuid()))``.
+    """
+    text = text.strip()
+    while text.startswith("(") and find_matching_parenthesis(text, 0) == len(text) - 1:
+        text = text[1:-1].strip()
+    return text
+
+
+def canonical_server_default(sql: str) -> Tuple[str, str]:
+    """
+    Reduce a column default, as SQL text, to a ``(kind, value)`` pair that is equal for equal defaults.
+
+    - ``("literal", value)`` for a quoted string literal, compared by its decoded value;
+    - ``("expression", text)`` for a function call or keyword such as ``uuid()`` or ``CURRENT_TIMESTAMP``, with
+      wrapping parentheses removed and the case and spacing normalised, as these are case insensitive;
+    - ``("literal", text)`` for anything else, such as a bare number.
+    """
+    unwrapped = strip_wrapping_parentheses(sql)
+    if (decoded := unquote_sql_string_literal(unwrapped)) is not None:
+        return "literal", decoded
+    if _FUNCTION_DEFAULT.fullmatch(unwrapped) or _KEYWORD_DEFAULT.fullmatch(unwrapped):
+        return "expression", re.sub(r"\s+", "", unwrapped).lower()
+    return "literal", unwrapped

@@ -14,7 +14,8 @@
 
 """Unit tests for materialized view REFRESH clause extraction during reflection."""
 
-import pytest
+from sqlalchemy import testing
+from sqlalchemy.testing import fixtures
 
 from starrocks.common.params import TableInfoKeyWithPrefix
 from starrocks.reflection import StarRocksTableDefinitionParser
@@ -51,9 +52,8 @@ def _reflect_partition_by(partition_clause: str) -> str:
     return str(state.table_options.get(TableInfoKeyWithPrefix.PARTITION_BY))
 
 
-@pytest.mark.parametrize(
-    "partition_clause, expected",
-    [
+class ReflectionMVRefreshTest(fixtures.TestBase):
+    @testing.combinations(
         # Simple column partition.
         ("PARTITION BY province", "province"),
         # Regression: a partition expression referencing an identifier that begins with "as"
@@ -61,15 +61,12 @@ def _reflect_partition_by(partition_clause: str) -> str:
         # terminator that matched the "AS" inside "ASset_dt", cutting the expression down to
         # "date_trunc('day',".
         ("PARTITION BY date_trunc('day', asset_dt)", "date_trunc('day', asset_dt)"),
-    ],
-)
-def test_mv_partition_by_fully_extracted(partition_clause, expected):
-    assert _reflect_partition_by(partition_clause) == expected
+        argnames="partition_clause, expected",
+    )
+    def test_mv_partition_by_fully_extracted(self, partition_clause, expected):
+        assert _reflect_partition_by(partition_clause) == expected
 
-
-@pytest.mark.parametrize(
-    "refresh_clause, expected",
-    [
+    @testing.combinations(
         # Plain periodic async — the original working case.
         ("REFRESH ASYNC EVERY(INTERVAL 1 HOUR)", "ASYNC EVERY(INTERVAL 1 HOUR)"),
         # Regression: a moment prefix before ASYNC must NOT truncate the clause. The refresh
@@ -82,7 +79,24 @@ def test_mv_partition_by_fully_extracted(partition_clause, expected):
         # Bare schemes (no period) are unaffected.
         ("REFRESH DEFERRED ASYNC", "DEFERRED ASYNC"),
         ("REFRESH MANUAL", "MANUAL"),
-    ],
-)
-def test_mv_refresh_clause_fully_extracted(refresh_clause, expected):
-    assert _reflect_refresh(refresh_clause) == expected
+        argnames="refresh_clause, expected",
+    )
+    def test_mv_refresh_clause_fully_extracted(self, refresh_clause, expected):
+        assert _reflect_refresh(refresh_clause) == expected
+
+    def test_comments_naming_clauses_are_not_read_as_them(self):
+        """A column comment and the MV comment that say PARTITION BY, REFRESH or AS SELECT, as StarRocks prints them."""
+        parser = StarRocksTableDefinitionParser.__new__(StarRocksTableDefinitionParser)
+        ddl = (
+            'CREATE MATERIALIZED VIEW `mv` (`k` COMMENT "no PARTITION BY k, 12\\" wide", `v`)\n'
+            'COMMENT "was \\"REFRESH ASYNC EVERY (INTERVAL 1 DAY)\\", AS SELECT 1"\n'
+            "DISTRIBUTED BY HASH(`k`) BUCKETS 1 \n"
+            "REFRESH MANUAL\n"
+            'PROPERTIES (\n"replication_num" = "1"\n)\n'
+            "AS SELECT k, v FROM t;"
+        )
+        state = parser._parse_mv_ddl("mv", ddl, schema="db")
+
+        assert str(state.table_options.get(TableInfoKeyWithPrefix.REFRESH)) == "MANUAL"
+        assert TableInfoKeyWithPrefix.PARTITION_BY not in state.table_options
+        assert state.definition == "SELECT k, v FROM t"

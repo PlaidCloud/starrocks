@@ -20,10 +20,11 @@ avoiding the complexity of mocking the full reflection flow.
 """
 
 from unittest.mock import Mock
+import warnings
 
 from alembic.operations import ops
-from alembic.testing import eq_
 from sqlalchemy import Column, MetaData, Table
+from sqlalchemy.testing import eq_, expect_raises_message, fixtures
 
 from starrocks.alembic.compare import _autogen_for_views, compare_view
 from starrocks.alembic.ops import AlterViewOp, CreateViewOp, DropViewOp
@@ -33,14 +34,16 @@ from starrocks.datatype import VARCHAR
 from starrocks.sql.schema import View
 
 
-class TestAutogenerateViews:
+class AutogenerateViewsTest(fixtures.TestBase):
     """Test full autogenerate flow with mock inspector.
 
     These tests use mock inspector to test CREATE/DROP operations which require
     get_view_names() functionality.
     """
 
-    def setup_method(self, method):
+    __requires__ = ("sqlalchemy_2",)
+
+    def setup_test(self):
         self.mock_inspector = Mock()
         self.mock_autogen_context = Mock()
         self.mock_autogen_context.inspector = self.mock_inspector
@@ -171,14 +174,16 @@ class TestAutogenerateViews:
         eq_(op.view_name, 'my_test_view')
 
 
-class TestCompareView:
+class CompareViewTest(fixtures.TestBase):
     """Test compare_view function directly (without full autogen flow).
 
     This approach avoids complex mocking of reflect_table and tests the core
     comparison logic with real SQLAlchemy Table/View objects.
     """
 
-    def setup_method(self, method):
+    __requires__ = ("sqlalchemy_2",)
+
+    def setup_test(self):
         self.mock_autogen_context = Mock()
         self.mock_autogen_context.dialect = Mock()
         self.mock_autogen_context.dialect.name = 'starrocks'
@@ -277,14 +282,7 @@ class TestCompareView:
     # ========================================================================
 
     def test_alter_view_comment_none_to_value(self):
-        """ALTER COMMENT: None → value (generates AlterViewOp with warning).
-
-        StarRocks does not support altering comment via ALTER VIEW currently.
-        Compare generates AlterViewOp with the new comment for future compatibility.
-        A warning is issued to inform users about current limitation.
-        """
-        import warnings
-
+        """ALTER COMMENT: None → value (generates AlterViewOp, with no warning)."""
         upgrade_ops = ops.UpgradeOps([])
 
         # Database view (no comment)
@@ -317,17 +315,14 @@ class TestCompareView:
 
             # Validate reverse (existing/database) values for downgrade
             eq_(op.existing_comment, None)  # Changed (was None)
-            eq_(op.existing_definition, None)  # Not changed
+            eq_(op.existing_definition, 'SELECT 1')  # Carried, to recreate the view
             eq_(op.existing_security, None)  # Not changed
 
             # Should have warning about comment not supported
-            assert len(w) == 1
-            assert "does not support altering view comments" in str(w[0].message)
+            eq_(len(w), 0)
 
     def test_alter_view_comment_value_to_none(self):
-        """ALTER COMMENT: value → None (generates AlterViewOp with warning)."""
-        import warnings
-
+        """ALTER COMMENT: value → None (generates AlterViewOp)."""
         upgrade_ops = ops.UpgradeOps([])
 
         # Database view (with comment)
@@ -361,17 +356,14 @@ class TestCompareView:
             eq_(op.security, None)  # Not changed
 
             # Validate reverse (existing/database) values for downgrade
-            eq_(op.existing_definition, None)  # Not changed
+            eq_(op.existing_definition, 'SELECT 1')  # Carried, to recreate the view
             eq_(op.existing_comment, 'Old comment')  # Changed (was 'Old comment')
             eq_(op.existing_security, None)  # Not changed
 
-            assert len(w) == 1
-            assert "does not support altering view comments" in str(w[0].message)
+            eq_(len(w), 0)
 
     def test_alter_view_comment_value_to_different(self):
-        """ALTER COMMENT: value1 → value2 (generates AlterViewOp with warning)."""
-        import warnings
-
+        """ALTER COMMENT: value1 → value2 (generates AlterViewOp)."""
         upgrade_ops = ops.UpgradeOps([])
 
         # Database view (old comment)
@@ -405,12 +397,11 @@ class TestCompareView:
             eq_(op.security, None)  # Not changed
 
             # Validate reverse (existing/database) values for downgrade
-            eq_(op.existing_definition, None)  # Not changed
+            eq_(op.existing_definition, 'SELECT 1')  # Carried, to recreate the view
             eq_(op.existing_comment, 'Old comment')  # Changed
             eq_(op.existing_security, None)  # Not changed
 
-            assert len(w) == 1
-            assert "does not support altering view comments" in str(w[0].message)
+            eq_(len(w), 0)
 
     def test_alter_view_comment_no_change(self):
         """ALTER COMMENT: No change (identical comment)."""
@@ -437,13 +428,11 @@ class TestCompareView:
         eq_(len(upgrade_ops.ops), 0)
 
     # ========================================================================
-    # ALTER VIEW - Security (StarRocks limitation - not supported via ALTER)
+    # ALTER VIEW - Security (applied with ALTER VIEW ... SET SECURITY)
     # ========================================================================
 
     def test_alter_view_security_none_to_invoker(self):
-        """ALTER SECURITY: None → INVOKER (generates AlterViewOp with warning)."""
-        import warnings
-
+        """ALTER SECURITY: None → INVOKER (generates AlterViewOp)."""
         upgrade_ops = ops.UpgradeOps([])
 
         # Database view (no security)
@@ -477,58 +466,24 @@ class TestCompareView:
             eq_(op.existing_definition, None)  # Not changed
             eq_(op.existing_comment, None)  # Not changed
 
-            assert len(w) == 1
-            assert "does not support altering view security" in str(w[0].message)
+            eq_(len(w), 0)
 
-    def test_alter_view_security_invoker_to_none(self):
-        """ALTER SECURITY: INVOKER → None (generates AlterViewOp with warning)."""
-        import warnings
-
+    def test_omitted_security_is_left_alone(self):
+        """A metadata view without starrocks_security keeps the INVOKER security it has in the database."""
         upgrade_ops = ops.UpgradeOps([])
-
-        # Database view (with security)
-        conn_view = self._create_reflected_view(
-            'my_test_view',
-            definition='SELECT 1',
-            security='INVOKER'
-        )
-
-        # Metadata view (no security)
+        conn_view = self._create_reflected_view('my_test_view', definition='SELECT 1', security='INVOKER')
         meta_view = View('my_test_view', MetaData(), definition='SELECT 1')
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            compare_view(
-                self.mock_autogen_context,
-                upgrade_ops,
-                None,
-                'my_test_view',
-                conn_view,
-                meta_view
-            )
+            compare_view(self.mock_autogen_context, upgrade_ops, None, 'my_test_view', conn_view, meta_view)
 
-            eq_(len(upgrade_ops.ops), 1)
-            op = upgrade_ops.ops[0]
-            assert isinstance(op, AlterViewOp)
-
-            # Validate forward (new/metadata) values - only security changed
-            eq_(op.definition, None)  # Not changed
-            eq_(op.comment, None)  # Not changed
-            assert op.security is None or op.security == ReflectionViewDefaults.security()  # Changed (removed)
-
-            # Validate reverse (existing/database) values for downgrade
-            eq_(op.existing_definition, None)  # Not changed
-            eq_(op.existing_comment, None)  # Not changed
-            eq_(op.existing_security, 'INVOKER')  # Changed (was INVOKER)
-
-            assert len(w) == 1
-            assert "does not support altering view security" in str(w[0].message)
+            eq_(upgrade_ops.ops, [])
+            eq_(len(w), 0)
 
     def test_alter_view_security_change_value(self):
-        """ALTER SECURITY: INVOKER → NONE (generates AlterViewOp with warning).
+        """ALTER SECURITY: INVOKER → NONE (generates AlterViewOp).
         """
-        import warnings
-
         upgrade_ops = ops.UpgradeOps([])
 
         # Database view (INVOKER security)
@@ -566,8 +521,7 @@ class TestCompareView:
             eq_(op.existing_comment, None)  # Not changed
             eq_(op.existing_security, 'INVOKER')  # Changed (was INVOKER)
 
-            assert len(w) == 1
-            assert "does not support altering view security" in str(w[0].message)
+            eq_(len(w), 0)
 
     def test_alter_view_security_no_change(self):
         """ALTER SECURITY: No change (identical security)."""
@@ -599,8 +553,6 @@ class TestCompareView:
 
     def test_alter_view_columns_changed_with_definition(self):
         """ALTER COLUMNS: Changed together with definition (generates AlterViewOp with warning)."""
-        import warnings
-
         upgrade_ops = ops.UpgradeOps([])
 
         # Database view
@@ -643,10 +595,8 @@ class TestCompareView:
             # Note: Currently there's no warning for columns when definition changes
             # assert any("columns" in str(warning.message) for warning in w)
 
-    def test_alter_view_columns_only_raises_error(self):
-        """ALTER COLUMNS: Changed without definition (raises ValueError)."""
-        import pytest
-
+    def test_alter_view_columns_only(self):
+        """ALTER COLUMNS: Changed without definition (generates AlterViewOp with the unchanged definition)."""
         upgrade_ops = ops.UpgradeOps([])
 
         # Database view
@@ -668,16 +618,23 @@ class TestCompareView:
             definition='SELECT id, name FROM users'  # Same definition!
         )
 
-        # Should raise NotImplementedError
-        with pytest.raises(NotImplementedError, match="does not support altering view columns independently"):
-            compare_view(
-                self.mock_autogen_context,
-                upgrade_ops,
-                None,
-                'my_view',
-                conn_view,
-                meta_view
-            )
+        compare_view(
+            self.mock_autogen_context,
+            upgrade_ops,
+            None,
+            'my_view',
+            conn_view,
+            meta_view
+        )
+
+        eq_(len(upgrade_ops.ops), 1)
+        op = upgrade_ops.ops[0]
+        assert isinstance(op, AlterViewOp)
+        eq_(op.definition, 'SELECT id, name FROM users')
+        eq_([(col['name'], col.get('comment')) for col in op.columns], [('id', None), ('name', 'New comment')])
+        eq_(op.existing_definition, 'SELECT id, name FROM users')
+        eq_([(col['name'], col.get('comment')) for col in op.existing_columns], [('id', None), ('name', 'Old comment')])
+        eq_(op.security, None)
 
     def test_alter_view_columns_no_change(self):
         """ALTER COLUMNS: No change (identical columns)."""
@@ -736,28 +693,27 @@ class TestCompareView:
         eq_(len(upgrade_ops.ops), 0)
 
 
-class TestViewExceptions:
+class ViewExceptionsTest(fixtures.TestBase):
     """Test exception cases for View creation."""
+
+    __requires__ = ("sqlalchemy_2",)
 
     def test_view_without_definition_raises_error(self):
         """Test that creating a View without definition raises ValueError."""
-        import pytest
         m = MetaData()
-        with pytest.raises(ValueError, match="definition is required"):
+        with expect_raises_message(ValueError, "definition is required"):
             View('my_view', m)
 
     def test_view_with_invalid_definition_type_raises_error(self):
         """Test that creating a View with invalid definition type raises TypeError."""
-        import pytest
         m = MetaData()
-        with pytest.raises(TypeError, match="definition must be a string or a Selectable"):
+        with expect_raises_message(TypeError, "definition must be a string or a Selectable"):
             View('my_view', m, definition=123)  # Invalid type
 
     def test_view_with_none_definition_raises_error(self):
         """Test that explicitly passing None as definition raises ValueError."""
-        import pytest
         m = MetaData()
-        with pytest.raises(ValueError, match="definition is required"):
+        with expect_raises_message(ValueError, "definition is required"):
             View('my_view', m, definition=None)
 
     def test_view_with_selectable_definition(self):

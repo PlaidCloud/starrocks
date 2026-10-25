@@ -18,6 +18,7 @@ import logging
 
 from alembic.operations import Operations
 from sqlalchemy import MetaData
+from sqlalchemy.exc import CompileError
 
 from starrocks.alembic.ops import (
     AlterMaterializedViewOp,
@@ -36,11 +37,14 @@ from starrocks.alembic.ops import (
 )
 from starrocks.sql.ddl import (
     AlterMaterializedView,
+    AlterTableProperties,
     AlterView,
+    AlterViewSecurity,
     CreateMaterializedView,
     CreateView,
     DropMaterializedView,
     DropView,
+    group_properties_for_set,
 )
 from starrocks.sql.schema import MaterializedView, View
 
@@ -48,12 +52,54 @@ from starrocks.sql.schema import MaterializedView, View
 logger = logging.getLogger(__name__)
 
 
+def _view_to_recreate(op: AlterViewOp) -> View:
+    """Build the view CREATE OR REPLACE VIEW recreates for an AlterViewOp, without its security.
+
+    The definition and columns are the op's own when it has a definition, and the existing ones otherwise, as in
+    a comment-only change.
+
+    Raises:
+        CompileError: if the op has no definition to recreate the view with.
+    """
+    has_definition = op.definition is not None
+    definition = op.definition if has_definition else op.existing_definition
+    if not definition:
+        raise CompileError(
+            f"alter_view({op.view_name!r}) changes the comment, which StarRocks can only do by recreating the "
+            "view, so it needs the view's definition or existing_definition."
+        )
+    return View(
+        op.view_name,
+        MetaData(),
+        definition=definition,
+        schema=op.schema,
+        columns=op.columns if has_definition else op.existing_columns,
+        comment=op.comment,
+    )
+
+
+def _view_security_changes(op: AlterViewOp) -> bool:
+    """Return whether the op carries a security that differs from the existing one, or has no existing one."""
+    if op.security is None:
+        return False
+    return op.existing_security is None or str(op.security).upper() != str(op.existing_security).upper()
+
+
 @Operations.implementation_for(AlterViewOp)
-def alter_view(operations: Operations, op: AlterViewOp):
-    """Execute an ALTER VIEW statement."""
+def alter_view(operations: Operations, op: AlterViewOp) -> None:
+    """Execute the statements that apply an AlterViewOp, one at a time.
+
+    ALTER VIEW ... AS drops the view's comment, and nothing alters the comment alone, so an op that states a
+    comment, or an existing one, is applied as CREATE OR REPLACE VIEW with the full content. CREATE OR REPLACE
+    VIEW keeps the view's security whatever it says, so security is always changed with ALTER VIEW ... SET SECURITY.
+    """
     logger.debug("implementation alter_view: %s", op.view_name)
-    view = op.to_view()
-    operations.execute(AlterView(view))
+    if op.comment is not None or op.existing_comment is not None:
+        operations.execute(CreateView(_view_to_recreate(op), or_replace=True))
+    elif op.definition is not None:
+        operations.execute(AlterView(op.to_view()))
+    if _view_security_changes(op):
+        operations.execute(AlterViewSecurity(op.to_view(), op.security))
 
 
 @Operations.implementation_for(CreateViewOp)
@@ -78,15 +124,18 @@ def alter_materialized_view(operations: Operations, op: AlterMaterializedViewOp)
     """
     Execute ALTER MATERIALIZED VIEW statement.
 
-    Only supports altering mutable attributes: refresh, properties.
+    Only supports altering mutable attributes: refresh, properties. The downgrade of a property change whose
+    previous values could not be determined has neither, and does nothing. The refresh and the properties are
+    altered in statements of their own, so a failure of either stops the migration.
     """
     logger.debug("implementation alter_materialized_view: %s", op.view_name)
-    operations.execute(AlterMaterializedView(
-        mv_name=op.view_name,
-        schema=op.schema,
-        refresh=op.refresh,
-        properties=op.properties,
-    ))
+    if op.refresh is None and not op.properties:
+        logger.warning("Nothing to alter on materialized view %r: no refresh and no properties.", op.view_name)
+        return
+    if op.refresh is not None:
+        operations.execute(AlterMaterializedView(mv_name=op.view_name, schema=op.schema, refresh=op.refresh))
+    if op.properties:
+        operations.execute(AlterMaterializedView(mv_name=op.view_name, schema=op.schema, properties=op.properties))
 
 
 @Operations.implementation_for(CreateMaterializedViewOp)
@@ -164,11 +213,15 @@ def alter_table_order(operations, op: AlterTableOrderOp):
 
 
 @Operations.implementation_for(AlterTablePropertiesOp)
-def alter_table_properties(operations, op: AlterTablePropertiesOp):
-    from starrocks.sql.ddl import AlterTableProperties
-    operations.execute(
-        AlterTableProperties(op.table_name, op.properties, schema=op.schema)
-    )
+def alter_table_properties(operations: Operations, op: AlterTablePropertiesOp) -> None:
+    """Execute one ALTER TABLE ... SET per property, or per group of ``dynamic_partition.`` or ``binlog_`` ones.
+
+    One packet of several statements fails midway when the first starts a schema-change job, as
+    ``bloom_filter_columns`` does. Each statement is executed on its own, so the impl can wait for the
+    job to finish before the next one when ``starrocks_wait_for_schema_change`` is on.
+    """
+    for group in group_properties_for_set(op.properties):
+        operations.execute(AlterTableProperties(op.table_name, group, schema=op.schema))
 
 
 @Operations.implementation_for(AlterTableColumnsOp)

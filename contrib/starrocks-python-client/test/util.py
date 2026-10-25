@@ -1,0 +1,97 @@
+# Copyright 2021-present StarRocks, Inc. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import asyncio
+import re
+from typing import Any, Coroutine
+
+from sqlalchemy import testing, util
+from sqlalchemy.testing import config
+
+
+def normalize_sql(sql: str) -> str:
+    """Normalizes a SQL string for comparison."""
+    # Remove comments
+    sql = re.sub(r'--.*\n', '', sql)
+    # Replace newlines and tabs with spaces
+    sql = sql.replace('\n', ' ').replace('\t', '')
+    # Collapse multiple spaces into one
+    sql = re.sub(r'\s+', ' ', sql)
+    # Remove spaces around parentheses, commas, and equals for consistency
+    sql = re.sub(r'\s*\(\s*', '(', sql)
+    sql = re.sub(r'\s*\)\s*', ')', sql)
+    sql = re.sub(r'\s*,\s*', ',', sql)
+    sql = re.sub(r'\s*=\s*', '=', sql)
+    # Remove all paired backticks around identifiers
+    sql = re.sub(r'`([^`]+)`', r'\1', sql)
+    sql = re.sub(r'\'', '"', sql)
+
+    return sql.strip()
+
+
+def normalize_py_call(s: str) -> str:
+    """Collapse the whitespace in rendered Python calls, so line breaks and indentation are ignored."""
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r" , ", ", ", s)
+    s = re.sub(r"\( ", "(", s)
+    s = re.sub(r" \)", ")", s)
+    s = re.sub(r"\[ ", "[", s)
+    s = re.sub(r" \]", "]", s)
+    return s
+
+
+def run_coroutine(coroutine: Coroutine[Any, Any, Any]) -> Any:
+    """Run a coroutine from a test, under any ``--dburi``.
+
+    Under an async driver the plugin already runs each test in a greenlet inside its event loop, where
+    ``asyncio.run()`` refuses to start another, so the coroutine is awaited on that loop instead.
+    """
+    if config.db.dialect.is_async:
+        return util.await_only(coroutine)
+    return asyncio.run(coroutine)
+
+
+def _server_version(config: object) -> tuple:
+    return tuple(config.db.dialect.server_version_info or ())
+
+
+VIEW_SECURITY_NEEDS_3_4_1 = testing.skip_if("starrocks<3.4.1", "StarRocks has no view SECURITY before 3.4.1")
+STATISTIC_COLLECT_PROPERTY_MISSING = testing.skip_if(
+    lambda config: (version := _server_version(config)) < (3, 5, 10) or (4, 0, 0) <= version < (4, 0, 2),
+    "enable_statistic_collect_on_first_load is a table property from StarRocks 3.5.10 and 4.0.2",
+)
+FLAT_JSON_PROPERTIES_NEED_4_0 = testing.skip_if("starrocks<4.0", "flat_json.* are table properties from StarRocks 4.0")
+FLAT_JSON_NULL_AMONG_OBJECTS_READS_AS_EMPTY = testing.fails_if(
+    "starrocks>=4.0",
+    "Flat JSON, on by default from StarRocks 4.0, reads a JSON null stored with JSON objects back as {}: "
+    "StarRocks issue 81490",
+)
+DECIMAL256_NEEDS_4_0 = testing.skip_if("starrocks<4.0", "DECIMAL precision above 38 needs StarRocks 4.0")
+STRUCT_FIELD_NAMES_UNQUOTED = testing.skip_if(
+    "starrocks<4.1.1",
+    "Before 4.1.1 StarRocks prints STRUCT field names unquoted, so a name with a space cannot be read back",
+)
+TIME_SLICE_CEIL_PARTITION_NEEDS_3_4_1 = testing.skip_if(
+    "starrocks<3.4.1", "StarRocks before 3.4.1 refuses time_slice(..., ceil) in PARTITION BY"
+)
+MV_TEXT_REWRITTEN_BEFORE_4_0_6 = testing.skip_if(
+    "starrocks<4.0.6", "Before 4.0.6 StarRocks stores an MV definition rewritten, so its text is not compared"
+)
+MV_TEXT_STORED_AS_WRITTEN_FROM_4_0_6 = testing.skip_if(
+    "starrocks>=4.0.6", "From 4.0.6 StarRocks stores an MV definition as written, so its text is compared"
+)
+VIEW_TEXT_REWRITTEN_BEFORE_4_0_6 = testing.skip_if(
+    "starrocks<4.0.6",
+    "Before 4.0.6 StarRocks stores a view's SQL rewritten, and the backslash of an escape such as \\t is lost",
+)
