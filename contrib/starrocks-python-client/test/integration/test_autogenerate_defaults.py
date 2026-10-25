@@ -16,7 +16,7 @@
 
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import Column, MetaData, Table, func, inspect, testing, text
+from sqlalchemy import Column, MetaData, Table, func, inspect, literal, testing, text
 from sqlalchemy.testing import fixtures
 
 import starrocks.alembic  # noqa: F401
@@ -120,6 +120,15 @@ class ServerDefaultComparisonTest(_DefaultsTestBase):
 
         assert unquote_sql_string_literal(reflected.c.label.server_default.arg.text) == value
         assert self._diff_ops(connection, metadata, "default_literal") == []
+        assert "Detected DEFAULT change" not in caplog.text
+
+    @testing.requires.sqlalchemy_2
+    def test_expression_default_with_a_percent_converges(self, connection, metadata, caplog):
+        """An expression default compares as the text StarRocks reflects, so its ``%`` is not doubled."""
+        self._table(metadata, "default_percent", label=literal("50%"))
+        metadata.create_all(connection)
+
+        assert self._diff_ops(connection, metadata, "default_percent") == []
         assert "Detected DEFAULT change" not in caplog.text
 
     @testing.requires.sqlalchemy_2

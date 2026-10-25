@@ -363,9 +363,10 @@ class View(Table):
             # Compile Selectable to SQL string
             from sqlalchemy.sql import ClauseElement
 
+            from starrocks.dialect import stored_sql_text
+
             if isinstance(definition, ClauseElement):
-                compiled = definition.compile(compile_kwargs={"literal_binds": True})
-                view_info[TableObjectInfoKey.DEFINITION] = str(compiled)
+                view_info[TableObjectInfoKey.DEFINITION] = stored_sql_text(definition)
                 view_info[TableObjectInfoKey.SELECTABLE] = definition
             else:
                 # raise TypeError(f"definition must be str or Selectable, got {type(definition)}")

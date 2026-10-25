@@ -34,7 +34,6 @@ from alembic.operations.ops import (
 )
 from alembic.util import to_list
 from sqlalchemy import Column, __version__ as _sqlalchemy_version
-from sqlalchemy.engine import Dialect
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.sql import quoted_name, schema as sa_schema, sqltypes
@@ -74,6 +73,7 @@ from starrocks.common.utils import (
     extract_dialect_options_as_case_insensitive,
 )
 from starrocks.datatype import ARRAY, BOOLEAN, MAP, STRING, STRUCT, TINYINT, VARCHAR
+from starrocks.dialect import stored_sql_text
 from starrocks.engine.interfaces import ReflectedDistributionInfo, ReflectedPartitionInfo, ReflectedTableKeyInfo
 from starrocks.reflection import StarRocksTableDefinitionParser
 from starrocks.sql.schema import MaterializedView, View, tables_read_by_query
@@ -2694,7 +2694,6 @@ def compare_starrocks_column_autoincrement(
 
 
 def server_defaults_match(
-    dialect: Dialect,
     metadata_column: Column[Any],
     rendered_metadata_default: Optional[str],
     rendered_inspector_default: Optional[str],
@@ -2710,12 +2709,15 @@ def server_defaults_match(
     """
     if rendered_metadata_default is None or rendered_inspector_default is None:
         return False
-    metadata_sql = _metadata_default_sql(dialect, metadata_column, rendered_metadata_default)
+    metadata_sql = _metadata_default_sql(metadata_column, rendered_metadata_default)
     return utils.canonical_server_default(metadata_sql) == utils.canonical_server_default(rendered_inspector_default)
 
 
-def _metadata_default_sql(dialect: Dialect, metadata_column: Column[Any], rendered_metadata_default: str) -> str:
-    """The SQL a metadata column's server default stands for: a str is a literal, an expression is its text."""
+def _metadata_default_sql(metadata_column: Column[Any], rendered_metadata_default: str) -> str:
+    """The SQL a metadata column's server default stands for: a str is a literal, an expression is its text.
+
+    An expression is compiled to the text StarRocks reflects, so a ``%`` in it is not doubled.
+    """
     default = metadata_column.server_default
     if not isinstance(default, sa_schema.DefaultClause):
         return rendered_metadata_default
@@ -2723,7 +2725,7 @@ def _metadata_default_sql(dialect: Dialect, metadata_column: Column[Any], render
         return utils.quote_sql_string_literal(default.arg)
     if isinstance(default.arg, TextClause):
         return default.arg.text
-    return str(default.arg.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
+    return stored_sql_text(default.arg)
 
 
 def server_default_text(server_default: Any) -> Optional[str]:

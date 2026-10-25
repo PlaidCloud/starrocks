@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from functools import cache
 import logging
 import re
 from textwrap import dedent
@@ -59,7 +60,7 @@ from sqlalchemy.engine.interfaces import ExecutionContext
 #from sqlalchemy.engine.interfaces import ReflectedTableComment
 from sqlalchemy.engine.row import Row
 from sqlalchemy.sql import bindparam, operators, sqltypes
-from sqlalchemy.sql.elements import BinaryExpression, Grouping, TypeClause
+from sqlalchemy.sql.elements import BinaryExpression, ClauseElement, Grouping, TypeClause
 from sqlalchemy.sql.expression import Delete, Insert, Select, TableClause, Update
 
 from starrocks.common import utils
@@ -120,7 +121,6 @@ from .datatype import (
     JSONIndexType,
     JSONPathType,
     StructuredType,
-    quote_struct_field_name,
 )
 from .engine.interfaces import ReflectedMVState, ReflectedState, ReflectedViewState
 from .reflection import StarRocksInspector, StarRocksTableDefinitionParser
@@ -247,6 +247,21 @@ def require_server_version(
         )
 
 
+@cache
+def _dialect_leaving_percents_single() -> "StarRocksDialect":
+    """A StarRocks dialect with the ``named`` paramstyle, as Alembic configures one for offline SQL scripts."""
+    return StarRocksDialect(paramstyle="named")
+
+
+def stored_sql_text(clause: ClauseElement) -> str:
+    """Compile a clause to the SQL text StarRocks keeps and shows back, such as a view definition, values inline.
+
+    A dialect whose paramstyle does not format with ``%`` leaves each ``%`` single, as in the text StarRocks
+    reflects. :meth:`StarRocksDDLCompiler.sql_text` doubles it when the text goes into DDL.
+    """
+    return str(clause.compile(dialect=_dialect_leaving_percents_single(), compile_kwargs={"literal_binds": True}))
+
+
 class StarRocksTypeCompiler(MySQLTypeCompiler):
     """
     Compile a datatype to StarRocks' SQL type string.
@@ -346,17 +361,14 @@ class StarRocksTypeCompiler(MySQLTypeCompiler):
         return f"MAP<{key_type_sql}, {value_type_sql}>"
 
     def visit_STRUCT(self, type_: STRUCT, **kw: Any) -> str:
-        """Render ``STRUCT<name type, ...>``, with ``%`` in a field name doubled as in a column name.
+        """Render ``STRUCT<name type, ...>``, with each field name quoted by the identifier preparer.
 
-        The driver formats every statement with its parameters, which may be none, so a lone ``%`` would be read
-        as a placeholder.
+        The preparer quotes a field name as it quotes a column name: a name StarRocks reserves, such as ``key``,
+        or one that is not a plain lowercase identifier, is backquoted, and a ``%`` is doubled for a driver that
+        formats parameters with ``%``.
         """
-        double_percents = self.dialect.identifier_preparer._double_percents
-        fields_sql = []
-        for name, field_type in type_.field_tuples:
-            type_sql = self.process(field_type, **kw)
-            name_sql = quote_struct_field_name(name)
-            fields_sql.append(f"{name_sql.replace('%', '%%') if double_percents else name_sql} {type_sql}")
+        preparer = self.dialect.identifier_preparer
+        fields_sql = [f"{preparer.quote(name)} {self.process(field_type, **kw)}" for name, field_type in type_.field_tuples]
         return f"STRUCT<{', '.join(fields_sql)}>"
 
     def visit_HLL(self, type_, **kw):
@@ -726,12 +738,11 @@ class StarRocksDDLCompiler(MySQLDDLCompiler):
     def sql_text(self, text: Any) -> str:
         """Return SQL given as text, such as a view definition or a PARTITION BY clause, ready to splice into DDL.
 
-        The driver formats parameters into a statement with ``%``, so a ``%`` of the text, as in
-        ``str2date(s, '%Y-%m-%d')`` or ``date_format(d, '%Y')``, is doubled for a driver that does. Identifiers
-        and comments are escaped by SQLAlchemy already. A reflected clause object gives its text.
+        SQLAlchemy's ``post_process_text``, which its ``DDL`` and ``text()`` constructs use too, doubles each
+        ``%``, as in ``str2date(s, '%Y-%m-%d')``, for a driver that formats parameters into the statement with
+        ``%``. A reflected clause object gives its text.
         """
-        text = str(text)
-        return text.replace("%", "%%") if self.preparer._double_percents else text
+        return self.sql_compiler.post_process_text(str(text))
 
     def visit_create_index(self, create: sa_schema.CreateIndex, **kw: Any) -> str:  # type: ignore[override]
         """Compile ``CREATE INDEX name ON table (columns) [USING <type> [(properties)]] [COMMENT '...']``.

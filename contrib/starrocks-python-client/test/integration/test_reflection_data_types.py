@@ -275,20 +275,21 @@ class DataTypeReflectionTest(fixtures.TestBase):
 
     @STRUCT_FIELD_NAMES_UNQUOTED
     def test_struct_field_names_needing_quotes_are_created(self, connection):
-        """STRUCT field names that are not plain identifiers must be backquoted in the CREATE TABLE."""
+        """STRUCT field names that are not plain identifiers, or that StarRocks reserves, must be backquoted in the
+        CREATE TABLE."""
         table_name = "test_reflect_struct_quoted_fields"
         table = Table(
             table_name,
             MetaData(),
             Column("id_col", INTEGER()),
-            Column("struct_col", STRUCT(("a b", INTEGER()), ("Caps", VARCHAR(5)))),
+            Column("struct_col", STRUCT(("a b", INTEGER()), ("Caps", VARCHAR(5)), ("key", INTEGER()))),
             starrocks_distributed_by='HASH(id_col)',
             starrocks_properties={"replication_num": "1"},
         )
 
         reflected_table = self._create_and_reflect_table(connection, table_name, table)
 
-        assert [name for name, _ in reflected_table.c.struct_col.type.field_tuples] == ["a b", "Caps"]
+        assert [name for name, _ in reflected_table.c.struct_col.type.field_tuples] == ["a b", "Caps", "key"]
 
     def test_declared_double_round_trips_as_float(self, connection):
         """A declared DOUBLE must return the stored float, as a reflected DOUBLE does."""

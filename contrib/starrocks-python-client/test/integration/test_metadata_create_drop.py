@@ -14,7 +14,7 @@
 
 """``MetaData.create_all()`` and ``drop_all()`` with views and materialized views next to tables."""
 
-from sqlalchemy import Column, MetaData, Table, inspect, testing
+from sqlalchemy import Column, MetaData, Table, inspect, literal, select, testing, text
 from sqlalchemy.schema import CreateTable
 from sqlalchemy.testing import fixtures
 
@@ -73,6 +73,27 @@ class MetaDataCreateDropTest(fixtures.TestBase):
 
         metadata.drop_all(connection)
         assert not {"zz_base", "aa_view", "ab_mv"} & self._names(connection)
+
+    @testing.requires.sqlalchemy_2
+    def test_a_view_of_a_select_reads_its_columns(self, connection):
+        """A ``select()`` definition names a mixed-case and a reserved column as StarRocks reads them, and keeps a
+        literal's ``%``."""
+        metadata = MetaData()
+        base = Table(
+            "cd_select_base",
+            metadata,
+            Column("Id", INTEGER),
+            Column("select", VARCHAR(10)),
+            starrocks_duplicate_key="Id",
+            starrocks_distributed_by="HASH(Id) BUCKETS 1",
+        )
+        View("cd_select_view", metadata, definition=select(base.c.Id, base.c.select, literal("50%").label("pct")))
+        metadata.create_all(connection)
+        try:
+            connection.execute(base.insert(), [{"Id": 1, "select": "s"}])
+            assert connection.execute(text("SELECT * FROM cd_select_view")).all() == [(1, "s", "50%")]
+        finally:
+            metadata.drop_all(connection)
 
 
 class ReflectedTableRecreateTest(fixtures.TestBase):

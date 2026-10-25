@@ -482,9 +482,7 @@ class StarRocksImpl(MySQLImpl):
         Returns:
             True if the defaults are different, False if they are the same.
         """
-        if compare.server_defaults_match(
-            self.dialect, metadata_column, rendered_metadata_default, rendered_inspector_default
-        ):
+        if compare.server_defaults_match(metadata_column, rendered_metadata_default, rendered_inspector_default):
             return False
         return super().compare_server_default(
             inspector_column, metadata_column, rendered_metadata_default, rendered_inspector_default
